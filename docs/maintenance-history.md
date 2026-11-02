@@ -1330,3 +1330,7 @@ TCT详情及执行批次兼容旧式task-任务标识，继续要求字符串和
 - 完整SQL取数反馈行数/页数/耗时，不回显业务数据；进度投递失败不让查询失败，不增加任务截止。
 - 排查优先聚合、执行计划和必要明细；连接断开清理仍关闭规划器，销毁只读连接而不由回滚错误覆盖原故障。
 - 配套唯一性/关联/分页完整性、进度及断连清理回归；公开文档、依赖版本和代码包同步，实例真实EXPLAIN与原问题交付分别记录。
+
+### 1.58.1 (2026-11-02)
+
+Complete extraction exposed a second failure while serializing a large dataset. Add incremental JSON digests, chunked storage and validated catalog/recovery; keep old JSON compatibility, actual capacity budgets and independent derivation checks. Regression covers restart, exact amounts/nulls, other scopes, corruption, missing files, symlinks and failed writes. A separate synthetic replay exceeds 600 MB; real business acceptance remains separate.

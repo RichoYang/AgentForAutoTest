@@ -1,10 +1,12 @@
+import {datasetHash} from './dataset-json.js';
 import {buildWindowDataset} from './window-dataset.js';
 import {normalizeCalendarPeriod} from './calendar-period.js';
 export {normalizeCalendarPeriod} from './calendar-period.js';
 import {summarizeDataset} from './dataset-summary.js';
 import {transformDataset} from './dataset-transform.js';
 import {createHash} from 'node:crypto';
-const hash=v=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
+const hash=datasetHash;
+const sameJSON=(a,b)=>a===undefined||b===undefined?a===b:datasetHash(a)===datasetHash(b);
 const bad=m=>{throw Object.assign(new Error(m),{code:'REPORT_INPUT'});};
 const scale=10n**12n;
 const number=v=>{if(typeof v==='number'&&!Number.isSafeInteger(v))bad('金额数值须为安全整数或精确十进制字符串，不能使用浮点数');const s=String(v);if(!/^-?\d{1,40}(?:\.\d{1,12})?$/.test(s))bad('期间金额必须为精确十进制值，空值不能猜零');const [a,b='']=s.replace(/^-/,'').split('.');return (s[0]==='-'?-1n:1n)*(BigInt(a)*scale+BigInt(b.padEnd(12,'0')));};
@@ -91,11 +93,11 @@ export async function verifyPeriodDataset(data,load,options={}){
   if(kind==='window_counts'){
    if(data.derivation.version!==1)bad('不支持的窗口配方版本');const args=data.derivation.args;
    await read(args.populationRef);for(const source of args.sources)await read(source.datasetRef);
-   const rebuilt=await buildWindowDataset(args,read,options);for(const k of ['rows','columns','numericColumns','readAt','readThroughAt','snapshotId','derivation'])if(JSON.stringify(data[k])!==JSON.stringify(rebuilt[k]))bad('窗口统计与完整来源重算不一致');
+   const rebuilt=await buildWindowDataset(args,read,options);for(const k of ['rows','columns','numericColumns','readAt','readThroughAt','snapshotId','derivation'])if(!sameJSON(data[k],rebuilt[k]))bad('窗口统计与完整来源重算不一致');
   }else if(kind==='dataset_transform'||kind==='dataset_summary'){
    if(kind==='dataset_transform'?data.derivation.version!=='tree-filter-v1':data.derivation.version!==1)bad('不支持的数据整理配方版本');
    const base=await read(data.derivation.args.datasetRef),rebuilt=(kind==='dataset_summary'?summarizeDataset:transformDataset)(data.derivation.args,base);
-   for(const key of ['rows','columns','numericColumns','readAt','readThroughAt','snapshotId','derivation'])if(JSON.stringify(data[key])!==JSON.stringify(rebuilt[key]))bad('整理数据与完整来源重算不一致');
+   for(const key of ['rows','columns','numericColumns','readAt','readThroughAt','snapshotId','derivation'])if(!sameJSON(data[key],rebuilt[key]))bad('整理数据与完整来源重算不一致');
   }else if(kind==='left_lookup'){await read(data.derivation.datasetRef);for(const l of data.derivation.lookups)await read(l.datasetRef);}
   else {
    const args=data.derivation.args;
@@ -104,7 +106,7 @@ export async function verifyPeriodDataset(data,load,options={}){
     for(const source of args.sources)for(const row of dependencies.get(source.datasetRef).rows)if(sourcePeriod(row,source,args.period,null)!==sourcePeriod(row,source,args.period,'calendar-v2'))bad('历史期间配方存在未统一月份；请用原始来源重新period_dataset并核验，不能沿用旧补零结果');
    }
    const rebuilt=await buildPeriodDataset(args,ref=>dependencies.get(ref),{...options,legacy:!args.periodNormalization});
-   for(const key of ['rows','columns','numericColumns','readAt','readThroughAt','snapshotId','derivation'])if(JSON.stringify(data[key])!==JSON.stringify(rebuilt[key]))bad('期间派生数据与原来源重算不一致，不能核验或交付');
+   for(const key of ['rows','columns','numericColumns','readAt','readThroughAt','snapshotId','derivation'])if(!sameJSON(data[key],rebuilt[key]))bad('期间派生数据与原来源重算不一致，不能核验或交付');
   }
   state.done.add(token);
  }finally{state.visiting.delete(token);}

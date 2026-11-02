@@ -131,3 +131,9 @@ Mongo参数诊断现在区分筛选项位置、类型、字段、层级、聚合
 完整SQL取数在开始、分页推进和收集结束时反馈已读行数、页数及耗时；分页通知最多每五秒一次，通知失败不影响已授权读取。收集结束后的“正在保存核验”不表示最终答案或文件已通过核验。进度不包含业务行值、游标值或凭据。长查询仍无整任务截止，单次I/O等待与授权检查保持。
 
 规划器应先核对原问题范围与必要字段，优先用受控聚合验证，再取必要明细；大范围/复杂关联先看explain_query。没有用户期间依据时不能擅自缩短时间范围。只读连接断开时，清理仍销毁连接并关闭规划器，避免回滚失败掩盖原故障或留下子进程。新程序需要按实例维护流程在空闲时重启，无新增依赖或必需配置。完整迁移保留既有任务、数据集和证据；其它操作系统和完整跨机验证以部署记录为准。
+
+### 1.58.1 Large datasets
+
+Complete large datasets use row chunks and an atomically published manifest instead of a single JSON string. Reads verify chunk paths, symlink boundaries, sizes, row coverage, hashes and the complete logical data digest. Old JSON files retain the same digest semantics. Save failures remove only this attempt's unpublished chunks. Real disk budgets include all chunks; no total row or task duration limit is added. Catalog reads verify chunks without materializing every row. Cache eviction affects only memory copies backed by storage.
+
+Migration must preserve both manifests and their row chunks. Older programs cannot resume unfinished tasks that use the new format. Chunking removes the single-string engine boundary; it does not promise unlimited memory, disk or file delivery. Derivations and monetary/file checks still run. No new dependencies or external permissions are required.

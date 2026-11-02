@@ -1,3 +1,4 @@
+import {datasetHash,datasetBytes} from '../shared/dataset-json.js';
 import {buildWindowDataset} from '../shared/window-dataset.js';
 import {summarizeDataset,percentage,divide} from '../shared/dataset-summary.js';
 import {transformDataset} from '../shared/dataset-transform.js';
@@ -54,8 +55,9 @@ export class ReportDatasets {
   // A short final page proves completion; exactly-at-cap requires one look-ahead.
   const ref=`dataset-${randomUUID()}`,data={rows,columns:[...statement.columns,...(statement.rowKey?[statement.rowKey.column]:[])],complete,numericColumns:statement.numericColumns??[],queryHash,queryDefinition:{sql:statement.sql,params:statement.params.map(v=>this.secrets.reduce((text,secret)=>text.split(secret).join('[已隐藏]'),String(v)))}};
   if(statement.recipe){const original=JSON.stringify(statement.recipe),safe=this.secrets.reduce((text,secret)=>text.split(secret).join('[已隐藏]'),original);data.recipe={...JSON.parse(safe),replayable:original===safe};}
-  const dataHash=createHash('sha256').update(JSON.stringify(data)).digest('hex');
-  let readAt=new Date().toISOString();if(complete&&this.storage){await this.check();const saved=await this.storage.save(ref,data,this.snapshotId);readAt=saved.readAt;await this.check();}
+  let dataHash;
+  let readAt=new Date().toISOString();if(complete&&this.storage){await this.check();const saved=await this.storage.save(ref,data,this.snapshotId);readAt=saved.readAt;dataHash=saved.dataHash;await this.check();}
+  dataHash??=datasetHash(data);
   this.remember(ref,{...data,snapshotId:this.snapshotId,readAt});
   const result={datasetRef:ref,queryHash,dataHash,snapshotId:this.snapshotId,readAt,queryDefinition:queryPreview(data.queryDefinition),rowCount:rows.length,complete,truncated:!complete,partial:!complete,columns:data.columns,preview:preview(rows,this.previewRows),stage:complete?'分组数据已完整读取':'达到报表行数上限；数据不完整，不能合成完整报表'};
   if(complete&&this.reuseQueries)this.collected.set(signature,result);return result;
@@ -98,13 +100,13 @@ export class ReportDatasets {
  async restore(ref){
   if(this.datasets.has(ref)){const data=this.datasets.get(ref);this.datasets.delete(ref);this.datasets.set(ref,data);return data;}
   await this.check();if(!this.storage)return null;
-  let saved;try{saved=await this.storage.get(ref);}catch{throw new ReportInputError('数据集范围、文件或摘要校验失败；先调用list_datasets核对本任务已有成果，必要时重新取数。');}await this.check();const bytes=Buffer.byteLength(JSON.stringify(saved.data));
+  let saved;try{saved=await this.storage.get(ref);}catch{throw new ReportInputError('数据集范围、文件或摘要校验失败；先调用list_datasets核对本任务已有成果，必要时重新取数。');}await this.check();
   if(saved.data.rows.length>this.maxRows)throw new ReportInputError('恢复数据集超过当前授权行数上限');
   this.sourceScopes.set(ref,saved.scope);const data={...saved.data,readAt:saved.readAt,snapshotId:saved.snapshotId};this.remember(ref,data);return data;
  }
  // Only evict memory copies backed by validated task storage; disk references stay immutable.
  remember(ref,data){
-  const size=Buffer.byteLength(JSON.stringify(data));
+  const size=datasetBytes(data,this.cacheBytes);
   if(this.datasets.has(ref)){this.bytes-=Buffer.byteLength(JSON.stringify(this.datasets.get(ref)));this.datasets.delete(ref);}
   if(this.storage){while(this.bytes+size>this.cacheBytes&&this.datasets.size){const oldest=this.datasets.keys().next().value;this.bytes-=Buffer.byteLength(JSON.stringify(this.datasets.get(oldest)));this.datasets.delete(oldest);}if(size>this.cacheBytes)return;}
   else if(this.bytes+size>this.cacheBytes)throw new ReportInputError('无持久存储时数据超过内存预算；请配置任务输出目录后接续');
@@ -115,7 +117,7 @@ export class ReportDatasets {
   if(!left?.complete||!right?.complete||!left.columns.includes(args.leftKey)||!right.columns.includes(args.rightKey))throw new ReportInputError('差集核对需要两个本任务完整数据集及各自实际主键列');
   const index=(data,key)=>{const map=new Map();for(const row of data.rows){const value=row[key];if(value===null||value===''||map.has(value))throw new ReportInputError('差集核对主键必须非空且唯一');map.set(value,row);}return map;};
   const l=index(left,args.leftKey),r=index(right,args.rightKey),onlyLeft=[...l].filter(([key])=>!r.has(key)).map(([,row])=>row),onlyRight=[...r].filter(([key])=>!l.has(key)).map(([,row])=>row);
-  const dataHash=createHash('sha256').update(JSON.stringify({left:[...l.keys()].sort(),right:[...r.keys()].sort(),onlyLeft,onlyRight})).digest('hex');
+  const dataHash=datasetHash({left:[...l.keys()].sort(),right:[...r.keys()].sort(),onlyLeft,onlyRight});
   await this.check();
   return {leftCount:l.size,rightCount:r.size,matchedCount:l.size-onlyLeft.length,onlyLeftCount:onlyLeft.length,onlyRightCount:onlyRight.length,onlyLeft:preview(onlyLeft,this.previewRows),onlyRight:preview(onlyRight,this.previewRows),dataHash,previewLimited:onlyLeft.length>this.previewRows||onlyRight.length>this.previewRows,note:'差异按真实主键比较；两份数据的业务范围和取数时间仍需核对，不能仅凭行数推断缺少谁。'};
  }
@@ -238,7 +240,7 @@ export class ReportDatasets {
   const datasetRef=`dataset-${randomUUID()}`,composed={rows:rows.map(row=>Object.fromEntries(headers.map((h,i)=>[h,row[i]]))),columns:headers,complete:true,numericColumns:args.columns.filter(c=>c.total===true||['add','subtract','min','divide'].includes(c.value.op)||(c.value.op==='field'&&sources.get(c.value.source).numericColumns?.includes(c.value.column))).map(c=>c.label)};
   const snapshotIds=[...new Set([...sources.values()].map(d=>d.snapshotId))].sort(),snapshotId=snapshotIds.length===1?snapshotIds[0]:createHash('sha256').update(JSON.stringify(snapshotIds)).digest('hex');
   const readAt=[...sources.values()].map(d=>d.readAt).filter(Boolean).sort()[0]??new Date().toISOString();
-  const dataHash=createHash('sha256').update(JSON.stringify(composed)).digest('hex');
+  const dataHash=datasetHash(composed);
   const id=`report-${randomUUID()}`,filename=id+'.csv';await this.check();await mkdir(this.directory,{recursive:true,mode:0o700});
   const temp=path.join(this.directory,filename+'.tmp'),file=path.join(this.directory,filename);
   try{await writeFile(temp,csv,{mode:0o600,flag:'wx'});await this.check();await rename(temp,file);await this.check();}
@@ -406,7 +408,7 @@ function csvCell(v){let s=String(v??'');if(/^[\s\uFEFF]*[=+@-]/.test(s)&&!/^-[0-
 
 function preview(rows,limit){const out=[];let bytes=0;for(const row of rows.slice(0,limit)){bytes+=Buffer.byteLength(JSON.stringify(row));if(bytes>8000)break;out.push(row);}return out;}
 
-const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const hash=datasetHash;
 function uniqueKeys(data,column){const keys=new Set();for(const row of data.rows){const key=row[column];if(typeof key!=='string'||!key||keys.has(key))throw new ReportInputError('覆盖核验主键必须为非空唯一字符串；同一对象多月份/分类不是唯一维度，不要丢弃重复行；一对多请用linked_group_dataset按实际明细粒度分组，保留无明细主对象用join.type=left');keys.add(key);}return keys;}
 function queryPreview(definition){return definition?{sql:definition.sql.slice(0,200),params:definition.params.slice(0,3).map(v=>v.slice(0,80)),limited:definition.sql.length>200||definition.params.length>3||definition.params.some(v=>v.length>80)}:undefined;}
 
