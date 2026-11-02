@@ -5,8 +5,10 @@ export function controlMetadata(el,{readNavigationSelectors=[]}={}){
  if(!visible||el.disabled||el.getAttribute('aria-disabled')==='true'||el.matches('.disabled,.is-disabled,.ant-picker-cell-disabled')||el.closest('[contenteditable="true"],[data-sensitive],[data-agentos-secret]'))return {visible:false};
  const tag=el.tagName.toLowerCase(),calendar=el.closest('.el-picker-panel,.ant-picker-panel,[role="grid"]'),option=el.matches('[role="option"],.el-select-dropdown__item,.ant-select-item-option'),pagination=el.closest('.el-pagination,.ant-pagination,[role="navigation"][aria-label*="pag" i]');
  const row=el.matches('tr[data-row-key],[role="row"][data-row-key]');
+ const reviewedNavigation=readNavigationSelectors.some(selector=>el.matches(selector));
+ const primaryLabel=reviewedNavigation?(el.getAttribute('aria-label')||el.getAttribute('title')||el.querySelector(':scope > h1,:scope > h2,:scope > h3,:scope > h4,:scope > p')?.innerText):null;
  const title=el.matches('[role="menuitem"],[role="treeitem"]')?el.querySelector(':scope > .el-submenu__title,:scope > .ant-menu-submenu-title'):null;
- let label=((title??el).innerText||el.getAttribute('placeholder')||el.getAttribute('aria-label')||el.getAttribute('title')||el.getAttribute('name')||el.id||'').trim().slice(0,100);
+ let label=(primaryLabel||(title??el).innerText||el.getAttribute('placeholder')||el.getAttribute('aria-label')||el.getAttribute('title')||el.getAttribute('name')||el.id||'').trim().slice(0,100);
  const fieldLabel=el.closest('.el-form-item,.ant-form-item')?.querySelector('.el-form-item__label,.ant-form-item-label,label')?.innerText?.trim();
  if(tag==='input'&&fieldLabel)label=fieldLabel+' / '+label;
  const panel=el.matches('.el-collapse-item__header,.ant-collapse-header');
@@ -20,7 +22,7 @@ export function controlMetadata(el,{readNavigationSelectors=[]}={}){
  if(pagination&&!label)label=tag==='input'?'前往页码':el.matches('.btn-next,.ant-pagination-next')?'下一页':el.matches('.btn-prev,.ant-pagination-prev')?'上一页':'';
  if(!label)return {visible:true,label,type:null};
  const mutation=/立即执行|执行一次|单次执行|立即运行|运行一次|重放|试运行|测试接口|接口测试|新增|创建|保存|修改|编辑|删除|启动|停止|触发|重跑|终止|发布|启用|禁用|提交|支付|注销|退出|作废|驳回|撤回|取消订单|关闭订单|确认收货|\b(add|create|save|update|edit|delete|remove|start|stop|trigger|execute|run|restart|reset|kill|publish|enable|disable|submit|approve|pay|logout|cancel)\b/i;
- const navigation=readNavigationSelectors.some(selector=>el.matches(selector))||el.matches('.ant-card-hoverable,[role="link"],[role="menuitem"],[role="treeitem"],[role="tab"],.el-submenu__title,.ant-menu-submenu-title');
+ const navigation=reviewedNavigation||el.matches('.ant-card-hoverable,[role="link"],[role="menuitem"],[role="treeitem"],[role="tab"],.el-submenu__title,.ant-menu-submenu-title');
  let type=null,kind='action';
  if(tag==='input'){
   const identity=[el.name,el.id,el.placeholder,el.getAttribute('aria-label')].join(' ');
