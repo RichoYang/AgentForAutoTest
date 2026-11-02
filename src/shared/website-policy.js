@@ -14,7 +14,12 @@ export function websiteRequestAllowed(base, request, manualLogin=false, readEndp
  if(u.origin!==new URL(base).origin || !['GET','HEAD','POST','OPTIONS'].includes(request.method))return false;
  const parts=decodeURIComponent(u.pathname).replace(/([a-z])([A-Z])/g,'$1 $2').split(/[\/._\s-]/).filter(Boolean);
  if(parts.some(x=>writeAction.test(x)))return false;
- for(const [key,value] of u.searchParams) if(writeAction.test(key)||/^(action|operation|command|cmd|method)$/i.test(key)&&writeAction.test(value)) return false;
+ const reviewedEndpoint=readEndpoints.find(e=>e.reviewed===true&&e.method===request.method&&e.path===u.pathname);
+ for(const [key,value] of u.searchParams){
+   const values=reviewedEndpoint?.queryParameters?.[key];
+   const fixedFilter=Object.hasOwn(reviewedEndpoint?.queryParameters??{},key)&&Array.isArray(values)&&values.includes(value);
+   if(writeAction.test(key)&&!fixedFilter||/^(action|operation|command|cmd|method)$/i.test(key)&&writeAction.test(value))return false;
+ }
  const tail=u.pathname.split('/').filter(Boolean).at(-1)??'index';
  if(manualLogin && /^(login|signin|sign-in|authenticate|auth|captcha|verify)(?:\.[a-z]+)?$/i.test(tail))return true;
  if(request.method==='POST') {
@@ -35,7 +40,12 @@ export function cleanWebsiteText(value) {
 export function validateWebsiteReadEndpoints(value){
  if(!Array.isArray(value)||value.length>32)throw new Error('网站只读接口配置必须为最多32项');
  for(const e of value){
-  if(!e||Object.keys(e).some(k=>!['method','path','reviewed'].includes(k))||!['GET','POST'].includes(e.method)||e.reviewed!==true||typeof e.path!=='string'||!/^\/[A-Za-z0-9_./-]+$/.test(e.path)||e.path.includes('..')||e.path.includes('//'))throw new Error('网站只读接口必须为审核后的固定路径和GET/POST方法');
+  if(!e||Object.keys(e).some(k=>!['method','path','reviewed','queryParameters'].includes(k))||!['GET','POST'].includes(e.method)||e.reviewed!==true||typeof e.path!=='string'||!/^\/[A-Za-z0-9_./-]+$/.test(e.path)||e.path.includes('..')||e.path.includes('//'))throw new Error('网站只读接口必须为审核后的固定路径和GET/POST方法');
+  if(e.queryParameters!==undefined){
+   const filters=e.queryParameters;
+   if(!filters||typeof filters!=='object'||Array.isArray(filters)||Object.keys(filters).length>32)throw new Error('只读筛选参数必须为固定值映射');
+   for(const [key,values]of Object.entries(filters))if(!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)||/^(?:action|operation|command|cmd|method|__proto__|constructor|prototype)$/i.test(key)||/password|secret|token|credential/i.test(key)||!Array.isArray(values)||!values.length||values.length>32||values.some(v=>typeof v!=='string'||!v.length||v.length>100||/[\x00-\x1f\x7f]/.test(v)))throw new Error('只读筛选仅允许审核后的固定非敏感值；不能覆盖动作或执行参数');
+  }
   const parts=e.path.replace(/([a-z])([A-Z])/g,'$1 $2').split(/[\/._\s-]/).filter(Boolean);
   if(parts.some(p=>writeAction.test(p)))throw new Error('网站只读接口不能包含修改操作');
  }
