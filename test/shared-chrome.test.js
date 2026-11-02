@@ -69,8 +69,17 @@ test('empty and iframe shells are incomplete; safe snapshots preserve hash route
  const q={baseUrl:e.baseUrl,token:'empty',tool:'browser_snapshot'};let r=await page.evaluate(chromePage,q);assert.equal(r.partial,true);assert.equal(r.pageStatus,'empty');assert.match(r.url,/#\/report\/accrued/);
  await page.setContent('<iframe src="about:blank"></iframe>');r=await page.evaluate(chromePage,q);assert.equal(r.pageStatus,'frames');assert.equal(r.partial,true);assert.equal(r.frameCount,1);
 });
-test('empty Chrome snapshots wait boundedly, recheck access and can recover',async()=>{
- let snapshots=0,checks=0;const b=new SharedChromeBrowser(async()=>{checks++;return true;},async q=>q.operation==='find'?{tabId:'1',windowId:'1'}:(++snapshots<3?{pageStatus:'empty',partial:true,controls:[]}:{pageStatus:'ready',pageText:'Report ready',controls:[]}),async()=>{});
- const r=await b.run({id:'j'},e,'browser_open');assert.equal(r.pageStatus,'ready');assert.equal(snapshots,3);assert.ok(checks>=4);
- let allowed=true;const c=new SharedChromeBrowser(async()=>allowed,async q=>q.operation==='find'?{tabId:'1',windowId:'1'}:{pageStatus:'empty',partial:true,controls:[]},async()=>{allowed=false;});await assert.rejects(c.run({id:'k'},e,'browser_open'),/授权/);
+test('empty Chrome probes keep waiting without holding the shared browser queue and recheck access',async()=>{
+ const {waitForBrowser}=await import('../src/runner/browser-readiness.js');let snapshots=0,checks=0;const b=new SharedChromeBrowser(async()=>{checks++;return true;},async q=>q.operation==='find'?{tabId:'1',windowId:'1'}:q.operation==='inspect'?{url:e.baseUrl}:(++snapshots<9?{pageStatus:'empty',partial:true,controls:[]}:{pageStatus:'ready',pageText:'Report ready',controls:[]}));
+ const r=await waitForBrowser((tool,args)=>b.run({id:'j'},e,tool,args),'browser_open',{},async()=>{},async()=>{});assert.equal(r.pageStatus,'ready');assert.equal(snapshots,9);assert.ok(checks>=10);
+ let allowed=true;const c=new SharedChromeBrowser(async()=>allowed,async q=>q.operation==='find'?{tabId:'1',windowId:'1'}:q.operation==='inspect'?{url:e.baseUrl}:{pageStatus:'empty',partial:true,controls:[]});await assert.rejects(waitForBrowser((tool,args)=>c.run({id:'k'},e,tool,args),'browser_open',{},async()=>{},async()=>{allowed=false;}),/授权/);
+});
+test('visible loading masks defer reads and actions until content is ready, then safe empty query results count as ready',async t=>{
+ const browser=await chromium.launch({headless:true});t.after(()=>browser.close());const page=await browser.newPage();await page.route('**/*',r=>r.fulfill({contentType:'text/html; charset=utf-8',body:'<h1>Report shell</h1><div class="ant-spin-spinning">加载中</div><button onclick="window.clicked=true">查询</button>'}));await page.goto(e.baseUrl);
+ const q={baseUrl:e.baseUrl,token:'loading',tool:'browser_snapshot'};assert.equal((await page.evaluate(chromePage,q)).waitingForPage,true);assert.equal((await page.evaluate(chromePage,{...q,tool:'browser_click',args:{ref:'stale'}})).waitingForPage,true);assert.equal(await page.evaluate(()=>window.clicked),undefined);
+ await page.locator('.ant-spin-spinning').evaluate(el=>el.remove());const ready=await page.evaluate(chromePage,q);assert.equal(ready.pageStatus,'ready');const ref=ready.controls.find(c=>c.label==='查询').ref;await page.evaluate(chromePage,{...q,tool:'browser_click',args:{ref}});assert.equal(await page.evaluate(()=>window.clicked),true);
+ await page.setContent('<p>查询结果为0条</p>');assert.equal((await page.evaluate(chromePage,q)).pageStatus,'ready');
+});
+test('failed same-origin startup script exposes concrete failure without treating empty business results as a network fault',async t=>{
+ const browser=await chromium.launch({headless:true});t.after(()=>browser.close());const page=await browser.newPage();await page.route('**/*',r=>r.request().url().endsWith('startup.js')?r.fulfill({status:503,contentType:'text/javascript',body:''}):r.fulfill({contentType:'text/html; charset=utf-8',body:'<div id="app"></div><script src="/app/startup.js"></script>'}));await page.goto(e.baseUrl);const result=await page.evaluate(chromePage,{baseUrl:e.baseUrl,token:'failed-resource',tool:'browser_snapshot'});assert.equal(result.pageStatus,'empty');assert.equal(result.failedResources[0].status,503);
 });

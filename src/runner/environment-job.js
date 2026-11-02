@@ -1,3 +1,4 @@
+import {waitForBrowser} from './browser-readiness.js';
 import {reusableReportSources} from './report-reuse.js';
 import {createHash} from 'node:crypto';
 import {controlPost} from './control-client.js';
@@ -26,7 +27,7 @@ export async function executeEnvironmentJob(job, config, emit) {
   let result, environment;
   const sourceResult=(job.context??[]).filter(x=>x.kind==='analysis_turn').at(-1)?.result;
   const sourceQueryContext=await buildSourceQueryContext(sourceResult);
-  try { const cfg = await loadEnvironments(); environment = cfg.environments[plan.environmentId];const reuse=environment?.kind==='mysql'?await reusableReportSources(config.dataDir??path.dirname(config.worktreeRoot),job,createHash('sha256').update(JSON.stringify(environment)).digest('hex')):[]; result = environment?.queries[plan.queryId]?.mode === 'investigate' ? await investigateEnvironment(plan, emit, environment.kind==='website' ? {tools:async()=>websiteTools(job,config),checkpoint:job.browserCheckpoint} : {preferReuse:reuse.length>0,reportJob:job,dataDir:config.dataDir??path.dirname(config.worktreeRoot),exportDirectory:path.join(config.dataDir??path.dirname(config.worktreeRoot),'exports',job.id),investigationContext:reportInvestigationContext(job),sourceQueryContext}) : await readEnvironment(plan); }
+  try { const cfg = await loadEnvironments(); environment = cfg.environments[plan.environmentId];const reuse=environment?.kind==='mysql'?await reusableReportSources(config.dataDir??path.dirname(config.worktreeRoot),job,createHash('sha256').update(JSON.stringify(environment)).digest('hex')):[]; result = environment?.queries[plan.queryId]?.mode === 'investigate' ? await investigateEnvironment(plan, emit, environment.kind==='website' ? {tools:async()=>websiteTools(job,config,emit),checkpoint:job.browserCheckpoint} : {preferReuse:reuse.length>0,reportJob:job,dataDir:config.dataDir??path.dirname(config.worktreeRoot),exportDirectory:path.join(config.dataDir??path.dirname(config.worktreeRoot),'exports',job.id),investigationContext:reportInvestigationContext(job),sourceQueryContext}) : await readEnvironment(plan); }
   catch (error) {
     const diagnostic = failureDiagnostic(error);
     if (/^错误码：BROWSER_BRIDGE\b/.test(diagnostic)) return { outcome:'needs_clarification', browserLoginRequired:true,
@@ -62,7 +63,7 @@ export async function executeEnvironmentJob(job, config, emit) {
   } catch(error){const local=phase==='environment_claim';const reason=local?(error.statusCode?'本机环境领取请求被拒绝或回执不可用，未执行本轮环境查询。':'本机控制请求回执无法核实，已保留任务；未盲目重复执行环境查询。'):'环境步骤等待或结果整理中断；未据此确认业务故障。';return {outcome:'blocked',summary:reason,finalMessage:reason+'\n'+failureDiagnostic(error),investigationStopped:{code:local?(error.code??'CONTROL_REQUEST_REJECTED'):'ENVIRONMENT_INTERRUPTED',reason},verification:[]};} finally { clearInterval(heartbeat); }
 }
 
-function websiteTools(job,config){
+export function websiteTools(job,config,emit=async()=>{}){
  return {spec:[{tool:'connection',args:{},description:'打开从原问题或项目源码发现的业务网页，复用本机登录会话'},
  {tool:'report_wrong_site',args:{},description:'当前页面属于其他系统或不是原问题的目标应用时报告入口不匹配，返回原问题继续查找正确入口，不扩大权限'},
  {tool:'browser_open',args:{},description:'查看当前业务网页；本工具不跳转，进入已核实的路由应使用browser_navigate'}, {tool:'browser_snapshot',args:{},description:'刷新页面文本和引用'},
@@ -71,7 +72,7 @@ function websiteTools(job,config){
  {tool:'browser_fill',args:{ref:'当前form-field或search引用',text:'原问题所需的临时输入值'},description:'临时填写表单以复现问题，不按回车、不保存提交；只读日期输入应点击打开日历；注意页面可能自动保存，先结合源码核实事件'},
  {tool:'browser_select',args:{ref:'当前select引用',value:'返回的选项value'},description:'选择筛选项或表单选项以复现原问题，不保存提交'},
  {tool:'browser_search',args:{ref:'当前search引用',text:'查询条件'},description:'填写搜索条件，再点击查询'}],
- async run(tool,args={}){if(tool==='report_wrong_site')return {websiteMismatch:true,partial:true,stage:'当前网站与问题目标不匹配，需要重新发现正确入口；不是用户权限不足'};const response=await fetch(`${config.serverUrl}/api/v1/jobs/${encodeURIComponent(job.id)}/website-tool`,{method:'POST',signal:AbortSignal.timeout(45000),headers:{authorization:`Bearer ${config.runnerToken}`,'content-type':'application/json'},body:JSON.stringify({leaseId:job.lease.id,runnerId:job.lease.runnerId,tool,args})});const value=await response.json();if(!response.ok)throw new Error(value.error??'网页工具执行失败');return value.result;},async close(){}};
+ async run(tool,args={}){if(tool==='report_wrong_site')return {websiteMismatch:true,partial:true,stage:'当前网站与问题目标不匹配，需要重新发现正确入口；不是用户权限不足'};return waitForBrowser(async(nextTool,nextArgs)=>{const response=await fetch(`${config.serverUrl}/api/v1/jobs/${encodeURIComponent(job.id)}/website-tool`,{method:'POST',signal:AbortSignal.timeout(45000),headers:{authorization:`Bearer ${config.runnerToken}`,'content-type':'application/json'},body:JSON.stringify({leaseId:job.lease.id,runnerId:job.lease.runnerId,tool:nextTool,args:nextArgs})});const value=await response.json();if(!response.ok)throw new Error(value.error??'网页工具执行失败');return value.result;},tool,args,emit);},async close(){}};
 }
 
 // Original requirements must not be replaced by the short purpose of one query round.

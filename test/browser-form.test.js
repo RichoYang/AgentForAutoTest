@@ -47,7 +47,7 @@ test('non-date forms support temporary native selects and textarea; no Enter or 
  assert.equal(await page.locator('#kind').inputValue(),'b');assert.equal(await page.locator('#description').inputValue(),'temporary values');assert.equal(await page.locator('body').getAttribute('data-submitted'),null);
 });
 test('shared Chrome dispatches new tools and refreshes snapshot after actions',async()=>{
- let acted=false;const calls=[];const b=new SharedChromeBrowser(async()=>true,async q=>{calls.push(q);if(q.operation==='find')return {tabId:'1',windowId:'1'};if(q.script.includes('"tool":"browser_snapshot"'))return {controls:[],pageText:'new form'};acted=true;return {acted:true};});
+ let acted=false;const calls=[];const b=new SharedChromeBrowser(async()=>true,async q=>{calls.push(q);if(q.operation==='find')return {tabId:'1',windowId:'1'};if(q.operation==='inspect')return {url:baseUrl};if(q.script.includes('"tool":"browser_snapshot"'))return {controls:[],pageText:'new form'};acted=true;return {acted:true};});
  for(const tool of ['browser_navigate','browser_fill']){const r=await b.run({id:'form'}, {baseUrl},tool,{url:baseUrl+'#/create',text:'date'});assert.equal(r.pageText,'new form');}
  assert.ok(acted);assert.equal(calls.filter(x=>x.operation==='execute').length,4);
 });

@@ -2,13 +2,18 @@
 export function chromePage(request) {
  const {baseUrl,token,tool,args={}}=request;
  const base=new URL(baseUrl), current=new URL(location.href);
+ if(current.protocol==='chrome-error:'||location.href==='about:blank')return {waitingForPage:true,pageStatus:current.protocol==='chrome-error:'?'network_error':'loading',partial:true,stage:'等待网络或页面导航恢复'};
  const prefix=base.pathname.replace(/\/$/,'');
  const visible=el=>!!el.getClientRects().length&&getComputedStyle(el).visibility!=='hidden'&&getComputedStyle(el).display!=='none';
- const credentialFormVisible=[...document.querySelectorAll('input[type=password]')].some(visible);
+ const busy=current.origin===base.origin&&(document.readyState==='loading'||[...document.querySelectorAll('[aria-busy="true"],.ant-spin-spinning,.el-loading-mask,.ant-skeleton-active')].some(visible));
+ if(busy)return {waitingForPage:true,pageStatus:'loading',partial:true,stage:'页面或业务内容正在加载，尚未开始操作'};
+ const credentialFormVisible=current.origin===base.origin&&[...document.querySelectorAll('input[type=password]')].some(visible);
  const authPath=/\/(?:login|signin|sign-in|authenticate|auth|captcha|verify)(?:[/?#]|$)/i.test(current.pathname+current.hash);
+ if(current.origin===base.origin&&authPath&&!credentialFormVisible&&(!document.body?.innerText.trim()||/^(?:加载中|正在加载|Loading)[.。…\s]*$/i.test(document.body.innerText.trim())))return {waitingForPage:true,pageStatus:'loading',partial:true,stage:'登录页面尚未渲染，正在等待'};
  if(current.origin===base.origin&&authPath)return {loginRequired:true,credentialFormVisible,verificationRequired:!credentialFormVisible,stage:'等待日常Chrome页面登录',message:`需要登录 ${base.href}；可在本机登录，或直接回复原任务卡“账号 / 密码”，登录后自动继续。`};
  if(current.origin!==base.origin || !(current.pathname===prefix||current.pathname.startsWith(prefix+'/')))
   return {error:'浏览器已离开本次批准的应用范围，请重新确认页面'};
+ if(/^(?:加载中|正在加载|Loading)[.。…\s]*$/i.test(document.body?.innerText.trim()??''))return {waitingForPage:true,pageStatus:'loading',partial:true,stage:'业务页面仍在加载'};
  const write=/新增|创建|保存|修改|编辑|删除|启动|停止|执行|触发|重跑|终止|发布|启用|禁用|提交|审批|支付|注销|退出|\b(add|create|save|update|edit|delete|remove|start|stop|trigger|execute|run|restart|reset|kill|publish|enable|disable|submit|approve|pay|logout)\b/i;
  const terminalWrite=/保存|删除|启动|停止|触发|重跑|终止|发布|提交|审批通过|支付|注销|退出|\b(save|delete|remove|start|stop|trigger|execute|run|restart|kill|publish|submit|approve|pay|logout)\b/i;
  const read=/查看|详情|日志|查询|搜索|下一页|上一页|刷新|展开|收起|search|query|view|detail|log|next|previous|refresh/i;
@@ -90,6 +95,7 @@ export function chromePage(request) {
   const t=node.textContent.trim();if(t){lines.push(t);size+=t.length;}
  }
  const empty=!lines.length&&!controls.length,frameCount=document.querySelectorAll('iframe,frame').length;
+ const failedResources=performance.getEntriesByType('resource').filter(r=>['script','link','css'].includes(r.initiatorType)&&r.responseStatus>=400).map(r=>({status:r.responseStatus,type:r.initiatorType}));
  const pageStatus=empty?(document.readyState!=='complete'?'loading':frameCount?'frames':'empty'):'ready';
- return {stage:empty?'尚未读取到业务内容':'已读取日常Chrome业务页面',partial:empty,pageStatus,readyState:document.readyState,frameCount,url:current.origin+current.pathname+current.hash,pageText:lines.join('\n'),controls,blockedRequests:[],rows:[],...(empty?{message:frameCount?'当前只读到页面外壳，存在内嵌页面，尚未取得报表内容；不能认定没有数据或没有权限。':'页面尚无可读正文和菜单；可能尚未加载完成，不能认定没有数据或没有权限。'}:{}),note:'复用日常Chrome登录态；仅当前批准应用的可见内容。浏览器正常加载网络请求，不拦截登录或权限初始化。'};
+ return {stage:empty?'尚未读取到业务内容':'已读取日常Chrome业务页面',partial:empty,pageStatus,readyState:document.readyState,frameCount,...(empty&&failedResources.length?{failedResources}:{}),url:current.origin+current.pathname+current.hash,pageText:lines.join('\n'),controls,blockedRequests:[],rows:[],...(empty?{message:frameCount?'当前只读到页面外壳，存在内嵌页面，尚未取得报表内容；不能认定没有数据或没有权限。':'页面尚无可读正文和菜单；可能尚未加载完成，不能认定没有数据或没有权限。'}:{}),note:'复用日常Chrome登录态；仅当前批准应用的可见内容。浏览器正常加载网络请求，不拦截登录或权限初始化。'};
 }
