@@ -15,3 +15,12 @@ test('reviewed filter config rejects action keys, credential keys, wildcard and 
  validate([{method:'GET',path:'/api/users/context',reviewed:true}]);
  assert.equal(allowed(base,request('/api/cloud/listByFilters?enable=2'),false,[read]),false);
 });
+
+test('JSON and plain text credential fields are masked without changing request IDs and status',async()=>{
+ const {cleanWebsiteText}=await import('../src/shared/website-policy.js');
+ const text=cleanWebsiteText('{"identitytoken":"PRIVATE_IDENTITY","Authorization":"Bearer PRIVATE_BEARER","password":"PRIVATE_PASS","apiKey":"PRIVATE_API","requestId":"REQ-123","status":500} cookie=PRIVATE_COOKIE');assert.doesNotMatch(text,/PRIVATE_/);assert.match(text,/REQ-123/);assert.match(text,/500/);
+});
+test('reviewed custom UI selectors remain fixed component identifiers, not arbitrary model selectors',async()=>{
+ const {validateWebsiteNavigationSelectors:validateSelectors}=await import('../src/shared/website-controls.js');validateSelectors(['.application-card','#apiList','.card.clickable']);
+ for(const s of [['body'],['*'],['.card input'],['input[type=password]'],['.secret-card'],['.card:has(input)']])assert.throws(()=>validateSelectors(s));
+});

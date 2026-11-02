@@ -41,6 +41,9 @@
                 ]
               }
             }
+          ],
+          "readNavigationSelectors": [
+            ".application-card"
           ]
         }
       }
