@@ -124,3 +124,11 @@ test('explicit text delivery omits irrelevant file workflow while file requests 
  const file=await buildPrompt({...base,tabularDelivery:true,originalQuestion:'导出完整CSV'}, {}, {instruction:'readonly',metadata:{}},source.sourceSync,[],source.workspace);
  assert.match(text,/数据仍须完整、精确和独立核验/);assert.doesNotMatch(text,/上方evidence是程序按文件ID/);assert.match(file,/上方evidence是程序按文件ID/);assert.ok(Buffer.byteLength(text)<Buffer.byteLength(file)-4000);
 });
+
+test('planner is closed even when readonly tool cleanup fails',async()=>{
+ let closed=0,choices=0;
+ await assert.rejects(investigateEnvironment(plan(),async()=>{},{load:async()=>cfg,credential:async()=>({}),reportJob:job,
+  tools:async()=>({spec:[{tool:'connection'},{tool:'select'}],run:async tool=>tool==='select'?{rows:[{id:'synthetic'}]}:{},close:async()=>{throw Error('connection already closed');}}),
+  planner:async()=>({next:async()=>choices++===0?{tool:'select',arguments:'{}'}:{tool:'finish',summary:'Retain gathered evidence',complete:false},close:async()=>{closed++;}})}),/connection already closed/);
+ assert.equal(closed,1);
+});

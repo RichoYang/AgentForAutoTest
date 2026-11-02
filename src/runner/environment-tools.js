@@ -201,7 +201,9 @@ export function groupedDatasetStatement(args,tables,types,q,valueSets=new Map(),
  const singleton=cursor&&(!linked||(owner===args.rightTable&&(args.join?.type??'inner')==='inner'&&primaryKeys.get(args.leftTable)?.length===1&&primaryKeys.get(args.leftTable)[0]===args.join.leftColumn));
  const rawProjection=singleton&&args.aggregates.every(a=>a.op==='count'&&(a.column==null||a.column===pk[0]&&(!linked||a.table===owner)));
  const projected=rawProjection?base.sql.replace(/^SELECT .*? FROM /,`SELECT ${quoted.join(', ')}, ${base.columns.map(name=>'1 AS `'+name+'`').join(', ')} FROM `):null;
- const order=cursor?[...cursor.expressions,...quoted.filter(q=>!cursor.expressions.includes(q))]:quoted;
+ // A verified unique cursor already totally orders these rows/groups. Extra
+ // projected fields defeat index ordering on MySQL and repeat a wide filesort per page.
+ const order=cursor?cursor.expressions:quoted;
  return {...base,...(cursor?{cursor,batchSize:50}:groupNames.length>12?{batchSize:Math.max(5,Math.floor(1000/(groupNames.length+base.columns.length)))}:{}),sql:projected?projected+` ORDER BY ${order.join(', ')}`:base.sql.replace(/^SELECT /,`SELECT ${quoted.join(', ')}, `)+` GROUP BY ${quoted.join(', ')} ORDER BY ${order.join(', ')}`,columns:[...groupNames,...base.columns],...(args.rowKey?{rowKey:{column:args.rowKey,fields:groupNames}}:{}),numericColumns:args.aggregates.filter(a=>['sum','avg','count','count_distinct'].includes(a.op)||numericTypes.has(types.get(a.table??args.table)?.get(a.column))).map(a=>a.as)};
 }
 
@@ -209,7 +211,7 @@ export async function createEnvironmentTools(e, q, cred, adapters = {}) {
   if(e.kind==='tct')return createTctTools(e,q,cred,adapters);
   const secrets = [cred.username, cred.password]; let conn, token, active = true;
   const configs = new Map(), tables = new Map(), columnTypes = new Map(), tableEngines=new Map(), primaryKeys=new Map(), valueSets = new Map();
-  const datasets=new ReportDatasets({deploymentScope:{projectId:adapters.reportJob?.projectId,environment:adapters.reportJob?.sourceEnvironment??e.tier},reuseQueries:true,dataBudgetBytes:q.exportDataBudgetBytes??Number.MAX_SAFE_INTEGER,snapshotWindowMs:q.exportSnapshotWindowMs??null,originalQuestion:adapters.originalQuestion,datasetScopes:adapters.datasetScopes,scope:createHash('sha256').update(JSON.stringify(e)).digest('hex'),secrets,maxRows:q.exportMaxRows,previewRows:q.maxRows,directory:adapters.exportDirectory,authorize:adapters.authorize,active:()=>active});
+  const datasets=new ReportDatasets({deploymentScope:{projectId:adapters.reportJob?.projectId,environment:adapters.reportJob?.sourceEnvironment??e.tier},reuseQueries:true,dataBudgetBytes:q.exportDataBudgetBytes??Number.MAX_SAFE_INTEGER,snapshotWindowMs:q.exportSnapshotWindowMs??null,originalQuestion:adapters.originalQuestion,datasetScopes:adapters.datasetScopes,scope:createHash('sha256').update(JSON.stringify(e)).digest('hex'),secrets,maxRows:q.exportMaxRows,previewRows:q.maxRows,directory:adapters.exportDirectory,authorize:adapters.authorize,active:()=>active,onProgress:adapters.onProgress});
   const mongo=e.kind==='mongodb'?createMongoBackend(e,q,cred,{...adapters,datasets,valueSets}):null;
   const request = adapters.fetch ?? boundedFetch;
   const readCache = new Map(); let readCacheBytes = 0;
@@ -418,5 +420,5 @@ export async function createEnvironmentTools(e, q, cred, adapters = {}) {
 
   };
   const visibleSpec=mongo?spec.filter((item,index)=>item.tool!=='linked_group_dataset'&&spec.findIndex(x=>x.tool===item.tool)===index):spec;
-  return { spec:visibleSpec, run, close: async ({ abort = false } = {}) => { active = false; mongo?.close(); token = null; readCache.clear(); datasets.clear(); await browser?.close(); if (conn) { try { if (!abort) await conn.rollback(); } finally { conn.destroy(); conn = null; } } } };
+  return { spec:visibleSpec, run, close: async ({ abort = false } = {}) => { active = false; mongo?.close(); token = null; readCache.clear(); datasets.clear(); await browser?.close(); if (conn) { try { if (!abort) await conn.rollback(); } catch { /* Readonly teardown: a disconnected session cannot rollback; destroy still releases it. */ } finally { conn.destroy(); conn = null; } } } };
 }

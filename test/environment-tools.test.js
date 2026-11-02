@@ -474,3 +474,9 @@ test('null predicates use validated fields and fixed SQL without interpolating a
  }
  assert.throws(()=>selectStatement({table:'orders',columns:['id'],filters:[{column:'unknown',op:'is_null'}]},tables,q),QueryInputError);
 });
+
+test('readonly connection cleanup destroys disconnected sessions without replacing gathered results',async()=>{
+ let destroyed=0;const mysql={createConnection:async()=>({query:async sql=>String(typeof sql==='string'?sql:sql.sql).startsWith('SHOW GRANTS')?[[{Grants:'GRANT SELECT ON `demo`.* TO test'}]]:[[]],execute:async()=>[[]],rollback:async()=>{throw Error('already disconnected');},destroy:()=>{destroyed++;}})};
+ const tools=await createEnvironmentTools({kind:'mysql',host:'db',port:3306,database:'demo'},{tables:['orders'],maxRows:5,timeoutMs:1000},credentials,{mysql});
+ await tools.run('connection');await assert.doesNotReject(tools.close());assert.equal(destroyed,1);
+});

@@ -14,8 +14,8 @@ export class ReportInputError extends Error {constructor(message){super(message)
 
 // Task-scoped evidence can resume under renewed authorization; never shared as knowledge.
 export class ReportDatasets {
- constructor({maxRows,previewRows=20,directory,authorize=async()=>{},active=()=>true,secrets=[],scope,datasetScopes=[],originalQuestion='',cacheBytes=16_000_000,snapshotWindowMs=null,dataBudgetBytes=Number.MAX_SAFE_INTEGER,reuseQueries=false,deploymentScope={}}){
-  this.scope=scope;this.sourceScopes=new Map();this.datasetScopes=[...new Set([scope,...datasetScopes].filter(Boolean))];this.deploymentScope=deploymentScope;this.reuseQueries=reuseQueries;this.cacheBytes=cacheBytes;this.snapshotWindowMs=snapshotWindowMs;this.originalQuestion=originalQuestion;this.snapshotId=randomUUID();this.storage=directory&&scope?new TaskDatasetStore(directory,scope,{maxBytes:dataBudgetBytes,additionalScopes:datasetScopes}):null;
+ constructor({maxRows,previewRows=20,directory,authorize=async()=>{},active=()=>true,secrets=[],scope,datasetScopes=[],originalQuestion='',cacheBytes=16_000_000,snapshotWindowMs=null,dataBudgetBytes=Number.MAX_SAFE_INTEGER,reuseQueries=false,deploymentScope={},onProgress=async()=>{}}){
+  this.onProgress=onProgress;this.scope=scope;this.sourceScopes=new Map();this.datasetScopes=[...new Set([scope,...datasetScopes].filter(Boolean))];this.deploymentScope=deploymentScope;this.reuseQueries=reuseQueries;this.cacheBytes=cacheBytes;this.snapshotWindowMs=snapshotWindowMs;this.originalQuestion=originalQuestion;this.snapshotId=randomUUID();this.storage=directory&&scope?new TaskDatasetStore(directory,scope,{maxBytes:dataBudgetBytes,additionalScopes:datasetScopes}):null;
   this.secrets=secrets.filter(Boolean);this.maxRows=maxRows==='all'?Number.MAX_SAFE_INTEGER:maxRows;this.previewRows=Math.min(previewRows,20);this.directory=directory;this.authorize=authorize;this.active=active;this.collected=new Map();this.datasets=new Map();this.bytes=0;this.files=0;
  }
  async check(){if(!this.active())throw new ReportInputError('报表查询已结束');await this.authorize();if(!this.active())throw new ReportInputError('报表查询已结束');}
@@ -26,7 +26,9 @@ export class ReportDatasets {
   const previous=this.reuseQueries?this.collected.get(signature):null;
   if(previous){const d=await this.restore(previous.datasetRef);if(d?.complete)return {...previous,reused:true,stage:'复用本轮同一只读事务中已完成的相同查询；保留原取数时间'};}
   const rows=[];let batch=Number.isInteger(statement.batchSize)&&statement.batchSize>=1&&statement.batchSize<=5000?statement.batchSize:500;let complete=false;
-  let cursor=null;
+  let cursor=null,pages=0,lastProgress=0;const started=Date.now();
+  const progress=async(phase)=>{if(phase==='reading'&&Date.now()-lastProgress<5000)return;lastProgress=Date.now();try{await this.onProgress({phase,rows:rows.length,pages,elapsedMs:Date.now()-started,pagination:statement.cursor?'keyset':'offset'});}catch{/* Progress delivery cannot invalidate a successful authorized database read. */}};
+  await progress('starting');
   for(let offset=0;offset<=this.maxRows;){
    await this.check();const size=Math.min(batch,this.maxRows-offset+1);
    const keyset=statement.cursor,cursorParams=[];
@@ -34,19 +36,21 @@ export class ReportDatasets {
    const marker=statement.sql.includes(' GROUP BY ')?' GROUP BY ':' ORDER BY ';
    const sql=after?statement.sql.replace(marker,` AND (${after})${marker}`):statement.sql;
    let page;try{[page]=await execute({sql:`${sql} LIMIT ${size}${keyset?'':` OFFSET ${offset}`}`},[...statement.params,...cursorParams]);}catch(error){if(error.code==='REMOTE_PAGE_TOO_LARGE'&&batch>1){batch=Math.max(1,Math.floor(batch/2));continue;}throw error;}
-   await this.check();if(!Array.isArray(page)||page.length>size)throw new ReportInputError('报表分页返回异常');
+   await this.check();pages++;if(!Array.isArray(page)||page.length>size)throw new ReportInputError('报表分页返回异常');
    for(const row of page){
     if(rows.length===this.maxRows)break;
     const clean=Object.fromEntries(statement.columns.map(c=>{const v=row[c];if(v!==null&&!['string','number','bigint'].includes(typeof v))throw new ReportInputError(`报表含不支持的字段值：列${c}，类型${v instanceof Date?'Date':Array.isArray(v)?'array':typeof v}；日期应由驱动dateStrings保留原值，结构化字段须先核实类型，不可猜值或删列`);if(typeof v==='number'&&!Number.isSafeInteger(v))throw new ReportInputError('报表数值未以精确字符串返回，停止导出');return [c,v===null?null:this.secrets.reduce((text,secret)=>text.split(secret).join('[已隐藏]'),String(v))];}));
     if(statement.rowKey)clean[statement.rowKey.column]=hash(statement.rowKey.fields.map(c=>clean[c]));
     rows.push(clean);
    }
+   await progress('reading');
    if(page.length<size){complete=true;break;}
    if(page.length>this.maxRows-offset)break;
    offset+=page.length;
    if(keyset&&page.length){const next=keyset.columns.map(k=>page.at(-1)[k]);if(next.some(v=>v===null||v===undefined)||JSON.stringify(next)===JSON.stringify(cursor))throw new ReportInputError('游标主键为空或没有前进；保留已有证据，不能跳行或改用抽样');cursor=next;}
    if(statement.batchSize&&page.length){const average=Buffer.byteLength(JSON.stringify(page))/page.length;batch=Math.max(1,Math.min(statement.cursor?5000:500,Math.floor(2000000/Math.max(1,average*1.5))));}
   }
+  await progress('collected');
   // A short final page proves completion; exactly-at-cap requires one look-ahead.
   const ref=`dataset-${randomUUID()}`,data={rows,columns:[...statement.columns,...(statement.rowKey?[statement.rowKey.column]:[])],complete,numericColumns:statement.numericColumns??[],queryHash,queryDefinition:{sql:statement.sql,params:statement.params.map(v=>this.secrets.reduce((text,secret)=>text.split(secret).join('[已隐藏]'),String(v)))}};
   if(statement.recipe){const original=JSON.stringify(statement.recipe),safe=this.secrets.reduce((text,secret)=>text.split(secret).join('[已隐藏]'),original);data.recipe={...JSON.parse(safe),replayable:original===safe};}
