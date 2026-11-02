@@ -118,3 +118,11 @@ test('same-question deep-page continuation keeps the already-used entry without 
  const request=await prepareWebsiteQuery(context,{...job,projectId:project,sourceEnvironment:tier==='prd'?'prd':'sit'},{url:target,tier,purpose:'只读检查'});assert.notEqual(request.environmentId,id);const config=JSON.parse(await readFile(process.env.AGENTOS_ENVIRONMENTS_FILE,'utf8'));assert.equal(config.environments[request.environmentId].queries.investigate.readEndpoints,undefined);
  }
 });
+
+test('read navigation cards and ARIA links are exposed while mutation cards remain unavailable',async t=>{
+ const dir=await mkdtemp(path.join(await realpath(os.tmpdir()),'web-nav-card-'));let writes=0;
+ const server=http.createServer((req,res)=>{res.setHeader('content-type','text/html; charset=utf-8');if(req.url==='/execute'){writes++;res.end('bad');return;}if(req.url==='/gateway'){res.end('<h1>读取接口网关</h1>');return;}res.end('<h1>平台首页</h1><div class="ant-card ant-card-hoverable" onclick="location.href=\'/gateway\'">企业级API网关</div><div role="link" onclick="location.href=\'/gateway\'">只读日志入口</div><div class="ant-card ant-card-hoverable" onclick="fetch(\'/execute\',{method:\'POST\'})">立即执行</div>');});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const driver={launchPersistentContext:(d,o)=>chromium.launchPersistentContext(d,{...o,headless:true,args:[...o.args,'--no-proxy-server','--host-resolver-rules=MAP agentos-fixture.test 127.0.0.1']})};const browser=new WebsiteBrowser(dir,driver);t.after(async()=>{await browser.close();await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});});
+ const e={projectId:'test',tier:'uat',baseUrl:`http://agentos-fixture.test:${server.address().port}/`},job={id:'card'};let snap=await browser.run(job,e,'connection');const card=snap.controls.find(c=>c.label==='企业级API网关'),link=snap.controls.find(c=>c.label==='只读日志入口');assert.equal(card.type,'read-action');assert.equal(link.type,'read-action');assert.ok(!snap.controls.some(c=>c.label==='立即执行'));
+ snap=await browser.run(job,e,'browser_click',{ref:card.ref});assert.match(snap.pageText,/读取接口网关/);assert.equal(writes,0);
+});

@@ -1,5 +1,5 @@
 // Fixed DOM adapter shared by all applications; no model-supplied selectors or scripts.
-export const websiteControls='a,[role="link"],button,select,[role="button"],input:not([type="password"]):not([type="hidden"]),[role="menuitem"],[role="treeitem"],[role="tab"],[role="option"],[role="gridcell"],[role="combobox"],[role="checkbox"],[role="radio"],[aria-haspopup],.el-date-editor,.ant-picker,.el-submenu__title,.ant-menu-submenu-title,.el-select-dropdown__item,.ant-select-item-option,.el-date-picker td.available,.el-date-range-picker td.available,.el-month-table td,.el-year-table td,.ant-picker-cell-in-view:not(.ant-picker-cell-disabled),.el-pagination li,.ant-pagination-item,span,tr[data-row-key],[role="row"][data-row-key]';
+export const websiteControls='.ant-card-hoverable,a,[role="link"],button,select,[role="button"],input:not([type="password"]):not([type="hidden"]),[role="menuitem"],[role="treeitem"],[role="tab"],[role="option"],[role="gridcell"],[role="combobox"],[role="checkbox"],[role="radio"],[aria-haspopup],.el-date-editor,.ant-picker,.el-submenu__title,.ant-menu-submenu-title,.el-select-dropdown__item,.ant-select-item-option,.el-date-picker td.available,.el-date-range-picker td.available,.el-month-table td,.el-year-table td,.ant-picker-cell-in-view:not(.ant-picker-cell-disabled),.el-pagination li,.ant-pagination-item,span,tr[data-row-key],[role="row"][data-row-key]';
 export function controlMetadata(el){
  const visible=el.isConnected&&!!el.getClientRects().length&&getComputedStyle(el).visibility!=='hidden'&&getComputedStyle(el).display!=='none';
  if(!visible||el.disabled||el.getAttribute('aria-disabled')==='true'||el.matches('.disabled,.is-disabled,.ant-picker-cell-disabled')||el.closest('[contenteditable="true"],[data-sensitive],[data-agentos-secret]'))return {visible:false};
@@ -19,8 +19,8 @@ export function controlMetadata(el){
  if(calendar&&el.matches('td,[role="gridcell"]')){const header=el.closest('.el-date-range-picker__content')?.querySelector('.el-date-range-picker__header')??calendar.querySelector('.el-date-picker__header,.ant-picker-header-view');label='日期选择：'+(header?.innerText??'').trim()+' '+label;}
  if(pagination&&!label)label=tag==='input'?'前往页码':el.matches('.btn-next,.ant-pagination-next')?'下一页':el.matches('.btn-prev,.ant-pagination-prev')?'上一页':'';
  if(!label)return {visible:true,label,type:null};
- const mutation=/新增|创建|保存|修改|编辑|删除|启动|停止|触发|重跑|终止|发布|启用|禁用|提交|支付|注销|退出|作废|驳回|撤回|取消订单|关闭订单|确认收货|\b(add|create|save|update|edit|delete|remove|start|stop|trigger|execute|run|restart|reset|kill|publish|enable|disable|submit|approve|pay|logout|cancel)\b/i;
- const navigation=el.matches('[role="menuitem"],[role="treeitem"],[role="tab"],.el-submenu__title,.ant-menu-submenu-title');
+ const mutation=/立即执行|执行一次|单次执行|立即运行|运行一次|重放|试运行|测试接口|接口测试|新增|创建|保存|修改|编辑|删除|启动|停止|触发|重跑|终止|发布|启用|禁用|提交|支付|注销|退出|作废|驳回|撤回|取消订单|关闭订单|确认收货|\b(add|create|save|update|edit|delete|remove|start|stop|trigger|execute|run|restart|reset|kill|publish|enable|disable|submit|approve|pay|logout|cancel)\b/i;
+ const navigation=el.matches('.ant-card-hoverable,[role="link"],[role="menuitem"],[role="treeitem"],[role="tab"],.el-submenu__title,.ant-menu-submenu-title');
  let type=null,kind='action';
  if(tag==='input'){
   const identity=[el.name,el.id,el.placeholder,el.getAttribute('aria-label')].join(' ');
