@@ -1,7 +1,7 @@
 import {validateTct} from './tct-policy.js';
 import { validateSshTransport } from './ssh-transport-policy.js';
 import { canonicalWebsite, validateWebsiteAliases } from './website-aliases.js';
-import { websiteUrl } from './website-policy.js';
+import { websiteUrl,websiteNavigationTarget } from './website-policy.js';
 import { validateAccountPolicy } from './database-account-policy.js';
 import { validateToolQuery } from './environment-tool-policy.js';
 import { readFile } from 'node:fs/promises';
@@ -96,7 +96,10 @@ export function planQuery(config, request, projectId, actor, now = Date.now()) {
     if (typeof v !== 'string' || !v.length || v.length > maxLength || /[\x00-\x1f\x7f]/.test(v)) throw Object.assign(new Error('查询文本参数无效'),{queryDiagnostic:{code:'TEXT_PARAMETER',index:i,maxLength:Number.isFinite(maxLength)?maxLength:null,length:typeof v==='string'?v.length:null,reason:typeof v!=='string'?'type':!v.length?'empty':/[\x00-\x1f\x7f]/.test(v)?'control_characters':'length'}});
     return v;
   });
+  if(request.websiteTarget!==undefined&&e.kind!=='website')throw new Error('网页目标不能用于其他环境类型');
+  const websiteTarget=request.websiteTarget!==undefined?websiteNavigationTarget(request.websiteTarget,e.baseUrl):undefined;
   const scope = { expiresAt: new Date(now + 15 * 60000).toISOString(), approvalProfile: actor.profile, environmentId: request.environmentId, queryId: request.queryId, projectId, parameters, configHash: fingerprint(e), maxRows: q.maxRows, timeoutMs: queryTimeout(config,e,q) };
+  if(websiteTarget)scope.websiteTarget=websiteTarget;
   const approvalRequired = false;
   return { ...scope, description: q.description + (q.mode === 'investigate' ? `；范围：${e.kind === 'website' ? new URL(e.baseUrl).origin : e.kind === 'nacos' ? q.namespaces.map(x => x || 'public').join(', ') : (e.kind==='tct'?q.groupIds:e.kind==='mongodb'?q.collections:q.tables).join(', ')}；按证据推进，无固定调用次数上限；失败按具体原因调整工具与查询，不按固定轮次截停` : ''), tier: e.tier, kind: e.kind, scopeHash: fingerprint(scope),
     approvalRequired, approvalOwnerIds: [...(e.ownerOpenIdsByProfile[actor.profile] ?? [])], approvedBy: 'policy:read-only', approvedAt: new Date(now).toISOString() };
@@ -111,6 +114,7 @@ function verifyPlanIntegrity(config, plan) {
   const e = config.environments[plan.environmentId];
   if (!e || fingerprint(e) !== plan.configHash || !Number.isFinite(Date.parse(plan.expiresAt))) throw new Error('查询授权已过期或配置已变更，请重新申请');
   const scope = Object.fromEntries(['expiresAt','approvalProfile','environmentId','queryId','projectId','parameters','configHash','maxRows','timeoutMs'].map((k) => [k, plan[k]]));
+  if(plan.websiteTarget!==undefined){if(e.kind!=='website'||websiteNavigationTarget(plan.websiteTarget,e.baseUrl)!==plan.websiteTarget)throw new Error('网页目标与批准内容不一致');scope.websiteTarget=plan.websiteTarget;}
   if (fingerprint(scope) !== plan.scopeHash || e.projectId !== plan.projectId) throw new Error('查询范围与批准内容不一致');
   return e;
 }

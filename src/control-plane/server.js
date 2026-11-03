@@ -406,13 +406,13 @@ async function route(context) {
       if(setup.url)enrollmentTarget(setup);
       if(setup.kind==='mysql'||setup.url)routing={...routing,setupInvestigation:true};
     }
-    if(body.type==='completed'&&body.result?.websiteQuery){
-      if(job.taskIntent!=='analysis'||!['developer','owner_report'].includes(job.stage)||!job.questionId||job.environmentAccess||body.result.outcome!=='needs_clarification'||body.result.environmentQuery)throw new Error('当前阶段不能申请网页排查');
-      if(job.convergenceFinal)throw new Error('最终汇总阶段不能再申请网页排查');
-      body.result.environmentQuery=await prepareWebsiteQuery(context,job,body.result.websiteQuery);
-    }
-    if (body.type === 'completed' && body.result?.environmentQuery) {
+    if (body.type === 'completed' && (body.result?.environmentQuery||body.result?.websiteQuery)) {
       try {
+        if(body.result?.websiteQuery){
+          if(job.taskIntent!=='analysis'||!['developer','owner_report'].includes(job.stage)||!job.questionId||job.environmentAccess||body.result.outcome!=='needs_clarification'||body.result.environmentQuery)throw new Error('当前阶段不能申请网页排查');
+          if(job.convergenceFinal)throw new Error('最终汇总阶段不能再申请网页排查');
+          body.result.environmentQuery=await prepareWebsiteQuery(context,job,body.result.websiteQuery);
+        }
         if (job.taskIntent !== 'analysis' || !['developer', 'owner_report'].includes(job.stage) || !job.questionId || job.environmentAccess
           || body.result.outcome !== 'needs_clarification') throw new Error('当前阶段不允许申请环境查询');
         if(job.convergenceFinal)throw new Error('最终汇总阶段不能再申请环境查询');

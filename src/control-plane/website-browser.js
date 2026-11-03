@@ -7,7 +7,7 @@ import {BrowserInputError,validateBrowserTool,websitePageLocation} from '../shar
 import { chromium } from 'playwright';
 import { mkdir, chmod } from 'node:fs/promises';
 import path from 'node:path';
-import { websiteSessionKey, websiteRequestAllowed, cleanWebsiteText } from '../shared/website-policy.js';
+import { websiteSessionKey, websiteNavigationTarget, websiteRequestAllowed, cleanWebsiteText } from '../shared/website-policy.js';
 // One private profile per project/environment/origin. Pages and refs remain per question/job.
 export class WebsiteBrowser {
  constructor(dataDir, driver=chromium, authorize=async()=>true){this.authorize=authorize;this.evidenceRoot=path.join(dataDir,'website-evidence');this.root=path.join(dataDir,'website-sessions');this.driver=driver;this.contexts=new Map();this.pages=new Map();this.opening=new Map();}
@@ -35,13 +35,14 @@ export class WebsiteBrowser {
   })();this.opening.set(key,p);try{return await p;}finally{this.opening.delete(key);}
  }
  async state(job,e){
+  const initialTarget=websiteNavigationTarget(job.environmentAccess?.websiteTarget??e.baseUrl,e.baseUrl);
   if(this.pages.has(job.id)){
    const existing=this.pages.get(job.id);
-   if(websiteSessionKey(e.projectId,e.tier,e.baseUrl)!==websiteSessionKey(existing.environment.projectId,existing.environment.tier,existing.environment.baseUrl)||e.baseUrl!==existing.environment.baseUrl)await this.release(job.id);
+   if(websiteSessionKey(e.projectId,e.tier,e.baseUrl)!==websiteSessionKey(existing.environment.projectId,existing.environment.tier,existing.environment.baseUrl)||e.baseUrl!==existing.environment.baseUrl||initialTarget!==existing.initialTarget)await this.release(job.id);
    else {existing.job=job;existing.environment=e;return existing;}
   }
   const session=await this.session(e),page=await session.context.newPage();
-  const s={job,page,session,environment:e,refPrefix:randomUUID(),refs:new Map(),generation:0,waiting:false,sawLogin:false,blocked:new Set(),blockedLoginReads:new Set(),pendingReads:new Set(),lastReadActivity:Date.now()};this.pages.set(job.id,s);
+  const s={job,page,session,environment:e,initialTarget,refPrefix:randomUUID(),refs:new Map(),generation:0,waiting:false,sawLogin:false,blocked:new Set(),blockedLoginReads:new Set(),pendingReads:new Set(),lastReadActivity:Date.now()};this.pages.set(job.id,s);
   page.on('request',request=>{
    if(['xhr','fetch','document'].includes(request.resourceType())&&new URL(request.url()).origin===new URL(s.environment.baseUrl).origin){s.pendingReads.add(request);s.lastReadActivity=Date.now();}
   });
@@ -55,7 +56,7 @@ export class WebsiteBrowser {
    if(s.waiting&&response.status()>=400&&['xhr','fetch'].includes(req.resourceType())&&reviewed.some(x=>x.method===req.method()&&x.path===url.pathname))s.bootstrapFailure={method:req.method(),path:url.pathname,status:response.status()};
   });
   page.setDefaultTimeout(10000);page.on('download',d=>d.cancel().catch(()=>{}));page.on('popup',p=>p.close().catch(()=>{}));page.on('dialog',d=>d.dismiss().catch(()=>{}));
-  try{await page.goto(e.baseUrl,{waitUntil:'domcontentloaded',timeout:30000});}catch(error){await this.release(job.id);throw error;}
+  try{await page.goto(initialTarget,{waitUntil:'domcontentloaded',timeout:30000});}catch(error){await this.release(job.id);throw error;}
   return s;
  }
  async loginStatus(s){
@@ -112,7 +113,7 @@ export class WebsiteBrowser {
   if(login.loginRequired){await s.page.bringToFront();return {loginRequired:true,stage:'等待本机登录',message:'登录后自动继续原问题，无需回复继续。'};}
   if(tool==='browser_screenshot')return this.screenshot(s);
   if(!login.pageReady)return {stage:'页面尚未就绪',pageStatus:'loading',url:websitePageLocation(s.page.url()),partial:true,pageText:'',controls:[],message:'尚未取得可见业务内容，不能认定登录成功或页面正常。'};
-  if(s.reloadAfterLogin){s.reloadAfterLogin=false;await s.page.reload({waitUntil:'domcontentloaded'});}
+  if(s.reloadAfterLogin){s.reloadAfterLogin=false;await s.page.goto(s.initialTarget,{waitUntil:'domcontentloaded'});}
   if(tool==='connection'||tool==='browser_open'||tool==='browser_snapshot')return this.snapshot(s);
   if(tool==='browser_key'&&args.ref==='page'){await s.page.keyboard.press('Escape');return this.snapshot(s);}
   if(tool==='browser_scroll'&&args.ref==='page'){await s.page.evaluate(direction=>window.scrollBy(direction==='left'?-600:direction==='right'?600:0,direction==='up'?-600:direction==='down'?600:0),args.direction);return this.snapshot(s);}

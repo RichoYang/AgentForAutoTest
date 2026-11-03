@@ -6,7 +6,7 @@ import { canonicalWebsite } from '../shared/website-aliases.js';
 import { mkdir, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import { environmentFile, loadEnvironments, planQuery, verifyApprovedPlan } from '../shared/environment-access.js';
-import { websiteUrl, websiteKey } from '../shared/website-policy.js';
+import { websiteUrl, websiteKey, websiteNavigationTarget } from '../shared/website-policy.js';
 let updates=Promise.resolve();
 const polling=new WeakMap();
 export function prepareWebsiteQuery(context,job,request){
@@ -14,19 +14,21 @@ export function prepareWebsiteQuery(context,job,request){
   if(!request||!['uat','prd'].includes(request.tier))throw Object.assign(new Error('网页排查运行分级无效'),{queryDiagnostic:{code:'WEBSITE_TIER_INVALID',reason:'网页排查未指定有效的测试/生产运行分级。',correction:'按协议使用 uat（测试）或 prd（生产），源码环境ID保持本项目配置。'}});
   const purpose=request.purpose;
   const issue=typeof purpose!=='string'?'type':!purpose.trim()?'empty':/[\u0000-\u001f\u007f]/.test(purpose)?'control_characters':null;
-  if(issue)throw Object.assign(new Error('Invalid website purpose'),{queryDiagnostic:{code:'TEXT_PARAMETER',index:0,reason:issue,length:typeof purpose==='string'?purpose.length:null,maxLength:200}});
+  if(issue)throw Object.assign(new Error('Invalid website purpose'),{queryDiagnostic:{code:'TEXT_PARAMETER',index:0,reason:issue,length:typeof purpose==='string'?purpose.length:null,maxLength:null}});
   assertSourceRuntimeTier(context.projects.projects?.[job.projectId],job.sourceEnvironment,request.tier);
   const cfg=await loadEnvironments();
-  const requestedUrl=canonicalWebsite(cfg,job.projectId,request.tier,request.url);
+  const target=new URL(websiteNavigationTarget(request.url)),entry=new URL(target);entry.search='';entry.hash='';
+  const requestedUrl=canonicalWebsite(cfg,job.projectId,request.tier,entry.href,{applicationRoot:false});
+  const corrected=new URL(requestedUrl);corrected.search=target.search;corrected.hash=target.hash;
   // A deep page in the same question stays in its already-used application entry.
   // Do not copy a grant or bootstrap endpoint list into a freshly registered page.
-  const known=(job.context??[]).slice().reverse().map(c=>cfg.environments[c.result?.environmentEvidence?.environmentId]).find(e=>{
+  const known=(job.context??[]).slice().reverse().map(c=>[c.result?.environmentEvidence?.environmentId,cfg.environments[c.result?.environmentEvidence?.environmentId]]).find(([,e])=>{
    if(!e||e.kind!=='website'||e.projectId!==job.projectId||e.tier!==request.tier)return false;
    const base=new URL(e.baseUrl),target=new URL(requestedUrl),prefix=base.pathname.replace(/\/$/,'');
    return base.origin===target.origin&&(target.pathname===prefix||target.pathname.startsWith(prefix+'/'));
   });
   const application=websiteApplication(cfg,job.projectId,request.tier,requestedUrl);
-  const baseUrl=application?websiteUrl(application.entry.baseUrl):known?websiteUrl(known.baseUrl):requestedUrl,environmentId=application?.environmentId??websiteKey(job.projectId,request.tier,baseUrl);
+  const baseUrl=application?websiteUrl(application.entry.baseUrl):known?websiteUrl(known[1].baseUrl):requestedUrl,environmentId=application?.environmentId??known?.[0]??websiteKey(job.projectId,request.tier,baseUrl);
   if(cfg.environments[environmentId] && websiteUrl(cfg.environments[environmentId].baseUrl)!==baseUrl)throw new Error('网页入口登记冲突，未复用其他页面');
   if(!cfg.environments[environmentId]){
    const owners=context.projects.ownerOpenIdsByProfile??{};
@@ -34,7 +36,8 @@ export function prepareWebsiteQuery(context,job,request){
    cfg.environments[environmentId]={projectId:job.projectId,tier:request.tier,kind:'website',baseUrl,credentialRef:environmentId,ownerOpenIdsByProfile:owners,membersRead:request.tier==='uat',queries:{investigate:{mode:'investigate',reviewed:true,description:'按原问题查看业务网页、查询与日志；不执行修改、启动或停止',maxRows:20,timeoutMs:10000,parameters:[{name:'purpose',type:'string',maxLength:200}],browser:true}}};
    const file=environmentFile();await mkdir(path.dirname(file),{recursive:true});const temp=file+'.website.tmp';await writeFile(temp,JSON.stringify(cfg,null,2)+'\n',{mode:0o600});await rename(temp,file);
   }
-  return {environmentId,queryId:'investigate',parameters:[request.purpose]};
+  const websiteTarget=websiteNavigationTarget(corrected.href,baseUrl);
+  return {environmentId,queryId:'investigate',parameters:[request.purpose],...(websiteTarget!==baseUrl?{websiteTarget}:{})};
  });updates=pending.catch(()=>{});return pending;
 }
 export function pollWebsiteLogins(context){
@@ -67,7 +70,7 @@ async function resumeWebsiteLogins(context){
      current.browserResumeClaim={scopeHash:current.environmentAccess.scopeHash,startedAt:current.environmentAccess.startedAt};
      current.status='queued';current.result=null;
     }
-    else{const old=current.environmentAccess;const plan=planQuery(cfg,{environmentId:old.environmentId,queryId:old.queryId,parameters:old.parameters},current.projectId,{profile:current.originProfile,senderId:current.senderId});current.environmentAccess=plan;current.status=plan.approvalRequired?'awaiting_environment_approval':'queued';current.result=null;}
+    else{const old=current.environmentAccess;const plan=planQuery(cfg,{environmentId:old.environmentId,queryId:old.queryId,parameters:old.parameters,...(old.websiteTarget?{websiteTarget:old.websiteTarget}:{})},current.projectId,{profile:current.originProfile,senderId:current.senderId});current.environmentAccess=plan;current.status=plan.approvalRequired?'awaiting_environment_approval':'queued';current.result=null;}
     current.updatedAt=new Date().toISOString();current.events.push({type:'browser_login_resumed',at:current.updatedAt});
     const question=state.questions?.[current.questionId];if(question)question.generation++;
    });

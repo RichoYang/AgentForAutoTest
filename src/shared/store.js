@@ -172,7 +172,7 @@ export class JsonStore {
       if(job.status!=='awaiting_environment_approval'||!old||Date.parse(old.expiresAt)>Date.now())throw new Error('查询申请尚未过期或状态已改变');
       const e=config.environments[old.environmentId];
       if(!e||fingerprint(e)!==old.configHash)throw new Error('查询申请的配置已改变，请重新发起排查并核对新范围');
-      const plan=planQuery(config,{environmentId:old.environmentId,queryId:old.queryId,parameters:old.parameters},job.projectId,{profile:old.approvalProfile,senderId:job.senderId});
+      const plan=planQuery(config,{environmentId:old.environmentId,queryId:old.queryId,parameters:old.parameters,...(old.websiteTarget?{websiteTarget:old.websiteTarget}:{})},job.projectId,{profile:old.approvalProfile,senderId:job.senderId});
       job.environmentAccess=plan;
       job.status=plan.approvalRequired?'awaiting_environment_approval':'queued';
       job.updatedAt=new Date().toISOString();job.events.push({id:createId('EVT'),type:plan.approvalRequired?'environment_renewal_requested':'environment_policy_authorized',at:job.updatedAt,previousScopeHash:old.scopeHash,scopeHash:plan.scopeHash});
@@ -189,7 +189,7 @@ export class JsonStore {
         const old = job.environmentAccess;
         if (job.status !== 'awaiting_environment_approval' || !old) continue;
         try {
-          const plan = planQuery(config, { environmentId: old.environmentId, queryId: old.queryId, parameters: old.parameters }, job.projectId, { profile: old.approvalProfile ?? job.originProfile, senderId: job.senderId });
+          const plan = planQuery(config, { environmentId: old.environmentId, queryId: old.queryId, parameters: old.parameters, ...(old.websiteTarget?{websiteTarget:old.websiteTarget}:{}) }, job.projectId, { profile: old.approvalProfile ?? job.originProfile, senderId: job.senderId });
           if (plan.approvalRequired) continue;
           job.environmentAccess = plan;
           job.status = 'queued';
@@ -292,7 +292,7 @@ export class JsonStore {
       requireActiveLease(job, identity);
       if (!job.continuousInvestigation || job.taskIntent !== 'analysis' || job.stage !== 'developer') throw new Error('当前任务不是连续只读调查');
       if (job.environmentAccess) throw new Error('当前调查已有正在执行的环境步骤');
-      const queryKey = fingerprint({ environmentId: plan.environmentId, queryId: plan.queryId, parameters: plan.parameters, ...(plan.toolCorrectionKeys?.length?{toolCorrectionKeys:[...plan.toolCorrectionKeys].sort()}:{}), ...(plan.sourcePreparationRecovery?{sourcePreparationKeys:[...plan.sourcePreparationKeys].sort()}: {}) });
+      const queryKey = fingerprint({ ...(plan.websiteTarget?{websiteTarget:plan.websiteTarget}:{}),environmentId: plan.environmentId, queryId: plan.queryId, parameters: plan.parameters, ...(plan.toolCorrectionKeys?.length?{toolCorrectionKeys:[...plan.toolCorrectionKeys].sort()}:{}), ...(plan.sourcePreparationRecovery?{sourcePreparationKeys:[...plan.sourcePreparationKeys].sort()}: {}) });
       job.continuousQueryKeys ??= [];
       if(!job.continuousQueryKeys.includes(queryKey))job.continuousQueryKeys.push(queryKey);
       if(plan.continuationKey){job.continuousContinuationKeys??=[];job.continuousContinuationKeys.push(plan.continuationKey);}

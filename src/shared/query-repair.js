@@ -14,6 +14,7 @@ export function queryRejection(error, job) {
  }else if(d?.code==='REPEATED_TARGET'){
   code=d.code;reason=`AgentOS 自动收敛规则暂停了本次追加查询（不是用户拒绝，也不是权限拒绝）：${d.reason}`;
   correction='保留已有证据，针对仍未核实的核心目标缩小查询范围，或改用已登记的数据库、网页、日志、配置或源码证据路径。';recoverable=true;
+ }else if(d?.code==='WEBSITE_TARGET_INVALID'){code=d.code;reason=d.reason;correction=d.correction;recoverable=true;
  }else if(['SOURCE_ENVIRONMENT_UNKNOWN','SOURCE_TIER_CONFIG','SOURCE_TIER_UNMAPPED','SOURCE_ENVIRONMENT_SELECTION','ENVIRONMENT_MISMATCH','WEBSITE_TIER_INVALID'].includes(d?.code)){
   code=d.code;reason=d.reason;correction=d.correction;recoverable=d.code==='WEBSITE_TIER_INVALID';
  }else{

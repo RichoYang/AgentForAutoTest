@@ -6,7 +6,7 @@ export async function renewWaitingWebsitePlan(context,job,cfg){
  if(Date.parse(old.expiresAt)>Date.now()){verifyApprovedPlan(cfg,old);return job;}
  verifyApprovedPlan(cfg,old,Date.parse(old.expiresAt)-1);
  assertSourceRuntimeTier(context.projects?.projects?.[job.projectId],job.sourceEnvironment,old.tier);
- const plan=planQuery(cfg,{environmentId:old.environmentId,queryId:old.queryId,parameters:old.parameters},job.projectId,{profile:old.approvalProfile??job.originProfile,senderId:job.senderId});
+ const plan=planQuery(cfg,{environmentId:old.environmentId,queryId:old.queryId,parameters:old.parameters,...(old.websiteTarget?{websiteTarget:old.websiteTarget}:{})},job.projectId,{profile:old.approvalProfile??job.originProfile,senderId:job.senderId});
  if(plan.configHash!==old.configHash)throw new Error('Website login scope changed');
  return context.store.transact(state=>{
   const current=state.jobs.find(j=>j.id===job.id);

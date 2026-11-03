@@ -13,9 +13,9 @@ export function validateWebsiteAliases(config){
  }
  for(const a of list)if(keys.has(JSON.stringify([a.projectId,a.tier,normalize(a.to)])))throw new Error('网站入口更正不允许链式或循环映射');
 }
-export function canonicalWebsite(config,projectId,tier,url){
+export function canonicalWebsite(config,projectId,tier,url,{applicationRoot=true}={}){
  validateWebsiteAliases(config);
  const found=(config.websiteAliases??[]).find(a=>a.projectId===projectId&&a.tier===tier&&normalize(a.from)===normalize(url));
  const corrected=found?websiteUrl(found.to):websiteUrl(url);
- return websiteUrl(websiteApplication(config,projectId,tier,corrected)?.entry.baseUrl??corrected);
+ return websiteUrl((applicationRoot?websiteApplication(config,projectId,tier,corrected)?.entry.baseUrl:null)??corrected);
 }
