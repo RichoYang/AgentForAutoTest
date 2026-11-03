@@ -168,3 +168,19 @@ test('paging an old table card rebuilds only presentation from original evidence
   assert.equal(after.cardMessages['chat:old-chat'].messageId, 'old-message');
   assert.equal(flushed, 1);
 });
+
+test('answer tables under a generic technical heading remain on the primary card with complete rows',()=>{
+ const rows=Array.from({length:25},(_,i)=>`| 字段${i} | \`db.table.COLUMN_${i}\` | ${i===24?'未定位，不能用相近列替代':'varchar(64)，已核实'} |`).join('\n');
+ const text=`已按模板整理字段。以下候选不是已部署绑定。\n\n### 技术依据\n\n实际库表来自元数据。\n\n| 字段 | 数据库字段 | 状态 |\n| --- | --- | --- |\n${rows}\n\n**源码复核位置**\ninternal-source.java:123\n`;
+ const job={id:'mapping',stage:'developer',taskIntent:'analysis',status:'completed',result:{outcome:'ready',finalMessage:text},events:[]},card=jobCard(job),tables=card.body.elements.filter(x=>x.tag==='table');assert.equal(tables.length,1);assert.equal(tables[0].rows.length,25);assert.match(tables[0].rows[24].column_3,/未定位/);assert.doesNotMatch(JSON.stringify(card.body.elements.filter(x=>x.element_id!=='result_details')),/internal-source.java/);assert.match(resultPages(text).join('\n'),/internal-source.java/);
+});
+
+test('a long answer table is never character-clipped into an invalid partial table',()=>{
+ const rows=Array.from({length:35},(_,i)=>`| ${i} | ${'明确来源和未核实条件'.repeat(16)} |`).join('\n'),text=`已取得字段对照。\n\n| 序号 | 说明 |\n| --- | --- |\n${rows}`;
+ const card=jobCard({id:'long-table',stage:'developer',taskIntent:'analysis',status:'completed',result:{outcome:'partial',finalMessage:text},events:[]}),table=card.body.elements.find(x=>x.tag==='table');assert.equal(table.rows.length,35);assert.equal(table.rows.at(-1).column_1,'34');assert.match(card.header.title.content,/部分分析完成/);
+});
+import {fitResultCard}from '../src/control-plane/result-presentation.js';
+test('existing delivery byte envelope pages oversized tables without changing canonical results or controls',()=>{
+ const rows=Array.from({length:50},(_,i)=>`| ${i} | ${'完整条件说明'.repeat(100)} |`).join('\n'),text=`候选信息不能冒充已确认。\n\n| 序号 | 说明 |\n| --- | --- |\n${rows}`;
+ const card=jobCard({id:'large-table',stage:'developer',taskIntent:'analysis',status:'completed',result:{outcome:'partial',finalMessage:text},events:[]}),before=JSON.stringify(card),fitted=fitResultCard(card);assert.ok(Buffer.byteLength(JSON.stringify(fitted))<=28000);assert.equal(JSON.stringify(card),before);assert.match(JSON.stringify(fitted),/主卡表格展示 \d+\/50 行/);assert.deepEqual(fitted.body.elements.find(x=>x.element_id==='result_details'),card.body.elements.find(x=>x.element_id==='result_details'));assert.equal(resultPages(text).join('\n').includes('49'),true);assert.match(fitted.header.title.content,/部分分析完成/);
+});

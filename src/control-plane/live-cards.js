@@ -2,7 +2,7 @@ import {stateView} from '../shared/state-view.js';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { resultPages } from './result-presentation.js';
+import { resultPages,fitResultCard } from './result-presentation.js';
 
 const chatIdOf=value=>{if(!value||typeof value!=='object')return null;if(typeof value.chat_id==='string')return value.chat_id;for(const child of Object.values(value)){const id=chatIdOf(child);if(id)return id;}return null;};
 
@@ -34,6 +34,7 @@ export class LiveCards {
       card.body.elements.push({tag:'markdown',text_size:'notation',content:destination.contactChannel?'查人专用群：结果仅提问者和当前群主可见，群内原提问仍可见。':'私有交付：普通群仅你可见；话题群转机器人私聊。附件若有将通过私聊发送。你发在群里的原提问仍是群消息。'});
       const rewrite=node=>{if(!node||typeof node!=='object')return;for(const [k,v] of Object.entries(node)){if(typeof v==='string')node[k]=v.replace('结果将在本群卡片显示','结果仅向提问者交付');else rewrite(v);}};rewrite(card);
     }
+    card=fitResultCard(card);
     if (Buffer.byteLength(JSON.stringify(card)) > 28_000) throw new Error('Card exceeds safe message limit');
     await this.store.transact((state) => {
       guard?.(state);

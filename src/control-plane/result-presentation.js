@@ -58,12 +58,45 @@ export function conversationPrimaryResult(text) {
 export function analysisPrimaryResult(text) {
   const cleaned = readableMarkdownWithTables(text).replace(/```[\s\S]*?```/g, '[代码及原始技术片段见完整详情]').trim();
   const technicalAppendix = cleaned.match(TECHNICAL_APPENDIX_HEADING);
-  const businessAnswer = technicalAppendix?.index > 0 ? cleaned.slice(0, technicalAppendix.index).trim() : cleaned;
+  let businessAnswer = technicalAppendix?.index > 0 ? cleaned.slice(0, technicalAppendix.index).trim() : cleaned;
+  if(technicalAppendix?.index>0){
+    const appendix=cleaned.slice(technicalAppendix.index+technicalAppendix[0].length);
+    // A generic heading cannot classify the requested structured answer as provenance.
+    const boundary=appendix.search(/(?:^|\n)\s*\*\*(?:源码(?:复核|引用|定位|依据|位置)|代码(?:引用|定位|位置)|证据时间|环境[、及与，, ]*(?:版本|验证)|版本[与及、 ]*验证|执行(?:过程|记录)|查询记录)[^\n]*\*\*/i);
+    const structuredAnswer=boundary<0?appendix:appendix.slice(0,boundary);
+    if(cardMarkdownSegments(structuredAnswer).some(x=>x.type==='table'))businessAnswer+='\n\n'+structuredAnswer.trim();
+  }
+  // Preserve complete rows. The delivery byte budget is handled separately;
+  // character clipping must never turn half a table into ordinary Markdown.
+  if(cardMarkdownSegments(businessAnswer).some(x=>x.type==='table'))return businessAnswer+(technicalAppendix?.index>0?'\n\n源码位置与查询证据见下方完整详情。':'');
   const appendixNote = technicalAppendix?.index > 0 ? '\n\n源码位置、表字段、版本与查询证据见下方完整详情。' : '';
   if (Array.from(businessAnswer + appendixNote).length <= PRIMARY_ANALYSIS_LIMIT) return businessAnswer + appendixNote;
   const prefix = clip(businessAnswer, PRIMARY_ANALYSIS_LIMIT - 40);
   const boundary = Math.max(prefix.lastIndexOf('。'), prefix.lastIndexOf('\n'));
   return `${boundary > 900 ? prefix.slice(0, boundary + 1) : prefix + '…'}\n\n完整技术详情与证据见下方。`;
+}
+
+// Enforce the existing delivery envelope without changing canonical results,
+// task status or queries. Full resultText/details remain available for paging.
+export function fitResultCard(card,maxBytes=28000){
+ if(Buffer.byteLength(JSON.stringify(card))<=maxBytes)return card;
+ const copy=structuredClone(card),elements=copy.body?.elements;
+ if(!elements?.some(x=>x.element_id==='result_details'))return card;
+ const tables=elements.filter(x=>x.tag==='table'),total=tables.reduce((n,x)=>n+x.rows.length,0);
+ const note={tag:'markdown',text_size:'notation',content:'主卡内容超出消息容量；其余内容保留在下方完整结果分页中，无需重新查询。'};
+ elements.splice(elements.findIndex(x=>x.element_id==='result_details'),0,note);
+ while(Buffer.byteLength(JSON.stringify(copy))>maxBytes){
+  const table=[...elements].reverse().find(x=>x.tag==='table');
+  if(table){table.rows.pop();if(!table.rows.length)elements.splice(elements.indexOf(table),1);else table.page_size=Math.min(table.page_size,table.rows.length);continue;}
+  // Unusually wide tables fall back to Markdown; retain their complete details.
+  const answer=elements.findIndex(x=>x.tag==='column_set'&&x.columns?.some(c=>c.elements?.some(e=>e.tag==='markdown'&&e.text_size!=='notation')));
+  if(answer<0)break;elements.splice(answer,1);
+ }
+ const shown=elements.filter(x=>x.tag==='table').reduce((n,x)=>n+x.rows.length,0);
+ if(total)note.content=`主卡表格展示 ${shown}/${total} 行；完整内容保留在下方结果分页中，无需重新查询。`;
+ // The count adds a few bytes; reserve its actual serialized cost, not a row cap.
+ while(Buffer.byteLength(JSON.stringify(copy))>maxBytes){const t=[...elements].reverse().find(x=>x.tag==='table');if(!t)break;t.rows.pop();if(!t.rows.length)elements.splice(elements.indexOf(t),1);else t.page_size=Math.min(t.page_size,t.rows.length);note.content=`主卡表格展示 ${elements.filter(x=>x.tag==='table').reduce((n,x)=>n+x.rows.length,0)}/${total} 行；完整内容保留在下方结果分页中，无需重新查询。`;}
+ return copy;
 }
 
 export function analysisPrimarySegments(text) {

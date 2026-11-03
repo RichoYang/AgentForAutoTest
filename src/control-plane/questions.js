@@ -99,8 +99,9 @@ export function questionView(state, questionId, projects = {}) {
     const stages = state.jobs.filter((item) => item.questionId === q.id).map((item) => item.stage);
     const flow = stages.filter((stage, index) => stage !== stages[index - 1]).slice(-6)
       .map((stage, index, compact) => `${roles[stage] ?? '处理'}${index < compact.length - 1 ? ' ✓' : ''}`).join(' → ');
-    card.body.elements[0].columns[0].elements.push({ tag: 'markdown', text_size: 'notation', content: `流程：${flow}` });
-    if (outstanding) card.body.elements[0].columns[0].elements.push({ tag: 'markdown', text_size: 'notation', content: '已收到补充，负责人正在处理；任务进度仍显示在本卡。' });
+    const annotations=card.body.elements.find(e=>e.tag==='column_set'&&e.columns?.[0]?.elements)?.columns[0].elements;
+    annotations?.push({ tag: 'markdown', text_size: 'notation', content: `流程：${flow}` });
+    if (outstanding) annotations?.push({ tag: 'markdown', text_size: 'notation', content: '已收到补充，负责人正在处理；任务进度仍显示在本卡。' });
   }
   const root = state.conversations.find((item) => item.id === q.rootTurnId);
 

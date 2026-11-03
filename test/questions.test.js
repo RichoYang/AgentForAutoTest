@@ -367,3 +367,8 @@ test('a public follow-up by another member does not displace the original creato
  attachQuestion(s,turn,{reply_to:'root',root_id:'root'},{});assert.equal(turn.questionId,'root-q');assert.equal(s.questions['child-q'].latestTurnId,'t2');
  const explicit={...turn,id:'another',messageId:'later'};attachQuestion(s,explicit,{reply_to:'child',root_id:'root'},{});assert.notEqual(explicit.questionId,'root-q');assert.equal(s.questions[explicit.questionId].parentQuestionId,'child-q');
 });
+
+test('a table-first analysis answer publishes its table and flow metadata without assuming a leading text block',()=>{
+ const state={questions:{q:{id:'q',title:'Field names',latestTurnId:'t',rootTurnId:'t',profile:'owner',senderId:'ou_user',messageId:'m'}},conversations:[{id:'t',questionId:'q',status:'sent',chatType:'group',outcome:{jobId:'j'}}],jobs:[{id:'j',questionId:'q',status:'completed',stage:'developer',taskIntent:'analysis',events:[],result:{outcome:'ready',summary:'Fields',finalMessage:'| 字段 | 来源 |\n| --- | --- |\n| 编码 | CODE |'}}]};
+ const view=questionView(state,'q');assert.equal(view.card.body.elements[0].tag,'table');assert.equal(view.card.body.elements[0].rows[0].column_2,'CODE');assert.match(JSON.stringify(view.card),/流程：开发/);
+});
