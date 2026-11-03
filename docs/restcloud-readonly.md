@@ -11,6 +11,8 @@
 | GET | `/restcloud/rest/core/services/showdetails` | 接口说明及当前配置 |
 | GET | `/restcloud/rest/apiportal/apis/showdetails` | API管理中心详情 |
 | GET | `/restcloud/rest/businesslog/fieldCode/list/all` | 日志查询字段定义 |
+| GET | `/restcloud/rest/apiportal/apis/apm` | 接口依赖关系元数据 |
+| GET | `/restcloud/rest/core/monitor/logs/{objectId}` | 指定接口的调用日志；仍需原问题时间和分页筛选 |
 
 API目录标题在部分版本使用 `.api-list-right-home-card-header-name` 的 div，不是原生链接。审核确认为打开说明详情后，通过 `readNavigationSelectors` 暴露为模型可见的 read-action，不能把整个页面或任意 div 都设成可点击。该配置接入现有控件目录和浏览器请求门控，无须新增绕过工具。
 
@@ -23,3 +25,5 @@ API目录标题在部分版本使用 `.api-list-right-home-card-header-name` 的
 配置在网站工具调用时重新读取；修改会改变环境指纹。旧票据不能自动冒用新配置，维护者复核同身份、系统、环境、原问题和只读范围后重新签发、接续同卡；保留旧票据/结果审计、固定源码与已取数，不重跑整项调查。仅这类已支持字段的配置补充不需要重启控制服务。模型、身份或源码切换仍按各自维护规则。
 
 验收分别记录：schema/请求边界回归；真实页面详情读取；原任务的流水日志与最终结论；卡片交付。前两项成功不能冒充业务根因已确认。打包包含示例、本文及回归，完整私有迁移仍须保留实际配置、凭据和取证。其它平台版本和操作系统需另行验证。
+
+动态资源日志路径使用经过审核的完整路径模板。仅GET可用，整段`{objectId}`接受24位十六进制、`{uuid}`接受标准UUID、`{integerId}`接受1—20位十进制字符串，数字不转浮点。无通配符、自定义正则或任意动作名；静态前缀、路径段数量、同源与固定筛选仍核验。既有固定路径兼容，不为每张业务卡把接口ID写进OS核心。

@@ -44,6 +44,16 @@
               "method": "GET",
               "path": "/restcloud/rest/businesslog/fieldCode/list/all",
               "reviewed": true
+            },
+            {
+              "method": "GET",
+              "path": "/restcloud/rest/apiportal/apis/apm",
+              "reviewed": true
+            },
+            {
+              "method": "GET",
+              "path": "/restcloud/rest/core/monitor/logs/{objectId}",
+              "reviewed": true
             }
           ],
           "readNavigationSelectors": [
