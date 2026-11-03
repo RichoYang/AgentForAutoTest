@@ -48,9 +48,11 @@ export class WebsiteBrowser {
   const settled=request=>{if(s.pendingReads.delete(request))s.lastReadActivity=Date.now();};
   page.on('requestfinished',settled);page.on('requestfailed',settled);
   page.on('response',async response=>{
-   const req=response.request();if(req.method()!=='POST'||!/\/(?:login|signin|sign-in|authenticate|auth|token)(?:[/?#]|$)/i.test(new URL(response.url()).pathname))return;
-   if(new URL(response.url()).origin!==new URL(e.baseUrl).origin)return;
-   s.authPostSeen=true;try{s.authResult=authResponseState(response.status(),await response.json());}catch{s.authResult=authResponseState(response.status(),null);}
+   const req=response.request(),url=new URL(response.url());if(url.origin!==new URL(e.baseUrl).origin)return;
+   const tail=url.pathname.split('/').filter(Boolean).at(-1)??'';
+   if(req.method()==='POST'&&/^(?:login|signin|sign-in|authenticate|auth|token)(?:\.[a-z]+)?$/i.test(tail)){s.authPostSeen=true;try{s.authResult=authResponseState(response.status(),await response.json());}catch{s.authResult=authResponseState(response.status(),null);}return;}
+   const reviewed=s.environment.queries?.[s.job?.environmentAccess?.queryId]?.readEndpoints??[];
+   if(s.waiting&&response.status()>=400&&['xhr','fetch'].includes(req.resourceType())&&reviewed.some(x=>x.method===req.method()&&x.path===url.pathname))s.bootstrapFailure={method:req.method(),path:url.pathname,status:response.status()};
   });
   page.setDefaultTimeout(10000);page.on('download',d=>d.cancel().catch(()=>{}));page.on('popup',p=>p.close().catch(()=>{}));page.on('dialog',d=>d.dismiss().catch(()=>{}));
   try{await page.goto(e.baseUrl,{waitUntil:'domcontentloaded',timeout:30000});}catch(error){await this.release(job.id);throw error;}
@@ -59,10 +61,10 @@ export class WebsiteBrowser {
  async loginStatus(s){
   const state=await s.page.evaluate(browserLoginState);
   if(state.loginRequired&&s.authResult&&!state.verificationRequired&&!state.passwordChangeRequired)Object.assign(state,s.authResult);
-  if(state.loginRequired){s.waiting=true;s.sawLogin=true;}
-  else if(state.pageReady){if(s.waiting&&s.sawLogin)s.reloadAfterLogin=true;s.waiting=false;s.credentialAttempted=false;s.authResult=null;}
+  if(state.loginRequired){s.waiting=true;s.sawLogin=true;if(s.bootstrapFailure&&!state.credentialRejected&&!state.verificationRequired&&!state.passwordChangeRequired){const code=s.bootstrapFailure.status;Object.assign(state,code===429?{loginState:'rate_limited',rateLimited:true}:code>=500?{loginState:'service_error',serviceUnavailable:true}:{loginState:'request_error',requestFailed:true});}}
+  else if(state.pageReady){if(s.waiting&&s.sawLogin)s.reloadAfterLogin=true;s.waiting=false;s.credentialAttempted=false;s.authResult=null;s.bootstrapFailure=null;}
   if(s.blockedLoginReads.size&&state.loginRequired&&!state.credentialRejected)state.blockedRequests=[...s.blockedLoginReads].slice(-8);
-  return {...state,diagnostic:{credentialAttempted:s.credentialAttempted===true,authRequestObserved:s.authPostSeen===true,authResult:s.authResult?.loginState??null,blockedRequests:[...s.blockedLoginReads].slice(-8)}};
+  return {...state,diagnostic:{credentialAttempted:s.credentialAttempted===true,authRequestObserved:s.authPostSeen===true,authResult:s.authResult?.loginState??null,blockedRequests:[...s.blockedLoginReads].slice(-8),bootstrapFailure:s.bootstrapFailure??null}};
  }
  async needsLogin(s){const state=await this.loginStatus(s);return state.loginRequired||!state.pageReady;}
  async loginStatusFor(job,e){return this.loginStatus(await this.state(job,e));}
@@ -83,7 +85,7 @@ export class WebsiteBrowser {
   if(before.passwordChangeRequired)return {...before,authenticated:false,attempted:false};
   const password=s.page.locator('input[type="password"]:visible').first();
   if(!await password.count())return {...before,authenticated:before.pageReady===true,attempted:false};
-  s.authResult=null;s.authPostSeen=false;s.blockedLoginReads.clear();
+  s.authResult=null;s.authPostSeen=false;s.bootstrapFailure=null;s.blockedLoginReads.clear();
   const form=password.locator('xpath=ancestor::form[1]');const scope=await form.count()?form:s.page.locator('body');
   const inputs=scope.locator('input:not([type="password"]):not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):visible');
   let username=inputs.first();for(let i=0;i<await inputs.count();i++){const el=inputs.nth(i);const label=await el.evaluate(x=>[x.name,x.id,x.autocomplete,x.placeholder,x.getAttribute('aria-label')].join(' '));if(/user|account|login|email|phone|mobile|账号|用户|邮箱|手机/i.test(label)){username=el;break;}}
