@@ -312,6 +312,8 @@ export class JsonStore {
       if(plan.sourcePreparationRecovery&&plan.sourcePreparationKeys?.length){progress.stagnant=0;progress.preparationSeen=[...new Set([...(progress.preparationSeen??[]),...plan.sourcePreparationKeys])].slice(-64);progress.preparationRecoveries=(progress.preparationRecoveries??0)+1;}
       if(plan.toolCorrectionKeys?.length){progress.stagnant=0;progress.toolCorrections=[...new Set([...(progress.toolCorrections??[]),...plan.toolCorrectionKeys])];}
       progress.verified=[...new Set([...(progress.verified??[]),...verified])].slice(0,64);job.investigationProgress=progress;
+      delete job.modelCheckpoint;
+      delete job.modelRecovery;
       job.environmentAccess = structuredClone(plan);
       job.updatedAt = new Date().toISOString();
       job.events.push({ id: createId('EVT'), type: 'continuous_environment_started', at: job.updatedAt,
@@ -358,6 +360,8 @@ export class JsonStore {
         result: { outcome: result.outcome, environmentEvidence: { scopeHash:evidence.scopeHash, readAt:evidence.readAt, environmentId:evidence.environmentId, queryId:evidence.queryId, resultHash:evidence.resultHash, rowCount:evidence.rowCount }, connectionEndpoints: endpoints },
       }].slice(-20);
       delete job.environmentAccess;
+      delete job.modelCheckpoint;
+      delete job.modelRecovery;
       delete job.browserCheckpoint;
       delete job.browserResumeClaim;
       job.updatedAt = new Date().toISOString();

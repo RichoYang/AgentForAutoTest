@@ -250,3 +250,46 @@ test('runner uses the acknowledged start event so queue time cannot exhaust the 
  };
  await runner.run(job);assert.equal(executed,1);assert.equal(completed.outcome,'ready');
 });
+
+test('capacity checkpoints expire at completed environment boundaries and cannot leak into a new purpose', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentos-continuous-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const old = process.env.AGENTOS_ENVIRONMENTS_FILE;
+  process.env.AGENTOS_ENVIRONMENTS_FILE = path.join(directory, 'environments.json');
+  t.after(() => { if (old) process.env.AGENTOS_ENVIRONMENTS_FILE = old; else delete process.env.AGENTOS_ENVIRONMENTS_FILE; });
+  const environments = { version: 1, environments: { uat: { projectId: 'demo', tier: 'uat', kind: 'mysql', host: 'db.test', port: 3306,
+    database: 'demo', credentialRef: 'uat', membersRead: true, ownerOpenIdsByProfile: { owner: ['ou_admin'] },
+    queries: { investigate: { reviewed: true, mode: 'investigate', description: '只读核对订单', tables: ['orders'], maxRows: 20,
+      timeoutMs: 5000, parameters: [{ name: 'purpose', type: 'string', maxLength: 200 }] } } } } };
+  await writeFile(process.env.AGENTOS_ENVIRONMENTS_FILE, JSON.stringify(environments));
+  const store = new JsonStore(path.join(directory, 'state.json'));
+  const { job } = await store.createJob({ projectId: 'demo', questionId: 'QST-one', chatId: 'group', senderId: 'member', originProfile: 'owner',
+    taskIntent: 'analysis', workflow: 'continuous_analysis', stage: 'developer', instruction: '核对订单', continuousInvestigation: true });
+  const leased = await store.leaseNext('runner');
+  const identity = { runnerId: 'runner', leaseId: leased.lease.id };
+  const plan = planQuery(environments, { environmentId: 'uat', queryId: 'investigate', parameters: ['核对订单'] }, 'demo', { profile: 'owner', senderId: 'member' });
+  await store.beginContinuousEnvironment(job.id, identity, plan, { outcome: 'needs_clarification', finalMessage: '需要数据库证据', environmentQuery: {} });
+  const claimed = await store.claimEnvironment(job.id, identity);
+  const evidence = { environmentId: 'uat', queryId: 'investigate', scopeHash: claimed.scopeHash,
+    readAt: new Date(Date.now() + 1).toISOString(), rowCount: 1, resultHash: 'a'.repeat(64) };
+  await store.transact(s=>{const j=s.jobs.find(x=>x.id===job.id);j.modelCheckpoint={stage:'environment',environmentId:'uat',resultRef:'old-stage'};j.modelRecovery={attempt:4};j.modelRecoveryHistory=[{checkpoint:j.modelCheckpoint}];});
+  const resumed = await store.completeContinuousEnvironment(job.id, identity,
+    { outcome: 'ready', finalMessage: '已读取订单', environmentEvidence: evidence, connectionEndpoints: [{host:'other.test',port:3306,database:'other',connectionSource:{namespace:'uat',group:'g',dataId:'db.yaml',contentHash:'b'.repeat(64)},password:'never-store'}] });
+  assert.equal(resumed.modelCheckpoint,undefined);assert.equal(resumed.modelRecovery,undefined);assert.equal(resumed.modelRecoveryHistory[0].checkpoint.resultRef,'old-stage');
+  const next=planQuery(environments,{environmentId:'uat',queryId:'investigate',parameters:['different purpose']},'demo',{profile:'owner',senderId:'member'});
+  await store.transact(s=>{const j=s.jobs.find(x=>x.id===job.id);j.modelCheckpoint={stage:'source',threadId:'old-source'};j.modelRecovery={attempt:1};});
+  const nextJob=await store.beginContinuousEnvironment(job.id,identity,next,{outcome:'needs_clarification',finalMessage:'Next scope',environmentQuery:{}});
+  assert.equal(nextJob.modelCheckpoint,undefined);assert.equal(nextJob.modelRecovery,undefined);assert.equal(nextJob.modelRecoveryHistory[0].checkpoint.resultRef,'old-stage');
+  assert.equal(resumed.id, job.id);
+  assert.equal(resumed.status, 'running');
+  assert.equal(resumed.environmentAccess, undefined);
+  assert.equal(resumed.context.length, 2);
+  assert.equal(resumed.completedEnvironmentReads[0].plan.configHash,claimed.configHash);
+  assert.equal(resumed.completedEnvironmentReads[0].result.connectionEndpoints[0].database,'other');
+  assert.doesNotMatch(JSON.stringify(resumed.completedEnvironmentReads),/password|never-store/);
+  const done = await store.appendEvent(job.id, { type: 'completed', ...identity,
+    result: { outcome: 'ready', finalMessage: '最终结论' } });
+  assert.equal(done.job.status, 'completed');
+  assert.equal(done.nextJob, null);
+  assert.equal((await store.read()).jobs.length, 1);
+});
