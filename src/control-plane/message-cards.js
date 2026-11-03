@@ -86,7 +86,7 @@ export function jobCard(job, now = Date.now(), { startAt = job.createdAt } = {})
     blocked: ['任务受阻 / 未通过', 'red'], failed: ['执行失败', 'red'], cancelled: ['已取消 / 已停止', 'grey'],
     cancelling: ['正在停止', 'orange'], resubmitted: ['补充已提交', 'blue'] };
   const terminalState = ['completed', 'blocked', 'failed', 'cancelled'].includes(job.status);
-  const [label, color] = job.status==='completed'&&job.result?.outcome==='needs_clarification' ? ['等待补齐信息 · 尚未完成','orange'] : expired ? ['查询申请已过期 · 可重新申请', 'orange'] : !terminalState && job.result?.browserActionRequired === 'automation' ? ['等待本机浏览器授权 · 放行后自动继续', 'orange'] : !terminalState && job.result?.browserLoginRequired && ['request_blocked','access_check_failed'].includes(job.result.browserLoginState) ? ['登录链路待恢复 · 原任务保留', 'orange'] : !terminalState && job.result?.browserLoginRequired ? ['恢复网页登录 · 登录后自动继续', 'orange'] : job.taskIntent === 'analysis' && job.result?.outcome === 'partial' && ['completed', 'awaiting_approval'].includes(job.status)
+  const [label, color] = !terminalState&&job.result?.modelCapacityWaiting ? [job.result.modelCapacityState==='access_check_failed'?'恢复范围待复核 · 现场保留':'模型繁忙 · 等待自动恢复','orange'] : job.status==='completed'&&job.result?.outcome==='needs_clarification' ? ['等待补齐信息 · 尚未完成','orange'] : expired ? ['查询申请已过期 · 可重新申请', 'orange'] : !terminalState && job.result?.browserActionRequired === 'automation' ? ['等待本机浏览器授权 · 放行后自动继续', 'orange'] : !terminalState && job.result?.browserLoginRequired && ['request_blocked','access_check_failed'].includes(job.result.browserLoginState) ? ['登录链路待恢复 · 原任务保留', 'orange'] : !terminalState && job.result?.browserLoginRequired ? ['恢复网页登录 · 登录后自动继续', 'orange'] : job.taskIntent === 'analysis' && job.result?.outcome === 'partial' && ['completed', 'awaiting_approval'].includes(job.status)
     ? ['部分分析完成 · 有待核实', 'orange'] : labels[job.status] ?? ['等待更新', 'grey'];
   const active = ['running', 'queued', 'cancelling'].includes(job.status);
   const events = job.events ?? [];
@@ -102,7 +102,7 @@ export function jobCard(job, now = Date.now(), { startAt = job.createdAt } = {})
     : activity?.current ?? 'Codex 正在准备 / 处理任务';
   const summary = expired ? '本次查询申请已过期，尚未访问环境。点击“重新申请本次查询”后，核对原范围并再次批准；不会自动执行。' : job.status === 'cancelled' ? '任务已取消，已停止继续执行。' : !active && job.result?.finalMessage
     ? job.taskIntent === 'analysis' ? '' : resultSummary(job.result.summary || job.result.finalMessage) : '';
-  const analysisElements = !active && job.taskIntent === 'analysis' && job.result?.finalMessage ? analysisPrimaryCardElements(job.result.finalMessage) : [];
+  const analysisElements = !active && !(job.status==='cancelled'&&job.result?.modelCapacityWaiting) && job.taskIntent === 'analysis' && job.result?.finalMessage ? analysisPrimaryCardElements(job.result.finalMessage) : [];
   const answerBlocks = analysisElements.length ? analysisElements.map((element) => element.tag === 'table' ? element : block(summaryParagraphs(element.content).map(part => md(part)), color)) : [block([md(`**${active ? '当前操作' : '结论'}**`), ...summaryParagraphs(active ? publicText(clip(operation, 120))
     : summary || (job.status === 'awaiting_approval' ? '请真人管理员查看阶段结论，再点击下方按钮确认进入下一阶段。'
     : job.status === 'awaiting_clarification' ? '需要补充信息，尚未通过当前阶段。'
@@ -122,7 +122,7 @@ export function jobCard(job, now = Date.now(), { startAt = job.createdAt } = {})
   if (job.taskIntent === 'analysis') metadata?.push(md(job.environmentAccess ? '环境只读查询 · 不修改数据库或配置' : '只读分析 · 不修改代码', true));
   if (job.nextJobId) metadata?.push(md(`已交给项目负责人汇总 · ${publicText(job.nextJobId)}`, true));
   if (job.delegation) metadata?.push(md(`协作：${stageLabel(job.delegation.fromStage)} → ${stageLabel(job.delegation.toStage)}`, true));
-  if (job.status === 'awaiting_clarification' && !job.result?.browserLoginRequired) elements.push({ tag: 'form', name: 'clarification_form', elements: [
+  if (job.status === 'awaiting_clarification' && !job.result?.browserLoginRequired && !job.result?.modelCapacityWaiting) elements.push({ tag: 'form', name: 'clarification_form', elements: [
     { tag: 'input', name: 'clarification', input_type: 'multiline_text', rows: 3, max_length: 1000, required: true,
       width: 'fill', placeholder: { tag: 'plain_text', content: '填写需要补充的范围、路径或验收要求…' } },
     { tag: 'button', name: `clarify_${jobActionVersion(job)}`, form_action_type: 'submit', type: 'primary_filled',

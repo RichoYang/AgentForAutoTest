@@ -1,3 +1,4 @@
+import {isModelCapacityError as capacityError,modelCapacityWait}from '../shared/model-capacity-wait.js';
 import {currentUserQuestion,fieldMappingContract}from '../shared/user-request-scope.js';
 import {comparisonContext,requireComparisonContinuation} from '../shared/source-comparison.js';
 import {loadSourceMethod,rememberSourceMethod,loadComparisonSourceHints} from './source-method-cache.js';
@@ -64,6 +65,7 @@ export async function executeJob(job, config, emit) {
   let generated;
   try { generated = await runWithSourceHistory({ job, project, sourceSync, config, workspace, attachmentPaths, prompt, emit },{run:runCodexWithCapacityRetry}); }
   catch(error) {
+    if(job.taskIntent==='analysis'&&capacityError(error))return modelCapacityWait({stage:'source',harnessFingerprint:harness.metadata.fingerprint,agentStage:job.stage,questionId:job.questionId,workspace,threadId:error.threadId??analysisThreadId(job,workspace)},job.modelRecovery);
     if(error.code!=='ANALYSIS_TURN_TIMEOUT'||job.taskIntent!=='analysis')throw error;
     generated=analysisTimeoutResult(job,error);
   }
@@ -255,7 +257,9 @@ export function buildCodexArgs(workspace, attachmentPaths = [], { readOnly = fal
 }
 
 export function analysisThreadId(job, workspace) {
-  if (job.taskIntent !== 'analysis' || job.stage !== 'developer') return null;
+  if(job.taskIntent!=='analysis')return null;
+  if(job.modelCheckpoint?.stage==='source'&&job.analysisContinuation?.questionId===job.questionId&&job.analysisContinuation.workspace===workspace)return job.analysisContinuation.threadId;
+  if(job.stage!=='developer')return null;
   if(job.analysisContinuation&&job.analysisContinuation.questionId===job.questionId&&job.analysisContinuation.workspace===workspace)return job.analysisContinuation.threadId;
   return [...(job.context ?? [])].reverse()
     .find((entry) => entry.stage === 'developer' && entry.result?.threadId

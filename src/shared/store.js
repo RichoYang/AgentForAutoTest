@@ -563,6 +563,7 @@ export class JsonStore {
           || !event.result.sourceSync?.repositories?.length)) throw new Error('Invalid partial analysis evidence');
         if(job.environmentAccess&&event.result?.exportFiles?.length)recordReportFiles(job,event.result.exportFiles,state.questions?.[job.questionId]?.generation);
         recordReportReview(job,event.result);
+        if(!event.result?.modelCapacityWaiting){delete job.modelCheckpoint;delete job.modelRecovery;}
         job.result = event.result ?? null;
         job.status = event.result?.outcome === 'blocked' ? 'blocked' : needsClarification(job, event.result)
           ? 'awaiting_clarification'

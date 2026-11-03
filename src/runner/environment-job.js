@@ -1,3 +1,4 @@
+import {modelCapacityWait}from '../shared/model-capacity-wait.js';
 import {readBusinessDefinitions,definitionActor} from '../shared/business-definitions.js';
 import {BrowserInputError,validateBrowserTool,correctableBrowserCodes,screenshotRequested} from '../shared/browser-tool-input.js';
 import {QueryInputError} from './environment-tools.js';
@@ -29,7 +30,7 @@ export async function executeEnvironmentJob(job, config, emit) {
   const renewPlan=async current=>(await controlPost(config,`/api/v1/jobs/${encodeURIComponent(job.id)}/environment-renew`,{leaseId:job.lease.id,runnerId:job.lease.runnerId,scopeHash:current.scopeHash})).plan;
   try { const cfg=await loadEnvironments();environment=cfg.environments[plan.environmentId];
     job={...job,businessDefinitions:await readBusinessDefinitions({dataDir:config.dataDir??path.dirname(config.worktreeRoot),file:config.knowledgeFile,actor:definitionActor(job),projectId:job.projectId,environment:job.sourceEnvironment}).catch(()=>[{unavailable:true,rule:'共享口径暂不可读，不代表此前没有确认；保留已有成果，报告具体读取缺口，不要求用户重定已有口径。'}])};
-    const adapters={renewPlan,reportJob:job,dataDir:config.dataDir??path.dirname(config.worktreeRoot),exportDirectory:path.join(config.dataDir??path.dirname(config.worktreeRoot),'exports',job.id),investigationContext:reportInvestigationContext(job),sourceQueryContext,...(environment.kind==='website'?{tools:async()=>websiteTools(job,config),checkpoint:job.browserCheckpoint}:{})};
+    const adapters={capacityCheckpoint:job.modelCheckpoint?.stage==='environment'?job.modelCheckpoint:null,renewPlan,reportJob:job,dataDir:config.dataDir??path.dirname(config.worktreeRoot),exportDirectory:path.join(config.dataDir??path.dirname(config.worktreeRoot),'exports',job.id),investigationContext:reportInvestigationContext(job),sourceQueryContext,...(environment.kind==='website'?{tools:async()=>websiteTools(job,config),checkpoint:job.browserCheckpoint}:{})};
     result=environment?.queries[plan.queryId]?.mode==='investigate'?await investigateEnvironment(plan,emit,adapters):await readEnvironment(plan);
   }
   catch (error) {
@@ -39,6 +40,7 @@ export async function executeEnvironmentJob(job, config, emit) {
       finalMessage:`${diagnostic}\n\n这不是业务账号未登录，也不会丢失原问题和已有证据。`, verification:[] };
     return { outcome: 'blocked', summary: diagnostic, finalMessage: diagnostic, environmentFailure:{code:/^错误码：(\w+)/.exec(diagnostic)?.[1]??'EXECUTION_ERROR',stage:error.rpcMethod??error.diagnosticStage??'environment_read',diagnostic}, verification: [] };
   }
+  if(result.modelCapacityWaiting)return modelCapacityWait(result.modelCheckpoint,job.modelRecovery);
   if(result.loginRequired) {
     const loginUrl = environment?.kind === 'website' ? environment.baseUrl : '';
     return {outcome:'needs_clarification',browserLoginRequired:true,browserCheckpoint:result.checkpoint,loginUrl,

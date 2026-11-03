@@ -1,3 +1,4 @@
+import {pollModelCapacity}from './model-capacity-recovery.js';
 import {requestedSourceEnvironments} from '../shared/source-comparison.js';
 import {authorizeWebsiteRequest} from './website-authorization.js';
 import {assertSourceRuntimeTier,sourceEnvironmentForTier,sourceRuntimeTier} from '../shared/source-environments.js';
@@ -100,6 +101,8 @@ export async function createControlPlane(overrides = {}) {
   });
 
   server.once('listening', () => {
+    context.capacityRecoveryStopped=false;
+    context.capacityRecoveryTimer=setInterval(()=>pollModelCapacity(context).catch(()=>console.error('[capacity-recovery] recovery deferred')),1000);context.capacityRecoveryTimer.unref();
     context.retention.start();
     cards.start();
     context.websiteEvidence.retry().catch(()=>console.error('[website-evidence] recovery unavailable'));
@@ -109,6 +112,7 @@ export async function createControlPlane(overrides = {}) {
     conversations.start().catch((error) => console.error('[conversation-start]', error.message));
   });
   server.once('close', () => {
+    context.capacityRecoveryStopped=true;clearInterval(context.capacityRecoveryTimer);
     void Promise.allSettled([context.retention.stop(), conversations.stop(), cards.stop(), context.reports.close(),context.websiteEvidence.close(), context.websiteBrowser.close()]).then(()=>context.knowledge.close());
   });
   return { server, config, projects, agents, store, conversations, cards };

@@ -132,3 +132,6 @@ data/local-executions保存本机实际fork的父/工作进程和租约身份，
 `data/source-methods/`是可重建的同版本源码定位索引，仅保存路径/摘要/大小/行号及哈希主题特征，不含历史答案、业务行、金额、查询参数或凭据。版本、环境、助手、群和已确认口径隔离，当前源码再次校验后才读取。`window_counts`配方保存在原任务数据集，恢复/刷新需要全部原始来源；迁移继续保留完整data，不仅复制最终CSV。索引失效回到普通调查，数据集损坏仍是实际核验缺口。
 
 双环境调查任务还保留`analysisSourceSnapshots`、`sourceEnvironmentEvidence`、`sourceEnvironmentThreads`/`analysisContinuations`；单值快照仍为活动环境投影。迁移保留完整任务和所引用快照；缓存回收已有递归引用检查会保护活任务的两套工作区，禁止只备份当前单值快照。旧版不能接管未完成的双环境任务。
+
+
+模型容量暂时不可用的只读任务现使用持久等待与原步骤自动恢复，状态/范围/取消/检查点及迁移边界见 [模型容量恢复](model-capacity-recovery.md)。不是整任务重放，不新增整任务截止；实施与业务写入不套用。
