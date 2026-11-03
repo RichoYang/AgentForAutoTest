@@ -8,3 +8,7 @@ export function modelCapacityWait(checkpoint,previous={},now=Date.now()){
   summary:'模型服务暂时繁忙，任务已保留，等待自动恢复；无需重新提问或提供凭据。',
   finalMessage:`模型服务返回 MODEL_CAPACITY，当前步骤尚未完成。已保存原问题、已有证据和恢复现场，预计 ${delayMs/1000} 秒后按原身份和范围自动接续。不会自动重放已完成的业务查询，不会修改模型配置。可在原卡取消任务。`,verification:[]};
 }
+export async function persistModelCheckpoint(store,checkpoint){
+ try{return await store.present('model_checkpoint',checkpoint,0,{persist:true});}
+ catch(error){throw Object.assign(new Error('模型容量不足；恢复检查点保存失败，已有证据保留，未自动重放查询。'),{code:'MODEL_CHECKPOINT_SAVE_FAILED',originalFailureCode:'MODEL_CAPACITY',checkpointFailureCode:/^[A-Z0-9_]+$/.test(error?.code??'')?error.code:'STORAGE_ERROR'});}
+}

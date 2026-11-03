@@ -69,6 +69,7 @@ const rules = [
   ['RESULT_CONTRACT', /Invalid partial (analysis|environment) evidence/, '结果提交校验', '程序拒绝了部分结果的证据格式，并非已确认的远端连接失败。', '联系维护者核对版本与结果协议；修复后重新发起查询。'],
   ['SCHEMA_COMPAT', /invalid_json_schema|Invalid schema for response_format|text\.format\.schema/i, '结构化结果协议', 'AgentOS提交给Codex的结果结构不兼容，模型尚未开始分析，也未访问业务环境。', '请维护者更新结果结构并重启AgentOS；用户无需补充问题、登录或重新授权。'],
   ['RESULT_GRACE_EXPIRED', /RESULT_GRACE_EXPIRED/, '结果提交校验', '环境读取已停止，但结果在允许的收尾时间内未能提交。', '重新发起任务；系统不会在授权到期后继续访问环境。'],
+  ['MODEL_CHECKPOINT_SAVE_FAILED', /模型容量不足；恢复检查点保存失败/, '恢复检查点保存', '模型容量暂不可用，同时检查点未能持久化；未自动重放查询。', '维护者先核对本机存储及已有检查点；不能清空已有数据或让用户重发原问题来绕过。'],
   ['MODEL_CAPACITY', /Selected model is at capacity|model.{0,40}(at capacity|overloaded|temporarily unavailable)/i, 'Codex模型服务', '当前选择的Codex模型暂时没有可用容量，并非业务代码、数据或权限错误。', '只读调查会保留现场并等待自动恢复，无需重新提问；其他执行类型不会因此盲目重放。'],
   ['AUTH_REQUIRED', /认证未成功|Invalid login|Login required|credential|本机凭据|ChatGPT 登录|Unapproved login/i, '登录与凭据', '登录未完成或本机凭据不可用。', '在 AgentOS 所在电脑重新登录对应服务或解锁钥匙串。'],
   ['READ_PERMISSION', /只读账号权限|数据库账号含写权限|无权限|ER_ACCESS_DENIED_ERROR|HTTP 40[13]/i, '读取权限检查', '服务拒绝读取，或账号未通过只读权限核验。', '请管理员核对读取权限；核对当前账号策略与授权，不要关闭只读事务。'],

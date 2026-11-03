@@ -41,6 +41,7 @@ export async function executeJob(job, config, emit) {
   const project = config.projects[job.projectId];
   const began = Date.now();
   const harness = await loadHarness(job);
+  if(job.modelCheckpoint?.stage==='source'&&job.modelCheckpoint.harnessFingerprint&&job.modelCheckpoint.harnessFingerprint!==harness.metadata.fingerprint)throw new Error('Harness版本在任务链中发生变化；请先由管理员复核，不自动沿用旧批准。');
   let sourceSync;
   if (job.taskIntent === 'analysis') {
     const reusingSnapshot = (job.context ?? []).some(entry => entry.result?.sourceSync);

@@ -38,7 +38,7 @@ export async function executeEnvironmentJob(job, config, emit) {
     if (/^错误码：BROWSER_BRIDGE\b/.test(diagnostic)) return { outcome:'needs_clarification', browserLoginRequired:true,
       browserActionRequired:'automation', summary:'AgentOS 正在等待 macOS 放行后台 Chrome 自动化。业务网站登录态仍然有效，放行后会自动继续原问题，无需回复“继续”。',
       finalMessage:`${diagnostic}\n\n这不是业务账号未登录，也不会丢失原问题和已有证据。`, verification:[] };
-    return { outcome: 'blocked', summary: diagnostic, finalMessage: diagnostic, environmentFailure:{code:/^错误码：(\w+)/.exec(diagnostic)?.[1]??'EXECUTION_ERROR',stage:error.rpcMethod??error.diagnosticStage??'environment_read',diagnostic}, verification: [] };
+    return { outcome: 'blocked', summary: diagnostic, finalMessage: diagnostic, environmentFailure:{code:/^错误码：(\w+)/.exec(diagnostic)?.[1]??'EXECUTION_ERROR',stage:error.rpcMethod??error.diagnosticStage??'environment_read',diagnostic,...(error.originalFailureCode?{originalFailureCode:error.originalFailureCode,checkpointFailureCode:error.checkpointFailureCode}:{})}, verification: [] };
   }
   if(result.modelCapacityWaiting)return modelCapacityWait(result.modelCheckpoint,job.modelRecovery);
   if(result.loginRequired) {
