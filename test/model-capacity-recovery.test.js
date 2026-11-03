@@ -28,3 +28,18 @@ test('a newly signed different purpose cannot reuse a waiting checkpoint for the
 import {persistModelCheckpoint}from '../src/shared/model-capacity-wait.js';
 test('checkpoint persistence failure preserves the original capacity cause and never pretends recovery is safe',async()=>{await assert.rejects(persistModelCheckpoint({present:async()=>{throw Object.assign(Error('secret path must not escape'),{code:'ENOSPC'});}},{results:[]}),error=>{assert.equal(error.code,'MODEL_CHECKPOINT_SAVE_FAILED');assert.equal(error.originalFailureCode,'MODEL_CAPACITY');assert.equal(error.checkpointFailureCode,'ENOSPC');assert.doesNotMatch(error.message,/secret path/);return true;});});
 test('a grant changed between validation and queueing is never overwritten by stale recovery',async t=>{const{store,now}=await fixture(t);const fresh=planQuery(cfg,{...request,parameters:['Updated purpose']},'one',actor,now);await pollModelCapacity({store},{now,load:async()=>{await store.transact(s=>{s.jobs[0].environmentAccess=fresh;});return cfg;}});const j=(await store.read()).jobs[0];assert.equal(j.status,'awaiting_clarification');assert.equal(j.environmentAccess.scopeHash,fresh.scopeHash);assert.equal(j.events.length,0);});
+
+import {writeFile}from 'node:fs/promises';
+test('a scheduled checkpoint continuation can claim its new lease exactly once',async t=>{
+ const {dir,store,now}=await fixture(t),previous=process.env.AGENTOS_ENVIRONMENTS_FILE;
+ process.env.AGENTOS_ENVIRONMENTS_FILE=path.join(dir,'environments.json');
+ t.after(()=>{if(previous===undefined)delete process.env.AGENTOS_ENVIRONMENTS_FILE;else process.env.AGENTOS_ENVIRONMENTS_FILE=previous;});
+ await writeFile(process.env.AGENTOS_ENVIRONMENTS_FILE,JSON.stringify(cfg));
+ await pollModelCapacity({store},{now,load:async()=>cfg});
+ let j=(await store.read()).jobs[0];assert.equal(j.environmentAccess.startedAt,undefined);assert.ok(j.modelRecoveryHistory[0].previousStartedAt);
+ const identity={leaseId:'recovery-lease',runnerId:'recovery-runner'};
+ await store.transact(s=>{s.jobs[0].status='running';s.jobs[0].lease={id:identity.leaseId,runnerId:identity.runnerId,expiresAt:new Date(now+120000).toISOString()};});
+ const claimed=await store.claimEnvironment('j',identity);assert.ok(claimed.startedAt);assert.equal(claimed.environmentId,'env');
+ await assert.rejects(store.claimEnvironment('j',identity),/QUERY_ALREADY_STARTED/);
+ assert.equal((await store.read()).jobs[0].modelCheckpoint.resultRef,'opaque-checkpoint');
+});
