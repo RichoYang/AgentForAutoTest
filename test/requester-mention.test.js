@@ -64,14 +64,11 @@ test('browser automation wait asks for macOS permission instead of another websi
   assert.doesNotMatch(mention.text,/网页登录/);
 });
 
-test('website login wait checks saved credentials before requesting any new secret', () => {
-  const mention = jobTerminalMention({ originChatType:'group', status:'awaiting_clarification',
-    result:{browserLoginRequired:true,loginUrl:'https://jobs.example/xxl-job-admin/'}, environmentAccess:{approvalOwnerIds:['ou_admin']},
-    originMessageId:'m', originProfile:'owner' });
-  assert.match(mention.text,/https:\/\/jobs\.example\/xxl-job-admin\//);
-  assert.match(mention.text,/检查本机已保存的账号|无需重发/);
-  assert.doesNotMatch(mention.text,/直接回复.*密码/);
-  assert.doesNotMatch(mention.text,/私聊/);
+test('automatic website recovery does not mention administrators, including its initial unknown state', () => {
+ const base={originChatType:'group',status:'awaiting_clarification',environmentAccess:{approvalOwnerIds:['ou_admin']},originMessageId:'m',originProfile:'owner'};
+ for(const state of [undefined,'login_required','loading','waiting'])for(const credentials of [undefined,'unknown','available'])assert.equal(jobTerminalMention({...base,result:{browserLoginRequired:true,browserLoginState:state,browserCredentialState:credentials,loginUrl:'https://jobs.example/xxl-job-admin/'}}),null);
+ assert.ok(jobTerminalMention({...base,result:{browserLoginRequired:true,browserCredentialState:'unavailable'}}));
+ for(const state of ['credential_unavailable','password_change_required','service_error','request_error','rate_limited'])assert.ok(jobTerminalMention({...base,result:{browserLoginRequired:true,browserLoginState:state}}));
 });
 
 test('intake failures never announce a completed reply',()=>{

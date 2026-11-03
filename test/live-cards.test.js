@@ -290,3 +290,12 @@ test('analysis receipt stays silent until the continuous developer investigation
   assert.equal(notices[0].options.profile, 'owner');
   assert.match(notices[0].text, /ou_requester/);
 });
+
+ test('automatic login progress withdraws an obsolete pending manual notice without sending text',async t=>{
+ const {cards,calls,store}=await setup(t),dest={chatId:'group',profile:'owner'},job={id:'login',stage:'developer',status:'awaiting_clarification',events:[],result:{browserLoginRequired:true}};
+ await cards.upsert('job:login',jobCard(job),dest,{terminal:true,terminalMention:{kind:'browser_login',replyTo:'root',profile:'owner',text:'Old manual notice'}});
+ await cards.upsert('job:login',jobCard(job),dest,{terminal:true,terminalMention:null,immediate:true});
+ const saved=(await store.read()).cardMessages['job:login'];assert.equal(saved.terminalMention,null);assert.equal(calls.filter(x=>x.type==='text').length,0);
+ await cards.upsert('job:login',jobCard({...job,status:'completed',result:{outcome:'ready'}}),dest,{terminal:true,immediate:true,terminalMention:{replyTo:'root',profile:'owner',text:'Actual completion'}});
+ assert.equal(calls.filter(x=>x.type==='text').length,1);assert.equal(calls.find(x=>x.type==='text').text,'Actual completion');
+ });

@@ -16,14 +16,18 @@ export function jobTerminalMention(job, projects = {}) {
   if(job.connectionEnrollmentPending && !job.connectionEnrollmentHandled && job.status === 'completed' && job.result?.investigation?.status !== 'wait') return null;
   if (job?.originChatType !== 'group' || job.nextJobId) return null;
   if(job.status==='awaiting_clarification'&&job.result?.browserLoginRequired){
+    // Automatic credential/session recovery is progress, not a human action.
+    const humanStates=['request_blocked','access_check_failed','rejected','verification_required','credential_unavailable','password_change_required','service_error','request_error','rate_limited'];
+    if(job.result.browserActionRequired!=='automation'&&job.result.browserCredentialState!=='unavailable'&&!humanStates.includes(job.result.browserLoginState))return null;
     const ids=(job.environmentAccess?.approvalOwnerIds??[]).filter(id=>OPEN_ID.test(id));
     const instruction = job.result?.browserActionRequired === 'automation'
       ? ' 请在运行AgentOS的Mac上放行系统对Chrome的自动化访问；放行后自动继续原问题，不用回复继续。'
       : ['request_blocked','access_check_failed'].includes(job.result.browserLoginState) ? ' 已保存的登录信息无需重发；登录链路或请求范围尚未恢复，请维护者核对，恢复后自动继续原问题。'
       : job.result.browserLoginState==='rejected' ? ' 网站拒绝了本次登录，请核对账号状态并安全更新本机凭据；不会反复自动提交失败的密码。'
       : job.result.browserLoginState==='verification_required' ? ' 已保存账号无需重发；请仅在本机页面完成验证码、扫码或本人确认，完成后自动继续。'
-      : job.result.browserCredentialState==='unavailable' ? ' 当前未能读取本应用凭据；首次使用请安全配置，若以前已保存，请维护者核对钥匙串和应用绑定，无需反复发送密码。'
-      : ` 正在检查本机已保存的账号并恢复登录：${job.result?.loginUrl || '卡片中显示的网站'}。已有凭据无需重发；如需验证码或本人确认，会在原卡说明。`;
+      : (job.result.browserCredentialState==='unavailable'||job.result.browserLoginState==='credential_unavailable') ? ' 当前未能读取本应用凭据；首次使用请安全配置，若以前已保存，请维护者核对钥匙串和应用绑定，无需反复发送密码。'
+      : job.result.browserLoginState==='password_change_required' ? ' 网站要求修改或重置密码，请本人在本机页面处理；AgentOS不会自动改密。'
+      : ' 登录服务或请求链路暂未恢复，请维护者查看原卡中的具体原因；已有凭据无需重发。';
     return ids.length?{kind:'browser_login',replyTo:job.originMessageId??job.replyToMessageId,profile:job.originProfile,text:ids.map(id=>`<at user_id="${id}"></at>`).join(' ')+instruction}:null;
   }
   if (job.status === 'awaiting_environment_approval') {
