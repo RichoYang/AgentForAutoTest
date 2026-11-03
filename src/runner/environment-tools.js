@@ -1,3 +1,4 @@
+import {cleanWebsiteText} from '../shared/website-policy.js';
 import {mongoInputDiagnostic} from './mongo-input-diagnostic.js';
 import {createTctTools} from './tct-tools.js';
 import {createMongoBackend,mongoToolSpec} from './mongo-tools.js';
@@ -258,7 +259,7 @@ export async function createEnvironmentTools(e, q, cred, adapters = {}) {
     { tool: 'connection', args: {}, description: '测试数据库连接、只读账号授权与只读事务' },
     { tool: 'database_clock', args: {}, description: '读取固定SQL返回的数据库会话时间、UTC时间、UTC偏移与时区设置，核对过去一周等日期窗口；不接受SQL或参数，不读业务表。数据库会话时区不等于DATETIME字段业务时区，仍需结合字段类型及源码。' },
     { tool: 'tables', args: {cursor:'可选：nextCursor，默认0'}, description:'分页列出允许的基础表名称，先定位目标表再用schema读取列' },
-    { tool: 'schema', args: { table: '可选：限定基础表名', columns: ['可选：要定向发现的准确字段名，最多20个；使用时必须提供table'], cursor: '可选：上次返回的nextCursor，默认0' }, description: '读取本数据库允许的基础表和普通字段；已知字段名时用table+columns定向发现，避免宽表分页遗漏；不读取业务数据' },
+    { tool: 'schema', args: { table: '可选：限定基础表名', columns: ['可选：要定向发现的准确字段名，最多20个；使用时必须提供table'], search:'可选：在已授权表的表名、表注释、字段名及字段注释中按非空字面文本检索；不是SQL或正则', cursor: '可选：上次返回的nextCursor，默认0' }, description: '返回当前数据库真实库名、普通字段、SQL类型/长度精度/可空性及注释；tables兼容旧字段名结构，columnMetadata给出物理元数据。先用table定向；业务标签没有映射时用search查注释，按nextCursor读完，未匹配不是业务不存在。不读业务数据，不跨库。' },
     { tool: 'count', args: { table: 'schema返回的表', distinctColumns: '可选：去重字段数组；空数组统计行数，非空按这些字段组合去重（不计含NULL的组合）', filters: '与select相同的明确筛选条件' }, description: '统计批准基础表筛选范围内的完整行数或指定字段组合去重数，不用样本行数代替总数，不支持任意SQL或联表' },
     { tool: 'group_count', args: { table: 'schema返回的表', groupColumns: ['用于判断重复的实际字段的非空列表'], minCount: '最小重复数，默认2', filters: '与select相同的明确筛选条件' }, description: `按业务字段组合分组统计重复记录，返回重复最多的${q.maxRows}组；仅单表参数化查询。总行数大于业务去重数、疑似重复批次或重复提交时优先使用` },
     { tool: 'aggregate', args: {table:'schema返回的表',aggregates:[{op:'sum|avg|min|max|count|count_distinct',column:'count可省略，其余使用schema字段',as:'结果名'}],filters:'与select相同；可用本轮setRef作为in_set'},description:'在一个基础表内执行最多6项受控汇总；sum/avg仅允许schema确认的数值字段，不接受SQL表达式' },
@@ -371,17 +372,21 @@ export async function createEnvironmentTools(e, q, cred, adapters = {}) {
             || requestedColumns.some(column => !ident(column) || secretName.test(column)))) throw new QueryInputError('QUERY_INPUT', '定向字段发现需要table和1至20个普通字段名。');
           const offset = args.cursor === undefined ? 0 : Number(args.cursor);
           if(!Number.isInteger(offset) || offset<0 || offset>100000) throw new Error('结构分页参数无效');
+          if(args.search!==undefined&&(typeof args.search!=='string'||!args.search.trim()||/[\x00-\x1f\x7f]/.test(args.search)))throw new QueryInputError('QUERY_INPUT','schema search须为非空单行字面文本；不是SQL或正则。');
+          const searchClause=args.search!==undefined?' AND (LOCATE(?,c.COLUMN_NAME)>0 OR LOCATE(?,c.COLUMN_COMMENT)>0 OR LOCATE(?,c.TABLE_NAME)>0 OR LOCATE(?,t.TABLE_COMMENT)>0)':'';
+          const scopeClause=q.tables.includes('*')?'':` AND c.TABLE_NAME IN (${q.tables.map(()=>'?').join(',')})`;
           const columnClause = requestedColumns ? ` AND c.COLUMN_NAME IN (${requestedColumns.map(() => '?').join(', ')})` : '';
-          const [rows] = await read(c,{ sql: "SELECT c.TABLE_NAME AS table_name,c.COLUMN_NAME AS column_name,c.DATA_TYPE AS data_type,t.ENGINE AS engine,c.COLUMN_KEY AS column_key,(SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE k WHERE k.TABLE_SCHEMA=c.TABLE_SCHEMA AND k.TABLE_NAME=c.TABLE_NAME AND k.CONSTRAINT_NAME='PRIMARY') AS primary_key_count FROM information_schema.COLUMNS c JOIN information_schema.TABLES t ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME WHERE c.TABLE_SCHEMA=? AND t.TABLE_TYPE='BASE TABLE' AND c.EXTRA NOT LIKE '%GENERATED%'" + (args.table ? " AND c.TABLE_NAME=?" : "") + columnClause + ` ORDER BY c.TABLE_NAME,c.ORDINAL_POSITION LIMIT 101 OFFSET ${requestedColumns ? 0 : offset}`, timeout: q.timeoutMs }, [e.database, ...(args.table ? [args.table] : []), ...(requestedColumns ?? [])]);
-          const visible = new Map();
+          const [rows] = await read(c,{ sql: "SELECT c.TABLE_SCHEMA AS database_name,c.TABLE_NAME AS table_name,c.COLUMN_NAME AS column_name,c.DATA_TYPE AS data_type,c.COLUMN_TYPE AS column_type,c.IS_NULLABLE AS is_nullable,c.CHARACTER_MAXIMUM_LENGTH AS character_maximum_length,c.NUMERIC_PRECISION AS numeric_precision,c.NUMERIC_SCALE AS numeric_scale,c.COLUMN_COMMENT AS column_comment,t.TABLE_COMMENT AS table_comment,t.ENGINE AS engine,c.COLUMN_KEY AS column_key,(SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE k WHERE k.TABLE_SCHEMA=c.TABLE_SCHEMA AND k.TABLE_NAME=c.TABLE_NAME AND k.CONSTRAINT_NAME='PRIMARY') AS primary_key_count FROM information_schema.COLUMNS c JOIN information_schema.TABLES t ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME WHERE c.TABLE_SCHEMA=? AND t.TABLE_TYPE='BASE TABLE' AND c.EXTRA NOT LIKE '%GENERATED%'" + (args.table ? " AND c.TABLE_NAME=?" : "") + columnClause + scopeClause + searchClause + ` ORDER BY c.TABLE_NAME,c.ORDINAL_POSITION LIMIT 101 OFFSET ${requestedColumns ? 0 : offset}`, timeout: q.timeoutMs }, [e.database, ...(args.table ? [args.table] : []), ...(requestedColumns ?? []),...(q.tables.includes('*')?[]:q.tables),...(args.search!==undefined?[args.search,args.search,args.search,args.search]:[])]);
+          const visible = new Map(),columnMetadata=[];
           for (const r of rows.slice(0,100)) if (ident(r.table_name) && ident(r.column_name) && !secretName.test(r.column_name) && (q.tables.includes('*') || q.tables.includes(r.table_name))) {
+            const metadata={};for(const key of ['database_name','table_name','column_name','data_type','column_type','is_nullable','character_maximum_length','numeric_precision','numeric_scale','column_comment','table_comment'])if(r[key]!==undefined)metadata[key]=r[key]===null?null:cleanWebsiteText(bounded(r[key],secrets));columnMetadata.push(metadata);
             if(r.column_key==='PRI'&&Number(r.primary_key_count)===1)primaryKeys.set(r.table_name,[r.column_name]);
             if(typeof r.engine==='string')tableEngines.set(r.table_name,r.engine.toLowerCase());
             visible.set(r.table_name,[...(visible.get(r.table_name)??[]),r.column_name]);
             tables.set(r.table_name,[...new Set([...(tables.get(r.table_name)??[]),r.column_name])]);
             if(typeof r.data_type==='string'){const known=columnTypes.get(r.table_name)??new Map();known.set(r.column_name,r.data_type.toLowerCase());columnTypes.set(r.table_name,known);}
           }
-          const result = {tables:Object.fromEntries(visible),truncated:requestedColumns ? false : rows.length>100,nextCursor:!requestedColumns && rows.length>100?offset+100:null};
+          const result = {tables:Object.fromEntries(visible),columnMetadata,metadataOnly:true,searchApplied:args.search!==undefined,truncated:requestedColumns ? false : rows.length>100,nextCursor:!requestedColumns && rows.length>100?offset+100:null};
           if(result.truncated) result.note='仅当前页表结构；可用schema的nextCursor继续，或指定table读取目标表。';
           return result;
         }

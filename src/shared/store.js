@@ -337,7 +337,7 @@ export class JsonStore {
       if(result.nextEnvironmentQuery||job.environmentHandoffResults?.length){
         job.environmentHandoffResults??=[];
         job.environmentHandoffResults.push(structuredClone({summary:result.summary,finalMessage:result.finalMessage,
-          environmentEvidence:result.environmentEvidence,toolResultCatalog:result.toolResultCatalog,
+          environmentEvidence:result.environmentEvidence,schemaEvidence:result.schemaEvidence,toolResultCatalog:result.toolResultCatalog,
           toolInputErrors:result.toolInputErrors,environmentFailure:result.environmentFailure}));
       }
       const ledger=job.investigationProgress??{rounds:0,stagnant:0,seen:[]};

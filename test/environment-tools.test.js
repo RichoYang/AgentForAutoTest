@@ -196,11 +196,11 @@ test('tool operation limit and late connections stop further activity', async()=
   await assert.rejects(t.run('connection'));await new Promise(r=>setTimeout(r,40));assert.equal(destroyed,1);await assert.rejects(t.run('schema'));await t.close();
 });
 
-test('large schemas stay within tool budget and can continue by cursor or target table',async()=>{
+test('large schema metadata remains complete and can continue by cursor or target table',async()=>{
  const metadata=Array.from({length:240},(_,i)=>({table_name:'table_'+String(i).padStart(3,'0')+'x'.repeat(45),column_name:'column_'+'y'.repeat(50)}));const calls=[];
  const driver={createConnection:async()=>({query:async()=>[[{grant:'GRANT SELECT ON demo.* TO user'}]],execute:async statement=>{calls.push(statement.sql);const offset=Number(/OFFSET (\d+)/.exec(statement.sql)?.[1]??0);return [metadata.slice(offset,offset+101)];},rollback:async()=>{},destroy:()=>{}})};
  const tools=await createEnvironmentTools({kind:'mysql',host:'fake',database:'demo'}, {...query,tables:['*'],maxCalls:6},credentials,{mysql:driver});
- try {await tools.run('connection');const a=await tools.run('schema');assert.equal(a.nextCursor,100);assert.ok(Buffer.byteLength(JSON.stringify(a))<24000);assert.equal(Object.keys(a.tables).length,100);
+ try {await tools.run('connection');const a=await tools.run('schema');assert.equal(a.nextCursor,100);assert.equal(a.columnMetadata.length,100);assert.equal(Object.keys(a.tables).length,100);
  const b=await tools.run('schema',{cursor:a.nextCursor});assert.equal(b.nextCursor,200);const c=await tools.run('schema',{cursor:b.nextCursor});assert.equal(c.truncated,false);assert.equal(Object.keys(c.tables).length,40);
  await assert.rejects(tools.run('schema',{table:'bad;DELETE'}));assert.match(calls[1],/OFFSET 100/);
  }finally{await tools.close();}

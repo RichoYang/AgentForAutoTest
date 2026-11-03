@@ -30,7 +30,7 @@ export async function loadHarness(job, directory = CONFIG) {
 export function handoffContext(job) {
   const independent = ['qa', 'owner_audit'].includes(job.stage);
   return (job.context ?? []).slice(-8).map(({ stage, result = {} }) => ({ stage,
-    outcome: result.outcome, environmentEvidence: result.environmentEvidence, evidenceRecords: result.evidenceRecords, toolResultCatalog: result.toolResultCatalog, workspace: result.workspace,
+    outcome: result.outcome, environmentEvidence: result.environmentEvidence, schemaEvidence:result.schemaEvidence, evidenceRecords: result.evidenceRecords, toolResultCatalog: result.toolResultCatalog, workspace: result.workspace,
     harness: result.harness, investigation: result.investigation, investigationPause: result.investigationPause,
     runtimeDiscoveries: result.runtimeDiscoveries, websiteMismatch: result.websiteMismatch,
     handoff: result.handoff,
@@ -138,6 +138,7 @@ export function preserveAnalysisGaps(job, result) {
 export function preserveEnvironmentEvidence(job, result) {
   if (job.taskIntent !== 'analysis' || !['ready', 'partial'].includes(result.outcome)) return result;
   const evidence = [...(job.context ?? [])].reverse().find(entry => entry.result?.evidenceRecords?.length)?.result?.evidenceRecords;
-  if (!evidence?.length) return result;
-  return { ...result, evidenceAppendix: evidence.slice(0, 20) };
+  const schemas=(job.context??[]).flatMap(entry=>entry.result?.schemaEvidence??[]);
+  if (!evidence?.length&&!schemas.length) return result;
+  return { ...result,...(evidence?.length?{evidenceAppendix:evidence.slice(0,20)}:{}),...(schemas.length?{schemaEvidence:schemas}:{}) };
 }
