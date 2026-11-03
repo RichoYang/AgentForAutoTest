@@ -1,3 +1,4 @@
+import{loadIntegrationProjects,assertTaskReadScope}from './integration-peers.js';
 import {comparisonTarget,requestedSourceEnvironments} from './source-comparison.js';
 import { connectionEndpoints } from './connection-endpoints.js';
 import {recordReportFiles,recordReportReview} from './report-acceptance.js';
@@ -252,15 +253,16 @@ export class JsonStore {
 
   async renewActiveEnvironment(id,identity){
     const config=await loadEnvironments();
-    return this.transact(state=>{
+    return this.transact(async state=>{
       const job=requireJob(state,id);try{requireActiveLease(job,identity);}catch(error){throw Object.assign(error,{statusCode:409});}
       const old=job.environmentAccess;
+      if(old&&old.projectId!==job.projectId)assertTaskReadScope(await loadIntegrationProjects(this.integrationProjectsFile),job,config,old);
       if(job.taskIntent!=='analysis'||!old?.startedAt)throw Object.assign(new Error('当前任务没有可接续的只读环境步骤'),{statusCode:403});
       if(old.scopeHash!==identity.scopeHash){
         if(old.previousScopeHash===identity.scopeHash){try{verifyApprovedPlan(config,old);}catch(error){throw Object.assign(error,{statusCode:403});}return structuredClone(old);}
         throw Object.assign(new Error('只读续期请求不属于当前查询范围'),{statusCode:409});
       }
-      let plan;try{plan=renewReadPlan(config,old,{projectId:job.projectId,profile:job.originProfile??job.agentProfile,senderId:job.senderId});}catch(error){throw Object.assign(error,{statusCode:403});}
+      let plan;try{plan=renewReadPlan(config,old,{projectId:old.projectId,profile:job.originProfile??job.agentProfile,senderId:job.senderId});}catch(error){throw Object.assign(error,{statusCode:403});}
       job.environmentAccess=plan;job.updatedAt=plan.renewedAt;
       job.events.push({id:createId('EVT'),type:'environment_scope_renewed',at:plan.renewedAt,scopeHash:plan.scopeHash,previousScopeHash:old.scopeHash,leaseId:job.lease.id});
       return structuredClone(plan);
@@ -269,11 +271,12 @@ export class JsonStore {
 
   async claimEnvironment(id, identity) {
     const config = await loadEnvironments();
-    return this.transact((state) => {
+    return this.transact(async (state) => {
       const job = requireJob(state, id);
       if (job.status !== 'running' || job.lease?.id !== identity.leaseId || job.lease?.runnerId !== identity.runnerId || !(Date.parse(job.lease?.expiresAt) > Date.now())) throw new Error('查询租约已失效');
+      if(job.environmentAccess&&job.environmentAccess.projectId!==job.projectId)assertTaskReadScope(await loadIntegrationProjects(this.integrationProjectsFile),job,config,job.environmentAccess);
       if(job.environmentAccess&&!job.environmentAccess.startedAt&&Date.parse(job.environmentAccess.expiresAt)<=Date.now()){
-        job.environmentAccess=renewReadPlan(config,job.environmentAccess,{projectId:job.projectId,profile:job.originProfile??job.agentProfile,senderId:job.senderId,starting:true});
+        job.environmentAccess=renewReadPlan(config,job.environmentAccess,{projectId:job.environmentAccess.projectId,profile:job.originProfile??job.agentProfile,senderId:job.senderId,starting:true});
       }
       verifyApprovedPlan(config, job.environmentAccess ?? {});
       const plan = job.environmentAccess, resume = job.browserResumeClaim;
@@ -355,7 +358,7 @@ export class JsonStore {
       // The active grant is intentionally removed before the next analysis step.
       const endpoints = connectionEndpoints(result.connectionEndpoints);
       if (endpoints.length) job.completedEnvironmentReads = [...(job.completedEnvironmentReads ?? []), {
-        plan: { tier: plan.tier, environmentId: plan.environmentId, queryId: plan.queryId,
+        plan: { projectId:plan.projectId,tier: plan.tier, environmentId: plan.environmentId, queryId: plan.queryId,
           configHash: plan.configHash, scopeHash: plan.scopeHash, startedAt: plan.startedAt },
         result: { outcome: result.outcome, environmentEvidence: { scopeHash:evidence.scopeHash, readAt:evidence.readAt, environmentId:evidence.environmentId, queryId:evidence.queryId, resultHash:evidence.resultHash, rowCount:evidence.rowCount }, connectionEndpoints: endpoints },
       }].slice(-20);

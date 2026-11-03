@@ -81,6 +81,7 @@ export async function investigateEnvironment(plan, emit = async () => {}, adapte
   const load = adapters.load ?? loadEnvironments;
   let renewal;
   const authorizePlan=async()=>{
+    if(adapters.authorizeTaskScope)await adapters.authorizeTaskScope();
     if(adapters.renewPlan&&Date.parse(plan.expiresAt)-Date.now()<=60000){
       renewal??=(async()=>{const next=await adapters.renewPlan({...plan});if(next.environmentId!==plan.environmentId||next.queryId!==plan.queryId||next.configHash!==plan.configHash||next.projectId!==plan.projectId||next.approvalProfile!==plan.approvalProfile||JSON.stringify(next.parameters)!==JSON.stringify(plan.parameters))throw new Error('Renewed read scope changed');verifyApprovedPlan(await load(),next);Object.assign(plan,next);await emit({type:'progress',phase:'environment_scope_renewed',message:'原只读范围已复核续期，继续已有工作，不重跑已完成查询'});})().finally(()=>{renewal=null;});
       await renewal;

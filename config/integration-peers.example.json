@@ -1,0 +1,30 @@
+{
+  "projects": {
+    "first": {
+      "readOnlyIntegrationPeers": [
+        "second"
+      ],
+      "integrationPeerEnvironments": {
+        "second": [
+          "second_prd_goods"
+        ]
+      }
+    },
+    "second": {
+      "readOnlyIntegrationPeers": [
+        "first"
+      ],
+      "integrationPeerEnvironments": {
+        "first": [
+          "first_prd_orders"
+        ]
+      }
+    }
+  },
+  "chatProfileProjectMap": {
+    "oc_REPLACE_SHARED_GROUP": {
+      "first-bot": "first",
+      "second-bot": "second"
+    }
+  }
+}

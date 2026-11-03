@@ -1,3 +1,4 @@
+import{planTaskRead}from '../shared/integration-peers.js';
 import {pollModelCapacity}from './model-capacity-recovery.js';
 import {requestedSourceEnvironments} from '../shared/source-comparison.js';
 import {authorizeWebsiteRequest} from './website-authorization.js';
@@ -52,6 +53,7 @@ export async function createControlPlane(overrides = {}) {
   const projects = overrides.projects ?? await loadProjects(config.projectsFile);
   const agents = overrides.agents ?? await loadAgents(config.agentsFile);
   const store = new JsonStore(config.storeFile);
+  store.integrationProjectsFile=config.projectsFile;
   await store.reconcileLegacyResults();
   await store.reconcileInvestigationState(agents.agents?.owner_intake?.profile ?? null);
   await store.reconcileReadOnlyApprovals();
@@ -319,8 +321,7 @@ async function route(context) {
         query=await prepareWebsiteQuery(context,job,sourceResult.websiteQuery);
       }
       if (!query || sourceResult.outcome !== 'needs_clarification') throw new Error('当前结果没有可执行的环境查询');
-      const plan = planQuery(await loadEnvironments(), query, job.projectId,
-        { senderId: job.senderId, profile: job.originProfile });
+      const plan = planTaskRead(await loadEnvironments(),context.projects,job,query);
       const project=context.projects.projects[job.projectId],scope=requestedSourceEnvironments(job,project);
       const other=scope.find(env=>env!==job.sourceEnvironment&&sourceRuntimeTier(project,env)===plan.tier);
       if(other){
@@ -430,8 +431,7 @@ async function route(context) {
           && JSON.stringify(j.environmentAccess.parameters) === JSON.stringify(request.parameters))) {
           throw new Error('重复环境查询，需要调整范围或补充新证据');
         }
-        const plan = planQuery(await loadEnvironments(), body.result.environmentQuery, job.projectId,
-          { senderId: job.senderId, profile: job.originProfile });
+        const plan = planTaskRead(await loadEnvironments(),context.projects,job,body.result.environmentQuery);
         assertSourceRuntimeTier(context.projects.projects[job.projectId],job.sourceEnvironment,plan.tier);
         if(continuation.metadata)Object.assign(plan,continuation.metadata);
         routing = { ...agentRouting(context, 'developer', job.originProfile ?? job.agentProfile), environmentPlan: plan };

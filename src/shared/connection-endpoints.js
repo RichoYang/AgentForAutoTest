@@ -18,7 +18,7 @@ export function connectionCandidates(state, turn, projectId) {
   && j.originProfile===turn.profile && j.status==='completed' && Date.now()-Date.parse(j.updatedAt)<86400000)
  .sort((a,b)=>Date.parse(a.updatedAt)-Date.parse(b.updatedAt))
  .flatMap(j=>[...(j.completedEnvironmentReads??[]),{plan:j.environmentAccess,result:j.result}]
-  .filter(({plan,result})=>plan?.startedAt && ['ready','partial'].includes(result?.outcome)
+  .filter(({plan,result})=>(!plan?.projectId||plan.projectId===projectId)&&plan?.startedAt && ['ready','partial'].includes(result?.outcome)
    && result.environmentEvidence?.scopeHash===plan.scopeHash)
   .flatMap(({plan,result})=>connectionEndpoints(result.connectionEndpoints).map(e=>({...e,tier:plan.tier,sourceJobId:j.id,sourceEnvironmentId:plan.environmentId,sourceQueryId:plan.queryId,sourceConfigHash:plan.configHash,readAt:result.environmentEvidence.readAt}))))
 ;

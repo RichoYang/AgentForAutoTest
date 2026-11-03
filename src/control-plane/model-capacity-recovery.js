@@ -1,3 +1,4 @@
+import{loadIntegrationProjects,assertTaskReadScope}from '../shared/integration-peers.js';
 import {capacityScope}from '../shared/model-capacity-wait.js';
 import {loadHarness}from '../runner/harness.js';
 import {loadEnvironments}from '../shared/environment-access.js';import {renewReadPlan}from '../shared/read-plan-renewal.js';
@@ -14,7 +15,8 @@ export function pollModelCapacity(context,{now=Date.now(),load=loadEnvironments,
    let plan;
    if(cp.stage==='environment'){
     const old=original.environmentAccess;if(!old||old.environmentId!==cp.environmentId||old.queryId!==cp.queryId||old.configHash!==cp.configHash||cp.scopeIdentity!==capacityScope(old))throw Error('Environment scope changed');
-    plan=renewReadPlan(await load(),old,{projectId:original.projectId,profile:old.approvalProfile??original.originProfile,senderId:original.senderId,starting:true},now);
+    const cfg=await load();if(old.projectId!==original.projectId)assertTaskReadScope(context.config?.projectsFile?await loadIntegrationProjects(context.config.projectsFile):context.projects,original,cfg,old);
+    plan=renewReadPlan(cfg,old,{projectId:old.projectId,profile:old.approvalProfile??original.originProfile,senderId:original.senderId,starting:true},now);
     // This is a new lease for checkpoint continuation. The prior claim remains
     // in the audit history; carrying its startedAt would reject the new claim.
     delete plan.startedAt;

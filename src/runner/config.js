@@ -26,6 +26,7 @@ export async function runnerConfig(overrides = {}) {
     concurrency,
     analysisTurnTimeoutMs,
     analysisResumeTimeoutMs,
+    projectsFile:path.resolve(projectsFile),
     projects,
   };
 }
