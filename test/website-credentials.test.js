@@ -90,3 +90,8 @@ test('credential command parser requires both account and password',()=>{
   assert.deepEqual(parseWebsiteCredentialMessage('网页登录 账号=alice 密码=pwd'),{intent:true,username:'alice',password:'pwd'});
   assert.deepEqual(parseWebsiteCredentialMessage('账号 alice 密码 pwd'),{intent:true,username:'alice',password:'pwd'});
 });
+
+test('automatic recovery reads only the current application credential reference and never returns secret values',async()=>{
+ const reads=[],submits=[],service=new WebsiteCredentialService({websiteBrowser:{loginStatusFor:async()=>({pageReady:false}),submitCredentials:async(job,e,cred)=>{submits.push([e.projectId,e.tier,e.credentialRef,cred.username]);return {authenticated:true,loginState:'ready',password:cred.password};}}},{read:async ref=>{reads.push(ref);return {username:ref,password:'synthetic-password'};}});
+ const first=await service.recoverLogin(job,{...environment,projectId:'one',tier:'prd',credentialRef:'one-prd'}),second=await service.recoverLogin(job,{...environment,projectId:'two',tier:'uat',credentialRef:'two-sit'});assert.deepEqual(reads,['one-prd','two-sit']);assert.equal(submits[0][3],'one-prd');assert.equal(submits[1][3],'two-sit');assert.doesNotMatch(JSON.stringify([first,second]),/synthetic-password|username/);
+});

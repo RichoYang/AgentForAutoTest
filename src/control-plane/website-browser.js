@@ -75,12 +75,15 @@ export class WebsiteBrowser {
   const current=new URL(s.page.url()),base=new URL(e.baseUrl),prefix=base.pathname.replace(/\/$/,'');
   const authPath=/\/(?:login|signin|sign-in|authenticate|auth|captcha|verify)(?:[/?#]|$)/i.test(current.pathname+current.hash);
   if(current.origin!==base.origin||(!authPath&&!(current.pathname===prefix||current.pathname.startsWith(prefix+'/'))))throw new Error('浏览器已离开本次批准的登录范围');
-  if(s.credentialAttempted&&!force)return {...await this.loginStatus(s),authenticated:false,attempted:false};
   const before=await this.loginStatus(s);
+  if(before.pageReady)return {...before,authenticated:true,attempted:false};
+  const policy=createHash('sha256').update(JSON.stringify([e.projectId,e.tier,e.baseUrl,e.credentialRef,job.environmentAccess?.queryId,e.queries?.[job.environmentAccess?.queryId]?.readEndpoints??[]])).digest('hex');
+  const correctedPolicy=s.authAttemptPolicy!==undefined&&s.authAttemptPolicy!==policy;
+  if(!force&&(before.rateLimited||s.credentialAttempted&&(before.credentialRejected||!correctedPolicy)))return {...before,authenticated:false,attempted:false};
   if(before.passwordChangeRequired)return {...before,authenticated:false,attempted:false};
   const password=s.page.locator('input[type="password"]:visible').first();
   if(!await password.count())return {...before,authenticated:before.pageReady===true,attempted:false};
-  s.credentialAttempted=true;s.authResult=null;s.authPostSeen=false;s.blockedLoginReads.clear();
+  s.authResult=null;s.authPostSeen=false;s.blockedLoginReads.clear();
   const form=password.locator('xpath=ancestor::form[1]');const scope=await form.count()?form:s.page.locator('body');
   const inputs=scope.locator('input:not([type="password"]):not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):visible');
   let username=inputs.first();for(let i=0;i<await inputs.count();i++){const el=inputs.nth(i);const label=await el.evaluate(x=>[x.name,x.id,x.autocomplete,x.placeholder,x.getAttribute('aria-label')].join(' '));if(/user|account|login|email|phone|mobile|账号|用户|邮箱|手机/i.test(label)){username=el;break;}}
@@ -89,7 +92,7 @@ export class WebsiteBrowser {
   if(before.verificationRequired)return {...before,authenticated:false,attempted:false};
   const named=scope.getByRole('button',{name:/^(?:登\s*录|登\s*入|sign\s*in|log\s*in|submit|确定|继续)$/i}).first();
   const submit=await named.count()?named:scope.locator('button[type="submit"]:visible,input[type="submit"]:visible').first();
-  if(await submit.count())await submit.click();else return {...before,authenticated:false,attempted:false,credentialRejected:false,submissionUnconfirmed:true,loginState:'submission_control_missing'};
+  if(await submit.count()){s.credentialAttempted=true;s.authAttemptPolicy=policy;await submit.click();}else return {...before,authenticated:false,attempted:false,credentialRejected:false,submissionUnconfirmed:true,loginState:'submission_control_missing'};
   await s.page.waitForTimeout(1200);const status=await this.loginStatus(s);
   if(status.pageReady)s.credentialAttempted=false;
   return {...status,authenticated:status.pageReady===true,attempted:true,submissionUnconfirmed:!s.authPostSeen&&status.loginRequired};

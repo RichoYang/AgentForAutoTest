@@ -40,6 +40,11 @@
                   "1"
                 ]
               }
+            },
+            {
+              "method": "POST",
+              "path": "/api/session/context",
+              "reviewed": true
             }
           ],
           "readNavigationSelectors": [

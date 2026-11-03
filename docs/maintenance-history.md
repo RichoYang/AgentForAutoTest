@@ -1334,3 +1334,7 @@ TCT详情及执行批次兼容旧式task-任务标识，继续要求字符串和
 ### 1.58.1 (2026-11-02)
 
 Complete extraction exposed a second failure while serializing a large dataset. Add incremental JSON digests, chunked storage and validated catalog/recovery; keep old JSON compatibility, actual capacity budgets and independent derivation checks. Regression covers restart, exact amounts/nulls, other scopes, corruption, missing files, symlinks and failed writes. A separate synthetic replay exceeds 600 MB; real business acceptance remains separate.
+
+### 1.58.2（2026-11-03）
+
+修复登录后只读引导接口被阻断、失败锁未随已重新批准的读取规则修正恢复，以及验证码未提交却消耗登录尝试的问题。已登录页面不重复提交；明确拒绝/限流不因策略修正自动重试。通知区分已有凭据、登录链路拦截和人工验证，不重复索要已存密码。真实平台的精确读取方法/路径在实例配置审核登记，不把业务路径写死到通用核心；原权限、项目/环境绑定和写拦截保持。

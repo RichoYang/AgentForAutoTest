@@ -111,7 +111,7 @@ test('startup repairs a terminal question card left with stale cancel and refres
   const waiting={...job,status:'awaiting_clarification',result:{browserLoginRequired:true,finalMessage:'等待登录'}};
   await app.store.transact(s=>{const current=s.jobs[0];current.status='cancelled';current.result=waiting.result;const saved=s.cardMessages[key];saved.card=jobCard(waiting);saved.card.body.elements=saved.card.body.elements.filter(element=>!JSON.stringify(element).includes('"action":"cancel"'));saved.terminal=true;saved.terminalMention={replyTo:'root',profile:'owner',text:'旧版结束提醒'};saved.mentionDelivered=true;saved.deliveredRevision=saved.revision;});
   assert.doesNotMatch(JSON.stringify((await app.store.read()).cardMessages[key].card),/"action":"(?:cancel|refresh)"/);
-  assert.match((await app.store.read()).cardMessages[key].card.header.title.content,/等待本机登录/);
+  assert.match((await app.store.read()).cardMessages[key].card.header.title.content,/恢复网页登录/);
   assert.equal(await repairStaleTerminalQuestionCards(context),1);state=await app.store.read();
   assert.doesNotMatch(JSON.stringify(state.cardMessages[key].card),/"action":"(?:cancel|refresh)"/);
   assert.match(state.cardMessages[key].card.header.subtitle.content,/已取消/);

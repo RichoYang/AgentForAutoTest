@@ -55,7 +55,7 @@ test('query-discovered websites produce scoped configs and PRD stays read-only w
 });
 test('waiting login card explains local cooperation without demanding text clarification',()=>{
  const card=JSON.stringify(jobCard({id:'job',status:'awaiting_clarification',stage:'developer',taskIntent:'analysis',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),events:[],result:{browserLoginRequired:true,summary:'等待本机登录，完成后自动继续',finalMessage:'任务已保留'}}));
-  assert.match(card,/等待本机登录/);assert.doesNotMatch(card,/clarification_form/);
+  assert.match(card,/恢复网页登录/);assert.doesNotMatch(card,/clarification_form/);
 });
 test('waiting automation card is recoverable and does not claim the business login expired',()=>{
  const card=JSON.stringify(jobCard({id:'job',status:'awaiting_clarification',stage:'developer',taskIntent:'analysis',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),events:[],result:{browserLoginRequired:true,browserActionRequired:'automation',summary:'等待系统授权',finalMessage:'登录态有效'}}));

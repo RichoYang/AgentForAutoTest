@@ -137,3 +137,11 @@ Mongo参数诊断现在区分筛选项位置、类型、字段、层级、聚合
 Complete large datasets use row chunks and an atomically published manifest instead of a single JSON string. Reads verify chunk paths, symlink boundaries, sizes, row coverage, hashes and the complete logical data digest. Old JSON files retain the same digest semantics. Save failures remove only this attempt's unpublished chunks. Real disk budgets include all chunks; no total row or task duration limit is added. Catalog reads verify chunks without materializing every row. Cache eviction affects only memory copies backed by storage.
 
 Migration must preserve both manifests and their row chunks. Older programs cannot resume unfinished tasks that use the new format. Chunking removes the single-string engine boundary; it does not promise unlimited memory, disk or file delivery. Derivations and monetary/file checks still run. No new dependencies or external permissions are required.
+
+### 1.58.2 自动登录接续
+
+登录过期时先读取当前已批准系统/环境/应用credentialRef对应的本机凭据，不跨应用回退到其它帐号。页面已经登录时不再提交；同一登录失败不会反复自动重放。若维护者已审核、重新批准固定只读接口并纠正登录后引导请求规则，允许以同一凭据重新尝试一次；范围仍逐请求核验，不因失败自动放开路径。错误密码、限流、改密和验证码保留各自处理边界，改策略不绕过明确的凭据拒绝；没有实际提交的验证码等待不占据失败锁。
+
+查看当前账号菜单/权限列表的POST接口可能没有get/list命名，须从真实前后端确认读取语义后，在该应用readEndpoints中登记精确方法和路径；不能把授予权限、改角色、保存或执行接口放进名单。初次通知先说明检查已存凭据；规则拦截不再统一要求重发账号密码。需要人工验证码/扫码/本人确认时仅在本机页面完成，凭据读取失败时核对钥匙串和绑定，不凭此认定密码错误。显式换账号/角色须按新请求核对身份与范围，不能由模型猜测替代。
+
+已审核为独立应用的根入口应登记applicationRoot=true，使同系统同环境的后续深链接问题复用应用入口及credentialRef；不能将不同应用、测试/生产或角色凭据混用。配置变化须按实例维护流程重新核对等待任务的访问计划，再自动恢复原问题；不能给尚未复核的旧授权自动扩大范围。代码更新在空闲窗口重启，配置和Keychain均随原迁移流程保留，不新增凭据或全任务截止。

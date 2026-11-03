@@ -64,16 +64,22 @@ test('browser automation wait asks for macOS permission instead of another websi
   assert.doesNotMatch(mention.text,/网页登录/);
 });
 
-test('website login wait names the exact site and allows a natural reply on the task card', () => {
+test('website login wait checks saved credentials before requesting any new secret', () => {
   const mention = jobTerminalMention({ originChatType:'group', status:'awaiting_clarification',
     result:{browserLoginRequired:true,loginUrl:'https://jobs.example/xxl-job-admin/'}, environmentAccess:{approvalOwnerIds:['ou_admin']},
     originMessageId:'m', originProfile:'owner' });
   assert.match(mention.text,/https:\/\/jobs\.example\/xxl-job-admin\//);
-  assert.match(mention.text,/直接回复本任务卡“账号 \/ 密码”/);
+  assert.match(mention.text,/检查本机已保存的账号|无需重发/);
+  assert.doesNotMatch(mention.text,/直接回复.*密码/);
   assert.doesNotMatch(mention.text,/私聊/);
 });
 
 test('intake failures never announce a completed reply',()=>{
  const turn={chatType:'group',messageId:'m',profile:'owner',senderId:'ou_requester'};
  for(const extra of [{aiFailed:true},{actionError:'rejected'}]){const text=conversationTerminalMention({...turn,...extra}).text;assert.doesNotMatch(text,/回复已完成/);assert.match(text,/失败|未执行/);}
+});
+
+test('login-chain failure, rejection and verification notices do not ask users to resend saved credentials',()=>{
+ const base={originChatType:'group',status:'awaiting_clarification',environmentAccess:{approvalOwnerIds:['ou_admin']},originMessageId:'m',originProfile:'owner'};
+ for(const state of ['request_blocked','access_check_failed','rejected','verification_required']){const text=jobTerminalMention({...base,result:{browserLoginRequired:true,browserLoginState:state,browserCredentialState:'available'}}).text;assert.doesNotMatch(text,/直接回复.*密码/);assert.match(text,/无需重发|无需重发|安全更新|本机页面/);}
 });

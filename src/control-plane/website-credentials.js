@@ -121,7 +121,7 @@ export class WebsiteCredentialService {
     try{if((await this.context.websiteBrowser.loginStatusFor?.(job,environment))?.pageReady===true)return {authenticated:true,credentialState:'not_needed'};}catch{return {authenticated:false,credentialState:'access_unavailable'};}
     let saved;
     try{saved=await this.read(environment.credentialRef);}catch{return {authenticated:false,credentialState:'unavailable'};}
-    try{return {authenticated:Boolean((await this.context.websiteBrowser.submitCredentials(job,environment,saved)).authenticated),credentialState:'available'};}
+    try{const result=await this.context.websiteBrowser.submitCredentials(job,environment,saved);return {authenticated:Boolean(result.authenticated),credentialState:'available',loginState:result.loginState??null};}
     catch{return {authenticated:false,credentialState:'available'};}
   }
 }
