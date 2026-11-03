@@ -77,22 +77,26 @@ export class ReportDatasets {
  }
  transformOptions(){let ticks=0;return {maxRows:this.maxRows,check:async()=>{if(!this.active())throw new ReportInputError('报表查询已结束');if(++ticks%500===0)await this.check();}};}
  async transform(tool,args){await this.check();let data;try{data=await transformDataset(tool,args,ref=>this.restore(ref),this.transformOptions());}catch(e){if(e.code==='REPORT_INPUT')throw new ReportInputError(e.message);throw e;}await this.check();const ref='dataset-'+randomUUID();if(this.storage)await this.storage.save(ref,data,data.snapshotId,data.readAt);this.remember(ref,data);return {datasetRef:ref,dataHash:hash(data),complete:true,rowCount:data.rows.length,columns:data.columns,readAt:data.readAt,readThroughAt:data.readThroughAt,snapshotId:data.snapshotId,audit:data.derivation.audit,preview:preview(data.rows,this.previewRows),stage:'完整数据转换完成，保留来源时间和派生依据；尚须核验文件及原要求'};}
- async verifyDerived(data,stack=new Set()){
-  if(data.derivation?.kind==='relational_transform'){const mark=hash(data.derivation);if(stack.has(mark))throw new ReportInputError('派生来源循环');stack.add(mark);for(const ref of data.derivation.inputs)await this.verifyDerived(await this.restore(ref),stack);await verifyRelationalDataset(data,ref=>this.restore(ref),this.transformOptions());stack.delete(mark);}
+ async verifyDerived(data,stack=new Set(),verified=new Set(),ref=null){
+  if(ref&&verified.has(ref))return;
+  if(data.derivation?.kind==='relational_transform'){const mark=hash(data.derivation);if(stack.has(mark))throw new ReportInputError('派生来源循环');stack.add(mark);for(const ref of data.derivation.inputs)await this.verifyDerived(await this.restore(ref),stack,verified,ref);await verifyRelationalDataset(data,ref=>this.restore(ref),this.transformOptions());stack.delete(mark);}
   await verifyPeriodDataset(data,ref=>this.restore(ref),{check:()=>this.check(),maxRows:this.maxRows});
+  if(ref)verified.add(ref);
  }
- async rawEvidence(data,column){
-  await this.verifyDerived(data);
+ async rawEvidence(data,column,context={verified:new Set(),evidence:new Map()},ref=null){
+  const cacheKey=ref&&JSON.stringify([ref,column]);if(cacheKey&&context.evidence.has(cacheKey))return context.evidence.get(cacheKey);
+  await this.verifyDerived(data,new Set(),context.verified,ref);
+  let result=null;
   if(data.derivation?.kind==='period_grid'){
    const p=data.derivation.provenance[column]??{datasetRef:data.derivation.args.populationRef,column};
-   return this.rawEvidence(await this.restore(p.datasetRef),p.column);
-  }
-  if(data.derivation?.kind==='relational_transform'){const hashes=[];for(const ref of data.derivation.inputs){const value=await this.rawEvidence(await this.restore(ref),column);if(value)hashes.push(value);}return hashes.length?hash(hashes):null;}
-  if(data.derivation?.kind==='left_lookup'){
-   for(const lookup of data.derivation.lookups){const field=lookup.fields.find(f=>f.as===column);if(field)return this.rawEvidence(await this.restore(lookup.datasetRef),field.column);}
-   return this.rawEvidence(await this.restore(data.derivation.datasetRef),column);
-  }
-  return data.queryHash&&data.queryDefinition?data.queryHash:null;
+   result=await this.rawEvidence(await this.restore(p.datasetRef),p.column,context,p.datasetRef);
+  }else if(data.derivation?.kind==='relational_transform'){
+   const hashes=[];for(const input of data.derivation.inputs){const value=await this.rawEvidence(await this.restore(input),column,context,input);if(value)hashes.push(value);}result=hashes.length?hash(hashes):null;
+  }else if(data.derivation?.kind==='left_lookup'){
+   let found=false;for(const lookup of data.derivation.lookups){const field=lookup.fields.find(f=>f.as===column);if(field){result=await this.rawEvidence(await this.restore(lookup.datasetRef),field.column,context,lookup.datasetRef);found=true;break;}}
+   if(!found)result=await this.rawEvidence(await this.restore(data.derivation.datasetRef),column,context,data.derivation.datasetRef);
+  }else result=data.queryHash&&data.queryDefinition?data.queryHash:null;
+  if(cacheKey)context.evidence.set(cacheKey,result);return result;
  }
  async compose(args){
   await this.check();if(!this.directory)throw new ReportInputError('本次执行未配置报表输出目录');
@@ -110,16 +114,17 @@ export class ReportDatasets {
   const validate=(e,depth=0)=>{if(!e||typeof e!=='object')throw new ReportInputError('报表列计算过于复杂');
    if(e.op==='key')return;
    if(e.op==='field'){const s=sources.get(e.source);if(!s?.columns.includes(e.column)||e.missing!==undefined&&!['zero','empty'].includes(e.missing))throw new ReportInputError('报表字段引用无效');return;}
+   if(e.missing!==undefined&&e.missing!=='empty')throw new ReportInputError('算术缺失规则仅支持显式missing=empty传播未知值');
    if(!['add','subtract','min'].includes(e.op)||!Array.isArray(e.args)||e.args.length<2||e.args.length>6)throw new ReportInputError('仅支持key、field、add、subtract、min固定计算，不接受表达式');e.args.forEach(x=>validate(x,depth+1));};
   args.columns.forEach(c=>validate(c.value));
   const evaluate=(e,key)=>{
    if(e.op==='key')return key;
    if(e.op==='field'){const row=sources.get(e.source).map.get(key);const v=row?.[e.column];if(v===undefined||v===null){if(e.missing==='zero')return '0';if(e.missing==='empty')return '';throw new ReportInputError('报表有缺失值；必须明确缺失值的业务处理规则');}return v;}
-   const values=e.args.map(x=>decimal(evaluate(x,key)));let v=values[0];for(const n of values.slice(1))v=e.op==='add'?v+n:e.op==='subtract'?v-n:v<n?v:n;return format(v);
+   const raw=e.args.map(x=>evaluate(x,key));if(e.missing==='empty'&&raw.some(v=>v===null||v===''))return '';const values=raw.map(decimal);let v=values[0];for(const n of values.slice(1))v=e.op==='add'?v+n:e.op==='subtract'?v-n:v<n?v:n;return format(v);
   };
   const rows=[...keys].sort().map(key=>args.columns.map(c=>evaluate(c.value,key)));
   const csv='\uFEFF'+[headers,...rows].map(row=>row.map(csvCell).join(',')).join('\r\n')+'\r\n';const bytes=Buffer.byteLength(csv);
-  const totals=Object.fromEntries(args.columns.flatMap((c,i)=>['add','subtract','min'].includes(c.value.op)||c.total===true?[[c.label,c.value.op==='field'&&c.value.missing==='empty'&&!rows.some(row=>row[i]!=='')?null:format(rows.reduce((n,row)=>n+(c.value.op==='field'&&c.value.missing==='empty'&&row[i]===''?0n:decimal(row[i])),0n))]]:[]));
+  const totals=Object.fromEntries(args.columns.flatMap((c,i)=>['add','subtract','min'].includes(c.value.op)||c.total===true?[[c.label,c.value.missing==='empty'&&!rows.some(row=>row[i]!=='')?null:format(rows.reduce((n,row)=>n+(c.value.missing==='empty'&&row[i]===''?0n:decimal(row[i])),0n))]]:[]));
   const datasetRef=`dataset-${randomUUID()}`,composed={rows:rows.map(row=>Object.fromEntries(headers.map((h,i)=>[h,row[i]]))),columns:headers,complete:true,numericColumns:args.columns.filter(c=>c.total===true||['add','subtract','min'].includes(c.value.op)||(c.value.op==='field'&&sources.get(c.value.source).numericColumns?.includes(c.value.column))).map(c=>c.label)};
   const snapshotIds=[...new Set([...sources.values()].map(d=>d.snapshotId))].sort(),snapshotId=snapshotIds.length===1?snapshotIds[0]:createHash('sha256').update(JSON.stringify(snapshotIds)).digest('hex');
   const readAt=[...sources.values()].map(d=>d.readAt).filter(Boolean).sort()[0]??new Date().toISOString();
@@ -195,22 +200,22 @@ export class ReportDatasets {
   return {...final,refreshedDatasetRef,refresh:{sourceCount:rawCount,mode:'new_readonly_transaction',previousDatasetRef:args.datasetRef},stage:'在新只读事务内集中刷新、重算并通过程序核验；仍需按原问题审阅'};
  }
  async finalize(args){
-  await this.check();const data=await this.restore(args.datasetRef),draft=data?.reportDraft;
+  await this.check();const verification={verified:new Set(),evidence:new Map()};const data=await this.restore(args.datasetRef),draft=data?.reportDraft;
   if(!draft)throw new ReportInputError('finalize_report需要本任务compose_report产生的草稿引用');
   const text=(v)=>typeof v==='string'&&v.trim().length>=3&&v.length<=1200;
   if(!text(args.requirement)||!text(args.scopeEvidence)||!Array.isArray(args.expectedColumns)||JSON.stringify(args.expectedColumns)!==JSON.stringify(data.columns))throw new ReportInputError('须按原问题登记requirement、scopeEvidence及完全一致的expectedColumns，缺列、额外列或顺序不同应重做草稿');
   if(!Array.isArray(args.columnRules)||args.columnRules.length!==data.columns.length||args.columnRules.some((c,i)=>c?.label!==data.columns[i]||!text(c.definition)||!text(c.evidence)))throw new ReportInputError('每一列都要登记业务定义/公式与源码或文档依据，不得用项目名称包含某词替代已核实业务条件');
   const population=await this.restore(args.populationRef);
-  await this.verifyDerived(population??{});
+  await this.verifyDerived(population??{},new Set(),verification.verified,args.populationRef);
   const periodPopulation=population?.derivation?.kind==='period_grid'&&population.derivation.args.sources.length===0;
   const populationBase=periodPopulation?await this.restore(population.derivation.args.populationRef):population;
-  const transformedPopulation=population?.derivation?.kind==='relational_transform'&&Boolean(await this.rawEvidence(population,args.populationKey));
+  const transformedPopulation=population?.derivation?.kind==='relational_transform'&&Boolean(await this.rawEvidence(population,args.populationKey,verification,args.populationRef));
   if(!population?.complete||population.reportDraft||!transformedPopulation&&(!populationBase?.queryHash||!populationBase.queryDefinition)||!population.columns.includes(args.populationKey))throw new ReportInputError('完整对象范围必须来自独立原始查询数据集，不能拿草稿自身当覆盖证明');
   const expected=uniqueKeys(population,args.populationKey);
   if(!Array.isArray(draft.keys)||draft.keys.length!==data.rows.length||new Set(draft.keys).size!==draft.keys.length||draft.keys.some(k=>typeof k!=='string'||!k))throw new ReportInputError('草稿缺少完整内部主键索引；重新生成草稿后核验');
   const actual=new Set(draft.keys),missing=[...expected].filter(k=>!actual.has(k)),extra=[...actual].filter(k=>!expected.has(k));
   if(missing.length||extra.length)throw new ReportInputError(`清单覆盖未通过：应有${expected.size}个对象，实际${actual.size}个；遗漏${missing.length}个、多出${extra.length}个。补齐后重做草稿，不能把单户抽样当完整清单。`);
-  const sources=new Map();for(const s of draft.sources){const source=await this.restore(s.datasetRef);if(source)await this.verifyDerived(source);if(!source?.complete)throw new ReportInputError('来源已失效，需要重新取数');sources.set(s.name,source);}
+  const sources=new Map();for(const s of draft.sources){const source=await this.restore(s.datasetRef);if(source)await this.verifyDerived(source,new Set(),verification.verified,s.datasetRef);if(!source?.complete)throw new ReportInputError('来源已失效，需要重新取数');sources.set(s.name,source);}
   const required=new Set();
   const leaves=(e,numeric)=>{if(e.op==='field'&&numeric)required.add(e.source+':'+e.column);for(const child of e.args??[])leaves(child,true);};
   for(const c of draft.columns)leaves(c.value,data.numericColumns?.includes(c.label)||c.total===true);
@@ -219,7 +224,7 @@ export class ReportDatasets {
   for(const c of args.checks){
    if(!c||typeof c!=='object'||typeof c.source!=='string'||typeof c.column!=='string'||typeof c.referenceRef!=='string'||typeof c.referenceColumn!=='string')throw new ReportInputError('checks每项必须明确source、column、referenceRef和referenceColumn');
    const source=sources.get(c.source),ref=await this.restore(c.referenceRef),name=c.source+':'+c.column;
-   const referenceEvidence=ref&&await this.rawEvidence(ref,c.referenceColumn),sourceEvidence=source&&await this.rawEvidence(source,c.column);
+   const referenceEvidence=ref&&await this.rawEvidence(ref,c.referenceColumn,verification,c.referenceRef),sourceEvidence=source&&await this.rawEvidence(source,c.column,verification,draft.sources.find(s=>s.name===c.source)?.datasetRef);
    if(!required.has(name)||!source?.columns.includes(c.column)||!ref?.complete||ref.reportDraft||!referenceEvidence||referenceEvidence===sourceEvidence||!ref.columns.includes(c.referenceColumn)||!text(c.evidence))throw new ReportInputError('分量合计需引用不同原始查询的完整基准集和实际数值列，不能用同一查询或草稿自证；须说明基准口径依据');
    if(totals.some(x=>x.name===name))throw new ReportInputError('同一分量不能重复核验');
    const sourceKey=draft.sources.find(s=>s.name===c.source).keyColumn;

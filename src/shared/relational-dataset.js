@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {normalizeCalendarPeriod} from './period-dataset.js';
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const safe=k=>typeof k==='string'&&k.length>0&&!['__proto__','prototype','constructor'].includes(k)&&!/[\u0000-\u001f]/.test(k);
 export class RelationalInputError extends Error{constructor(message){super(message);this.code='REPORT_INPUT';}}
@@ -14,7 +15,25 @@ export async function transformDataset(tool,args,load,{check=async()=>{},maxRows
  const inputs=[];for(const ref of refs){await check();const d=await load(ref);if(!d?.complete||!Array.isArray(d.rows))fail('只可使用完整数据集，不能用预览或不完整来源');inputs.push(d);}
  let rows=[],columns=[],numericColumns=[],audit={};
  const add=row=>{if(rows.length>=maxRows)fail('派生数据超过当前管理员明确授权行数，未发布部分结果');rows.push(row);};
- if(tool==='expand_dataset'){
+ if(tool==='project_dataset'){
+  const d=inputs[0],fs=args.fields;if(!Array.isArray(fs)||!fs.length||fs.some(f=>!f||typeof f!=='object')||new Set(fs.map(f=>f.as)).size!==fs.length||fs.some(f=>!safe(f.as)))fail('投影需真实字段及唯一输出别名');fs.forEach(f=>col(d,f.column));
+  for(const row of d.rows){await check();add(Object.fromEntries(fs.map(f=>[f.as,row[f.column]])));}columns=fs.map(f=>f.as);numericColumns=fs.filter(f=>d.numericColumns?.includes(f.column)).map(f=>f.as);audit={inputRows:d.rows.length,outputRows:rows.length};
+ }else if(tool==='normalize_period_dataset'){
+  const d=inputs[0],fs=args.fields;
+  if(!Array.isArray(fs)||!fs.length||fs.some(f=>!f||typeof f!=='object')||new Set(fs.map(f=>f.as)).size!==fs.length)fail('期间标准化需要不重复的fields');
+  for(const f of fs){col(d,f.column);if(!safe(f.as)||d.columns.includes(f.as)||!['month','day'].includes(f.unit)||!['error','keep'].includes(f.nulls))fail('期间字段需新增as、unit=month/day、nulls=error/keep');if(f.yearColumn){col(d,f.yearColumn);if(f.unit!=='month')fail('分列年/月仅适用于month');}}
+  let nullCells=0;for(const row of d.rows){await check();const out={...row};for(const f of fs){let value=row[f.column];if(value===null||value===''){nullCells++;if(f.nulls==='error')fail('来源期间为空；须核实或明确nulls=keep');out[f.as]=value;continue;}
+   if(f.yearColumn){const y=String(row[f.yearColumn]),m=String(value);if(!/^\d{4}$/.test(y)||!/^\d{1,2}$/.test(m))fail('分列期间必须为四位年及1至12月');value=y+'-'+m.padStart(2,'0');}out[f.as]=normalizeCalendarPeriod(value,f.unit);
+  }add(out);}columns=[...d.columns,...fs.map(f=>f.as)];numericColumns=d.numericColumns??[];audit={inputRows:d.rows.length,outputRows:rows.length,nullCells,normalization:'calendar-v1'};
+ }else if(tool==='select_period_dataset'){
+  const d=inputs[0],ks=args.keyColumns;col(d,args.periodColumn);
+  if(!Array.isArray(ks)||!ks.length||new Set(ks).size!==ks.length||!['first','last'].includes(args.select)||!['all','error'].includes(args.ties)||!['month','day'].includes(args.unit)||!['error','exclude'].includes(args.nulls))fail('首末期间需keyColumns、unit=month/day、select=first/last、ties=all/error及nulls=error/exclude');ks.forEach(c=>col(d,c));
+  if(args.nulls==='exclude'&&!(typeof args.nullEvidence==='string'&&args.nullEvidence.trim()))fail('排除空期间需要业务依据，不能静默丢失对象');
+  const groups=new Map();let nullRows=0;for(const row of d.rows){await check();const k=key(row,ks);if(k===null)fail('分组键为空，不能猜测对象');const raw=row[args.periodColumn];if(raw===null||raw===''){nullRows++;if(args.nulls==='error')fail('首末期间来源有空值');continue;}const period=normalizeCalendarPeriod(raw,args.unit),prev=groups.get(k),better=!prev||(args.select==='last'?period>prev.period:period<prev.period);
+   if(better)groups.set(k,{period,rows:[row]});else if(period===prev.period)prev.rows.push(row);
+  }
+  let tieGroups=0;for(const g of groups.values()){if(g.rows.length>1){tieGroups++;if(args.ties==='error')fail('选中期间存在并列记录；核实粒度或明确ties=all，不能任意选第一条');}for(const row of g.rows)add({...row});}columns=d.columns;numericColumns=d.numericColumns??[];audit={inputRows:d.rows.length,outputRows:rows.length,groups:groups.size,tieGroups,nullRows,select:args.select};
+ }else if(tool==='expand_dataset'){
   const d=inputs[0];col(d,args.column);const fs=args.fields;
   if(!['keep','drop'].includes(args.empty)||!Array.isArray(fs)||!fs.length||fs.some(f=>!safe(f.as)||!Array.isArray(f.path)||f.path.some(k=>!safe(k)))||new Set(fs.map(f=>f.as)).size!==fs.length)fail('展开需fields[{path:字段路径数组,as:输出列}]及empty=keep/drop');
   const rowKey=args.rowKey;if(!safe(rowKey)||[...d.columns,...fs.map(f=>f.as)].includes(rowKey)||fs.some(f=>d.columns.includes(f.as)))fail('展开输出列与行键必须唯一且不能覆盖来源字段');
