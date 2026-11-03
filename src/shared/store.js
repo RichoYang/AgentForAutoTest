@@ -114,7 +114,7 @@ export class JsonStore {
         const original = prior[0]?.originalQuestion ?? input.originalQuestion ?? root?.content;
         const context = questionEvidence(prior, input.context ?? []);
         const attachments = [...new Map([...prior.flatMap(j=>j.attachments??[]), ...(input.attachments??[])].map(a=>[a.id,a])).values()];
-        input = {...input, ...(original ? {originalQuestion:original} : {}), context, attachments,
+        input = {...input,...((prior[0]?.currentQuestion??input.currentQuestion)?{currentQuestion:prior[0]?.currentQuestion??input.currentQuestion}:{}), ...(original ? {originalQuestion:original} : {}), context, attachments,
           ...(prior[0] ? {missionId:prior[0].missionId} : {})};
       }
       const now = new Date().toISOString();
@@ -144,6 +144,7 @@ export class JsonStore {
         stage: input.stage,
         instruction: input.instruction,
         originalQuestion: input.originalQuestion ?? input.instruction,
+        ...(input.currentQuestion?{currentQuestion:input.currentQuestion}:{}),
         taskIntent: input.taskIntent ?? 'implementation',
         ...(input.taskIntent === 'analysis' ? { questionScopePolicy: 'original-question-v1' } : {}),
         ...(input.sourceEnvironment ? { sourceEnvironment: input.sourceEnvironment } : {}),

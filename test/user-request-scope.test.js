@@ -1,0 +1,18 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {mkdtemp,rm}from 'node:fs/promises';import os from 'node:os';import path from 'node:path';
+import {currentUserQuestion,fieldMappingContract}from '../src/shared/user-request-scope.js';import {questionObjective,questionRequest}from '../src/control-plane/conversations.js';import {requiresCausalEvidence,assessInvestigation}from '../src/shared/investigation-review.js';import {JsonStore}from '../src/shared/store.js';
+const state={questions:{old:{id:'old',rootTurnId:'t1'},next:{id:'next',rootTurnId:'t2',parentQuestionId:'old'}},conversations:[{id:'t1',content:'为什么生产金额不一致？'},{id:'t2',content:'帮我找一下图中字段的数据库字段名'}]};
+test('new question keeps history for references while selecting its own explicit objective',()=>{
+ assert.match(questionRequest(state,'next'),/为什么生产金额不一致/);assert.equal(questionObjective(state,'next'),'帮我找一下图中字段的数据库字段名');assert.equal(questionObjective({...state,conversations:[state.conversations[0],{id:'t2',content:'PRD的'}]},'next'),questionRequest({...state,conversations:[state.conversations[0],{id:'t2',content:'PRD的'}]},'next'));
+});
+test('current field lookup does not inherit a causal or deployed-workflow gate from older topics',()=>{
+ const job={currentQuestion:questionObjective(state,'next'),originalQuestion:questionRequest(state,'next'),instruction:'generated direction asks to locate the deployed flow'};assert.equal(currentUserQuestion(job),state.conversations[1].content);assert.equal(requiresCausalEvidence(job),false);assert.equal(fieldMappingContract(job).runtimeBindingExplicitlyRequested,false);assert.equal(requiresCausalEvidence({originalQuestion:state.conversations[0].content}),true);
+});
+test('explicit deployment requirements and real unknown fields are never promoted merely by mapping intent',()=>{
+ const job={taskIntent:'analysis',stage:'developer',currentQuestion:'核实已部署表单实际取值字段映射',originalQuestion:'旧问题'};assert.equal(fieldMappingContract(job).runtimeBindingExplicitlyRequested,true);
+ const result={outcome:'partial',finalMessage:'A field is still unknown',investigation:{status:'wait',goals:[{id:'original-question',required:true,status:'open',evidence:'Missing actual mapping'}],blocker:{kind:'unavailable',needed:'Read access',evidence:'Denied'}},handoff:{checks:[],artifacts:[],risks:[]}};assert.equal(assessInvestigation(job,result).outcome,'partial');assert.equal(fieldMappingContract({originalQuestion:'请计算这个月营业额'}),null);
+});
+test('same-question continuation preserves current objective, while other system tasks remain separate',async t=>{
+ const dir=await mkdtemp(path.join(os.tmpdir(),'request-scope-'));t.after(()=>rm(dir,{recursive:true,force:true}));const store=new JsonStore(path.join(dir,'store.json'));await store.transact(s=>{s.questions={q:{id:'q',projectId:'one',chatId:'g',rootTurnId:'t1'}};s.conversations=[{id:'t1',content:'Find field mapping'}];});
+ const base={questionId:'q',projectId:'one',chatId:'g',stage:'developer',workflow:'analysis_review',taskIntent:'analysis',senderId:'member',instruction:'map fields',originalQuestion:'Old causal background',currentQuestion:'Find database column names'};
+ await store.createJob(base);const next=(await store.createJob({...base,currentQuestion:'generated instruction must not replace objective'})).job;assert.equal(next.currentQuestion,base.currentQuestion);const other=(await store.createJob({...base,projectId:'two',questionId:'q2',currentQuestion:'Find independent report fields'})).job;assert.equal(other.currentQuestion,'Find independent report fields');assert.notEqual(next.projectId,other.projectId);
+});

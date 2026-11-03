@@ -1,3 +1,4 @@
+import {currentUserQuestion}from './user-request-scope.js';
 import {assessReportDelivery} from './report-acceptance.js';
 import {sourcePreparationProgress} from './source-preparation.js';
 import {investigationLimits} from './investigation-budget.js';
@@ -13,8 +14,8 @@ const operationGuidance = /(?:怎么|如何|怎样|在哪|哪里).{0,18}(?:操�
 const explicitLiveVerification = /(?:实际|直接|现场).{0,10}(?:操作|打开|进入|登录|实测|验证)|(?:打开|进入|登录).{0,12}(?:页面|系统).{0,12}(?:看看|看一下|确认|验证|操作)|(?:当前|现在).{0,10}(?:账号|用户|页面|权限).{0,12}(?:能否|是否|可以|展示|显示)|(?:帮我|请).{0,10}(?:实测|实际操作|代为操作|创建一条|提交一次)|(?:live|current\s+account|actually).{0,20}(?:verify|test|open|submit)/i;
 
 function originalAcceptanceText(job){
- if(!nonempty(job.originalQuestion))return job.instruction??'';
- const text=job.originalQuestion;
+ if(!nonempty(currentUserQuestion(job)))return job.instruction??'';
+ const text=currentUserQuestion(job);
  // Short references retain their resolved subject. A substantive original
  // request is authoritative; appended historical knowledge never adds goals.
  const rest=text.replace(/(?:prd|uat|sit|测试|生产)\s*环境/gi,'').replace(/深度|深入|彻底|完整|全面|排查|调查|分析|一下|请|帮我|继续|接着|再|看看|查一下|这个问题|该问题|上述问题|前面的问题|在|中|[\s，,。.!！?？]/g,'');
@@ -33,7 +34,7 @@ export function isOperationGuidanceQuestion(job) {
 }
 export function requiresLiveVerification(job) {
  // Generated investigation instructions must not expand the user's acceptance target.
- return explicitLiveVerification.test(nonempty(job.originalQuestion)?job.originalQuestion:(job.instruction??''));
+ return explicitLiveVerification.test(currentUserQuestion(job));
 }
 
 function unresolvedDeepCause(job,result){

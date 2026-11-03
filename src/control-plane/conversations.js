@@ -504,6 +504,7 @@ export class ConversationService {
         requestedAgentRole: turn.role, requestedAgentProfile: turn.profile,
         ...routing, ...route, continuousInvestigation: route.workflow === 'continuous_analysis', taskIntent: decision.intent, instruction: decision.instruction,
         tabularDelivery:decision.requiresTabularDelivery===true,
+        currentQuestion:turn.questionId?questionObjective(await store.read(),turn.questionId):turn.content,
         originalQuestion: turn.questionId ? questionRequest(await store.read(), turn.questionId) : turn.content,
         attachments: [...(turn.resumeAttachments??[]),...attachments],
         delegation: route.stage !== turn.role ? { fromStage: turn.role, toStage: route.stage,
@@ -572,6 +573,13 @@ export function questionRequest(state, questionId) {
   }
   return turns.reverse().filter((text, index, all) => index === 0 || text !== all[index - 1])
     .map((text, index) => index === 0 ? text : `后续补充：${text}`).join('\n\n') || null;
+}
+
+export function questionObjective(state,questionId){
+ const question=state.questions?.[questionId],text=state.conversations?.find(t=>t.id===question?.rootTurnId)?.content?.trim();
+ if(!text)return questionRequest(state,questionId);
+ const residue=text.replace(/!\[[^\]]*\]\([^)]*\)|@\S+/g,'').replace(/(?:prd|uat|sit|测试|生产|环境|的|在|中|是|这个|那个|继续|接着|再|一下|[\s，,。.!！?？])/gi,'');
+ return residue?text:questionRequest(state,questionId);
 }
 
 function agentRouting(context, role, profile) {
