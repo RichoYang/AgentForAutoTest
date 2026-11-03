@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "environments": {
+    "sample_test_web": {
+      "projectId": "sample",
+      "tier": "uat",
+      "kind": "website",
+      "applicationRoot": true,
+      "baseUrl": "https://integration.example.invalid/restcloud/admin",
+      "credentialRef": "sample-restcloud-web",
+      "membersRead": true,
+      "ownerOpenIdsByProfile": {
+        "sample-bot": [
+          "ou_REPLACEOWNER"
+        ]
+      },
+      "queries": {
+        "investigate": {
+          "mode": "investigate",
+          "reviewed": true,
+          "description": "Read approved interface mappings and logs only; no test, replay, publish or changes",
+          "maxRows": 20,
+          "timeoutMs": 10000,
+          "browser": true,
+          "parameters": [
+            {
+              "name": "purpose",
+              "type": "string",
+              "maxLength": 200
+            }
+          ],
+          "readEndpoints": [
+            {
+              "method": "GET",
+              "path": "/restcloud/rest/core/services/showdetails",
+              "reviewed": true
+            },
+            {
+              "method": "GET",
+              "path": "/restcloud/rest/apiportal/apis/showdetails",
+              "reviewed": true
+            },
+            {
+              "method": "GET",
+              "path": "/restcloud/rest/businesslog/fieldCode/list/all",
+              "reviewed": true
+            }
+          ],
+          "readNavigationSelectors": [
+            ".api-list-right-home-card-header-name"
+          ]
+        }
+      }
+    }
+  }
+}
