@@ -455,7 +455,8 @@
               "enum": [
                 "deliver",
                 "revise",
-                "needs_review"
+                "needs_review",
+                "deliver_partial"
               ]
             },
             "issues": {

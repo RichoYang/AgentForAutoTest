@@ -10,11 +10,11 @@ import {messageIdOf} from './live-cards.js';
 export class ReportDelivery {
  constructor(context){this.context=context;this.workers=new Map();this.closed=false;}
  async enqueue(job){
-  if(!job||job.nextJobId||job.status!=='completed'||job.result?.outcome!=='ready')return;
+  if(!job||job.nextJobId||job.status!=='completed'||!reportDeliveryReady(job))return;
   const snapshot=await this.context.store.read();
   if(!snapshot.jobs.some(j=>(job.questionId?j.questionId===job.questionId:j.id===job.id)&&j.reportFiles?.length))return;
   await this.context.store.transact(state=>{
-   const current=state.jobs.find(j=>j.id===job.id);if(current?.status!=='completed'||current.result?.outcome!=='ready')return;
+   const current=state.jobs.find(j=>j.id===job.id);if(current?.status!=='completed'||!reportDeliveryReady(current))return;
    const q=state.questions?.[job.questionId];
    if(q&&state.jobs.filter(j=>j.questionId===job.questionId).at(-1)?.id!==job.id)return;
    const jobs=job.questionId?state.jobs.filter(j=>j.questionId===job.questionId):[current];
@@ -22,7 +22,7 @@ export class ReportDelivery {
    // Default to the latest accepted file; an explicitly reviewed set delivers every component.
    const candidates=jobs.flatMap(source=>(source.reportFiles??[]).filter(item=>reportEligible(current.reportReviews?current:source,item)).map(item=>({source:state.jobs.find(j=>j.id===item.sourceJobId)??source,item})));
    const eligible=candidates.filter(({item})=>!q||item.questionGeneration===q.generation);
-   const manifest=current.reportDeliverySet?.files;
+   const manifest=(current.result?.outcome==='partial'?current.reportPartialDeliverySet:current.reportDeliverySet)?.files;
    const selected=manifest?.length ? manifest.map(m=>eligible.find(({item})=>item.id===m.fileId&&item.verificationHash===m.verificationHash)).filter(Boolean) : eligible.slice(-1);
    if(manifest?.length && selected.length!==manifest.length)return;
    const selectedKeys=new Set(selected.map(({source,item})=>source.id+':'+item.id));
@@ -32,7 +32,7 @@ export class ReportDelivery {
     for(const [oldKey,entry] of Object.entries(state.reportDeliveries))if(!selectedKeys.has(oldKey)&&!entry.messageId&&entry.questionId===job.questionId&&entry.questionGeneration===q?.generation)entry.superseded=true;
     if(state.reportDeliveries[key])continue;
     const messageId=q?.messageId??job.originMessageId??job.replyToMessageId;if(!messageId)continue;
-    state.reportDeliveries[key]={sourceJobId:source.id,questionId:job.questionId,questionGeneration:q?.generation,item,destination:{messageId,privateRecipient:privateRecipient(state,current),profile:q?.profile??job.originProfile??job.agentProfile,replyInThread:q?.replyInThread??job.originReplyInThread??false},createdAt:new Date().toISOString()};
+    state.reportDeliveries[key]={sourceJobId:source.id,questionId:job.questionId,questionGeneration:q?.generation,item,partialDelivery:current.result?.outcome==='partial',destination:{messageId,privateRecipient:privateRecipient(state,current),profile:q?.profile??job.originProfile??job.agentProfile,replyInThread:q?.replyInThread??job.originReplyInThread??false},createdAt:new Date().toISOString()};
    }
   });
   await this.retry();
@@ -82,3 +82,5 @@ export class ReportDelivery {
 }
 
 function deliveryEligible(state,entry){const source=state.jobs.find(j=>j.id===entry.sourceJobId);const reviewer=state.jobs.filter(j=>(entry.questionId?j.questionId===entry.questionId:j.id===entry.sourceJobId)&&j.reportReviews?.[entry.item.id]).at(-1);return reportEligible(reviewer??source??{},entry.item);}
+
+function reportDeliveryReady(job){return job?.result?.outcome==='ready'||job?.result?.outcome==='partial'&&job.reportPartialDeliverySet?.files?.length>0;}

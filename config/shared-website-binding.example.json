@@ -1,0 +1,8 @@
+{
+  "note": "仅演示参数；实际值从本机已核实环境/项目/机器人配置取得，不是可用连接配置。",
+  "sourceEnvironmentId": "shared_prd_console",
+  "targetEnvironmentId": "business_prd_console",
+  "targetProjectId": "your-project",
+  "targetProfile": "your-bot-profile",
+  "targetSourceEnvironment": "prd"
+}
