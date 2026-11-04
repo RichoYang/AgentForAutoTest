@@ -1,6 +1,6 @@
 # Angel AgentOS
 
-**成品版本：v1.59.1** · GitHub：<https://github.com/angelaboy0113/agentos>
+**成品版本：v1.59.2** · GitHub：<https://github.com/angelaboy0113/agentos>
 
 多系统知识助手专用分支的部署与迁移见 [多系统助手说明](docs/system-assistants.md)。
 
@@ -370,3 +370,5 @@ MySQL `schema` 保留旧 `tables` 字段名结构，新增 `columnMetadata`：�
 模型容量等待、恢复与迁移边界见 [模型容量恢复](docs/model-capacity-recovery.md)。
 
 结果卡按当前 IM 消息接口采用单个原生表格，其余表格转为字段说明；超出单卡容量的内容保留在原卡完整结果分页，未交付的旧卡会在重试时自动适配。见 [结果卡交付](docs/card-result-delivery.md)。
+
+补充网页不可访问时保留已核实业务数据，并在新连续调查中返回原问题审阅其它已授权来源；不将某个平台默认为数据交付必经入口。见 [可用来源接续](docs/available-source-continuity.md)。

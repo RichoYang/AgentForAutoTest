@@ -1,3 +1,4 @@
+import{availableEnvironmentEvidence,canReviewAlternativeSources}from './available-evidence.js';
 import{loadIntegrationProjects,assertTaskReadScope}from './integration-peers.js';
 import {comparisonTarget,requestedSourceEnvironments} from './source-comparison.js';
 import { connectionEndpoints } from './connection-endpoints.js';
@@ -126,7 +127,7 @@ export class JsonStore {
         ...(input.connectionSourceDiscovery ? {connectionSourceDiscovery:structuredClone(input.connectionSourceDiscovery)} : {}),
         ...(input.connectionEnrollmentPending ? {connectionEnrollmentPending:true} : {}),
         ...(input.environmentAccess ? { environmentAccess: structuredClone(input.environmentAccess) } : {}),
-        ...(input.continuousInvestigation ? { continuousInvestigation: true } : {}),
+        ...(input.continuousInvestigation ? { continuousInvestigation: true, ...(input.taskIntent==='analysis'?{availableSourceReviewPolicy:'preserve-and-review-v1'}:{}) } : {}),
         missionId: input.missionId ?? createId('MISSION'),
         tabularDelivery:input.tabularDelivery===true,
         projectId: input.projectId,
@@ -322,6 +323,33 @@ export class JsonStore {
       job.events.push({ id: createId('EVT'), type: 'continuous_environment_started', at: job.updatedAt,
         environmentId: plan.environmentId, queryId: plan.queryId, scopeHash: plan.scopeHash });
       return structuredClone(job);
+    });
+  }
+
+  async deferUnavailableWebsite(id, expected) {
+    const config=await loadEnvironments();
+    return this.transact(state=>{
+      const job=requireJob(state,id);
+      if(!canReviewAlternativeSources(job,expected.reason)||job.environmentAccess.scopeHash!==expected.scopeHash)return false;
+      const plan=job.environmentAccess;
+      verifyApprovedPlan(config,plan);
+      const e=config.environments[plan.environmentId];
+      if(e?.kind!=='website'||e.projectId!==job.projectId||e.tier!==plan.tier)return false;
+      const record={at:new Date().toISOString(),environmentId:plan.environmentId,configHash:plan.configHash,
+        scopeHash:plan.scopeHash,reason:expected.reason,loginUrl:e.baseUrl,
+        plan:structuredClone(plan),result:structuredClone(job.result)};
+      job.deferredWebsiteReads??=[];job.deferredWebsiteReads.push(record);
+      job.context=compactContext([...job.context,{stage:job.stage,kind:'environment_unavailable',result:{
+        outcome:'partial',summary:'补充网页来源暂不可用；已有业务证据继续保留，返回原问题核查可用来源并先交付能够核实的部分。',
+        finalMessage:`补充来源 ${e.baseUrl} 当前状态 ${expected.reason}，未获得该网站业务数据。已有取证不是该网站的替代授权。请重新审阅原始业务目标：复用本任务已核实数据，选择已授权的其它来源补足可完成部分并交付，缺少指标单列，不把某个外部平台当成默认必经步骤；用户明确要求该平台原始内容时仍说明缺口，不能冒充已访问或全部完成。`,
+        unavailableSource:{environmentId:plan.environmentId,reason:expected.reason,loginUrl:e.baseUrl},
+        availableEvidence:availableEnvironmentEvidence(job)}}]);
+      delete job.environmentAccess;delete job.browserCheckpoint;delete job.browserResumeClaim;
+      delete job.modelCheckpoint;delete job.modelRecovery;
+      job.status='queued';job.result=null;job.lease=null;job.updatedAt=record.at;
+      job.events.push({id:createId('EVT'),type:'website_source_deferred',at:record.at,environmentId:record.environmentId,reason:record.reason});
+      const q=state.questions?.[job.questionId];if(q)q.generation++;
+      return true;
     });
   }
 

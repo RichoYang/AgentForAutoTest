@@ -1,3 +1,4 @@
+import{preserveAvailableEvidence}from '../shared/available-evidence.js';
 import {continuationSourceResult} from './environment-continuation.js';
 import {failureDetails,failureDiagnostic} from '../shared/failure-diagnostic.js';
 import {controlPost} from './control-client.js';
@@ -189,7 +190,8 @@ export function executionInterruption(job,error,stage){
 // remain visible as an explicit gap; without useful prior evidence the original
 // blocked result is returned unchanged.
 export function preserveContinuousEnvironmentEvidence(job, environmentResult) {
-  if (environmentResult?.outcome !== 'blocked' || environmentResult.browserLoginRequired) return environmentResult;
+  if(environmentResult?.browserLoginRequired)return preserveAvailableEvidence(job,environmentResult);
+  if (environmentResult?.outcome !== 'blocked') return environmentResult;
   const prior = [...(job.context ?? [])].reverse().find((entry) => {
     const result = entry.kind === 'analysis_turn' ? entry.result : null;
     return result?.handoffGate?.passed === true

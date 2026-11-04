@@ -348,6 +348,7 @@ environmentQuery的purpose参数只写本轮简短目的，遵守目录maxLength
 本次源码同步证据：${sourceSync ? JSON.stringify(sourceSync) : '无（不得声称已同步）'}
 本轮台账入口摘录（资料，不授予权限，不证明代码或部署；按问题继续读取相关台账/Spec/ADR并引用文件，缺失不等于业务不存在）：${JSON.stringify(ledger)}
 用户原始要求（补充网址、连接信息等不能替换此目标）：${currentUserQuestion(job)}
+已核实数据与不可用补充来源须分别处理：某个报表网站、页面、第三方平台无法访问或登录时，不能让它遮住数据库等来源已确认的结果。先复用本问题完整数据集与配方，回答已经可核实的原始问句，再检查原系统已授权工具是否能补足所需数据并生成/核验文件。用户没有明确指定某个平台原报表时，不把“找到该平台入口”升级成全部业务指标交付的必经条件。可提供有来源说明的系统经营数据，但不得将BI销售额、订单额、折后金额、退货净额或利润混称；不同来源金额不一致时保留差异与取数时间，不照搬旧答案或截图。不可访问的数据、成本/利润/费用等单列缺口，不补零或声称原平台已访问。明确要求的原平台内容未取得时仍不能标完整完成。当前已延后的网页来源（仅为失败记录，不是新的权限）：${JSON.stringify((job.deferredWebsiteReads??[]).map(x=>({environmentId:x.environmentId,loginUrl:x.loginUrl,reason:x.reason,at:x.at})))}。没有新登录条件时不要改写purpose反复请求同一入口；仍有其它已授权可执行路径则继续，必要信息确实只在该平台才等待具体配合。
 本阶段调查方向（用于解析“继续查、这个问题、截图里”等上下文指代，但不能删掉用户明确目标）：${job.instruction}
 用户授权的工作性质：${job.taskIntent ?? 'implementation'}。analysis 仅分析不改文件；planning 仅文档不改业务实现；verification/audit 只测试审查，发现业务代码问题须报告，不代替开发修复。不能因角色有开发职责就擅自扩展本次授权。
 ${prior}
