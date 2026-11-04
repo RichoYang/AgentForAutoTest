@@ -21,8 +21,9 @@ export async function loadEnvironments(file = environmentFile()) {
   if(v.executionPolicy?.mongodbQueryTimeoutMs!==undefined&&(!Number.isSafeInteger(v.executionPolicy.mongodbQueryTimeoutMs)||v.executionPolicy.mongodbQueryTimeoutMs<100))throw new Error('MongoDB单次查询时限须为有效毫秒数');
   validateWebsiteAliases(v);
   for (const [key, e] of Object.entries(v.environments)) {
-    if (Object.keys(e).some((k) => !['projectId','tier','kind','credentialRef','ownerOpenIdsByProfile','membersRead','queries','host','port','database','tls','baseUrl','accountPolicy','businessAccountAuthorization','transport','applicationRoot','authSource','readConcern','tct'].includes(k)) || !id(key) || !id(e.projectId) || !['uat', 'prd'].includes(e.tier) || !['mysql', 'mongodb', 'nacos', 'website','tct'].includes(e.kind)
+    if (Object.keys(e).some((k) => !['projectId','tier','kind','credentialRef','ownerOpenIdsByProfile','membersRead','queries','host','port','database','tls','baseUrl','accountPolicy','businessAccountAuthorization','transport','applicationRoot','authSource','readConcern','tct','sharedReadBinding'].includes(k)) || !id(key) || !id(e.projectId) || !['uat', 'prd'].includes(e.tier) || !['mysql', 'mongodb', 'nacos', 'website','tct'].includes(e.kind)
       || !id(e.credentialRef) || typeof e.membersRead !== 'boolean' || !e.ownerOpenIdsByProfile || !e.queries) throw new Error('环境配置字段无效');
+    if(e.sharedReadBinding!==undefined){const b=e.sharedReadBinding;if(e.kind!=='website'||!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).length!==2||!Object.hasOwn(b,'sourceEnvironmentId')||!Object.hasOwn(b,'sourceConfigHash')||!id(b.sourceEnvironmentId)||b.sourceEnvironmentId===key||!/^([a-f0-9]{64})$/.test(b.sourceConfigHash))throw new Error('共享网站来源审计字段无效');}
     if(e.applicationRoot!==undefined&&(e.kind!=='website'||typeof e.applicationRoot!=='boolean'))throw new Error('applicationRoot仅能用于网站应用入口且必须为布尔值');
     if(e.readConcern!==undefined&&(e.kind!=='mongodb'||!['local','majority'].includes(e.readConcern)))throw new Error('readConcern仅支持MongoDB的local/majority');
     if(e.kind==='tct')validateTct(e);else if(e.tct!==undefined)throw Error('tct仅用于调度环境');

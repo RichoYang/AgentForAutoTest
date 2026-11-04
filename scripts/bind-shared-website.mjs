@@ -4,4 +4,4 @@ const args=process.argv.slice(2),flags={};for(let i=0;i<args.length;i+=2){if(!ar
 for(const key of ['environments','projects','source','target','project','profile','source-environment','output'])if(!flags[key])throw Error('Missing --'+key);
 const file=path.resolve(flags.environments),output=path.resolve(flags.output);if(file===output)throw Error('Output must be a separate staged file');
 const cfg=await loadEnvironments(file),projects=JSON.parse(await fs.readFile(flags.projects)),binding=sharedWebsiteBinding(cfg,projects,{sourceEnvironmentId:flags.source,targetEnvironmentId:flags.target,targetProjectId:flags.project,targetProfile:flags.profile,targetSourceEnvironment:flags['source-environment']});
-cfg.environments[flags.target]=binding.environment;await fs.writeFile(output,JSON.stringify(cfg,null,2)+'\n',{mode:0o600,flag:'wx'});console.log(JSON.stringify({staged:true,...binding.audit}));
+cfg.environments[flags.target]=binding.environment;await fs.writeFile(output,JSON.stringify(cfg,null,2)+'\n',{mode:0o600,flag:'wx'});try{await loadEnvironments(output);}catch(error){await fs.unlink(output);throw error;}console.log(JSON.stringify({staged:true,...binding.audit}));
