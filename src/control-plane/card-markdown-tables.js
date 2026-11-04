@@ -110,3 +110,31 @@ export function nativeCardTable(segment) {
     rows: segment.rows.map((row) => Object.fromEntries(columns.map((column, index) => [column.name, row[index] || '—']))),
   };
 }
+
+// The IM message-card PATCH route was verified to accept one native table;
+// content-product Markdown limits are not the contract for this route.
+export function fitNativeCardTables(card, maxTables = 1) {
+  let count = 0, changed = false;
+  const copy = structuredClone(card);
+  const visit = value => {
+    if (!value || typeof value !== 'object') return value;
+    if (value.tag === 'table') {
+      if (count++ < maxTables) return value;
+      changed = true;
+      return {tag:'markdown',text_size:'normal',content:verticalTable({
+        headers:(value.columns ?? []).map(c=>c.display_name ?? c.name),
+        rows:(value.rows ?? []).map(row=>(value.columns ?? []).map(c=>{
+          const cell=row[c.name];
+          return cell === null || cell === undefined ? '—' : typeof cell === 'object' ? JSON.stringify(cell) : String(cell);
+        })),
+      })};
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (Array.isArray(child)) value[key] = child.map(visit);
+      else if (child && typeof child === 'object') value[key] = visit(child);
+    }
+    return value;
+  };
+  visit(copy);
+  return changed ? copy : card;
+}

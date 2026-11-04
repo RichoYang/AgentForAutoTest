@@ -1,3 +1,4 @@
+import {fitNativeCardTables} from './card-markdown-tables.js';
 import {stateView} from '../shared/state-view.js';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -94,7 +95,7 @@ export class LiveCards {
   }
   async deliver(key, force) {
     await this.cleanupPrivate(key);
-    const entry = await stateView(this.store,s=>s.cardMessages?.[key]);
+    let entry = await stateView(this.store,s=>s.cardMessages?.[key]);
     if (!entry || (entry.revision === entry.deliveredRevision && (!entry.terminalMention || entry.mentionDelivered))) return entry?.messageId;
     // A local maintenance hold prevents external edits while operator approval is pending.
     if (entry.messageId) {
@@ -106,6 +107,19 @@ export class LiveCards {
     }
     if (!force && (Date.now() < (entry.retryAt ?? 0) || (!entry.terminal && Date.now() - (entry.sentAt ?? 0) < this.intervalMs))) return;
     try {
+      // Upgrade a restored/retrying outbox independently of business execution.
+      const fitted=fitResultCard(entry.card);
+      if(JSON.stringify(fitted)!==JSON.stringify(entry.card)){
+        const repaired=await this.store.transact(state=>{
+          const current=state.cardMessages?.[key];
+          if(!current||current.revision!==entry.revision||current.generation!==entry.generation)return null;
+          current.card=fitted;current.revision++;current.retryAt=0;
+          current.deliveryRepair={kind:'card_layout',at:new Date().toISOString()};
+          return structuredClone(current);
+        });
+        if(!repaired)return;
+        entry=repaired;
+      }
       await this.authorizeDestination?.(entry.destination,entry);
       const options = { strictGroup:entry.destination.strictGroup, replyInThread: entry.destination.replyInThread, profile: entry.destination.profile, idempotencyKey: `aos-card-${createHash('sha256').update(key).digest('hex').slice(0, 32)}` };
       let messageId = entry.messageId;
@@ -133,6 +147,7 @@ export class LiveCards {
         if(privateCard&&entry.messageId&&entry.messageId!==messageId){state.cardMessages[key].retiredMessageIds=[...new Set([...(state.cardMessages[key].retiredMessageIds??[]),entry.messageId])];}
         Object.assign(state.cardMessages[key], { messageId, ...(privateCard?{privateDeliveryKind,privateDeliveryChatId}:{}), deliveredRevision: entry.revision,
           sentAt: Date.now(), failures: 0, retryAt: 0 });
+        if(state.cardMessages[key].revision===entry.revision)delete state.cardMessages[key].error;
       });
       if(privateCard)await this.cleanupPrivate(key);
       const {latest,questionReady}=await stateView(this.store,fresh=>{
@@ -162,6 +177,16 @@ export class LiveCards {
           current.failures = (current.failures ?? 0) + 1;
           current.retryAt = Date.now() + Math.min(60_000, current.failures * 5000);
           current.error = '消息投递失败，等待重试'; // Never persist raw CLI credentials in public status.
+          // Deterministic platform layout rejection needs a new representation,
+          // not unlimited retries of the identical rejected card.
+          if(/(?:\b11310\b|card table number over limit)/i.test(String(error?.message ?? error))
+            &&current.revision===entry.revision&&current.generation===entry.generation){
+            const fallback=fitResultCard(fitNativeCardTables(current.card,0));
+            if(JSON.stringify(fallback)!==JSON.stringify(current.card)){
+              current.card=fallback;current.revision++;current.retryAt=0;
+              current.deliveryRepair={kind:'card_table_limit',at:new Date().toISOString()};
+            }
+          }
         }
       });
       if (withdrawn) return entry.messageId;

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { cardMarkdownEmphasis } from './card-markdown-emphasis.js';
-import { cardMarkdownSegments, cardMarkdownTables, nativeCardTable } from './card-markdown-tables.js';
+import { cardMarkdownSegments, cardMarkdownTables, nativeCardTable, fitNativeCardTables } from './card-markdown-tables.js';
 
 const clip = (text, size) => Array.from(text).slice(0, size).join('');
 export const PRIMARY_RESPONSE_LIMIT = 1200;
@@ -79,6 +79,7 @@ export function analysisPrimaryResult(text) {
 // Enforce the existing delivery envelope without changing canonical results,
 // task status or queries. Full resultText/details remain available for paging.
 export function fitResultCard(card,maxBytes=28000){
+ card=fitNativeCardTables(card);
  if(Buffer.byteLength(JSON.stringify(card))<=maxBytes)return card;
  const copy=structuredClone(card),elements=copy.body?.elements;
  if(!elements?.some(x=>x.element_id==='result_details'))return card;
@@ -90,7 +91,11 @@ export function fitResultCard(card,maxBytes=28000){
   if(table){table.rows.pop();if(!table.rows.length)elements.splice(elements.indexOf(table),1);else table.page_size=Math.min(table.page_size,table.rows.length);continue;}
   // Unusually wide tables fall back to Markdown; retain their complete details.
   const answer=elements.findIndex(x=>x.tag==='column_set'&&x.columns?.some(c=>c.elements?.some(e=>e.tag==='markdown'&&e.text_size!=='notation')));
-  if(answer<0)break;elements.splice(answer,1);
+  if(answer>=0){elements.splice(answer,1);continue;}
+  // Converted table prose also consumes bytes. Canonical details/pages are
+  // unchanged; remove only answer prose, never actions, status or details.
+  const prose=elements.findLastIndex(x=>x.tag==='markdown'&&x!==note);
+  if(prose<0)break;elements.splice(prose,1);
  }
  const shown=elements.filter(x=>x.tag==='table').reduce((n,x)=>n+x.rows.length,0);
  if(total)note.content=`主卡表格展示 ${shown}/${total} 行；完整内容保留在下方结果分页中，无需重新查询。`;

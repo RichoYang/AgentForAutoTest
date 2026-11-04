@@ -1,6 +1,6 @@
 # Angel AgentOS
 
-**成品版本：v1.59.0** · GitHub：<https://github.com/angelaboy0113/agentos>
+**成品版本：v1.59.1** · GitHub：<https://github.com/angelaboy0113/agentos>
 
 多系统知识助手专用分支的部署与迁移见 [多系统助手说明](docs/system-assistants.md)。
 
@@ -368,3 +368,5 @@ MySQL `schema` 保留旧 `tables` 字段名结构，新增 `columnMetadata`：�
 消息仍使用原有28,000字节交付安全预算，未新增任务限制。极大表格超预算时主卡按完整行减少预览并明确展示行数，完整结果继续由已有resultText/详情分页保存；重试交付不重查业务。不是宣称平台无限容量。回归包含25行字段表、长表、原生表格/主卡结构、技术出处折叠及大表容量回退。实际原卡32行表格回放、部署后更新/读取另保存在本机验收；其它OS/完整跨机未实测。
 
 模型容量等待、恢复与迁移边界见 [模型容量恢复](docs/model-capacity-recovery.md)。
+
+结果卡按当前 IM 消息接口采用单个原生表格，其余表格转为字段说明；超出单卡容量的内容保留在原卡完整结果分页，未交付的旧卡会在重试时自动适配。见 [结果卡交付](docs/card-result-delivery.md)。
