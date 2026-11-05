@@ -98,6 +98,7 @@ export function resourceURL(resource, relative) {
 }
 
 export function sanitized(value) {
+  if (value instanceof Date) return value.toJSON();
   if (Array.isArray(value)) return value.map(sanitized);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
     [key, /password|(?:^|_)pwd|token|authorization|cookie|secret|connection_string/i.test(key) ? '[REDACTED]' : sanitized(entry)]));
@@ -114,7 +115,8 @@ export function createAgentResources(config, scope) {
     if (resource.resource_type !== 'mysql') throw agentError('Resource is not MySQL');
     return mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
       password: resource.password, database: database || (resource.database_name === 'not_specified' ? undefined : resource.database_name),
-      supportBigNumbers: true, bigNumberStrings: true, decimalNumbers: false, multipleStatements: false, connectTimeout: 10000 });
+      supportBigNumbers: true, bigNumberStrings: true, decimalNumbers: false, dateStrings: true,
+      multipleStatements: false, connectTimeout: 10000 });
   }
   async function database(spec, input, resource) {
     const connection = await connect(resource, spec.database);

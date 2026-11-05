@@ -4,12 +4,43 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createServer } from 'node:http';
+import mysql from 'mysql2';
 import { repairPlan } from '../src/runner/requirement-plan.js';
 import { createRequirementAdapter } from '../src/runner/requirement-adapter.js';
 import { createRequirementAgent } from '../src/runner/requirement-agent.js';
 import { executeCases } from '../src/runner/requirement-execution.js';
 import { digest, RequirementWait } from '../src/runner/requirement-feishu.js';
-import { createAgentResources, readSource, validateRouteTemplate } from '../src/runner/requirement-agent-resources.js';
+import { createAgentResources, readSource, sanitized, validateRouteTemplate } from '../src/runner/requirement-agent-resources.js';
+
+test('database connector preserves fiscal dates and microseconds from the MySQL protocol', async t => {
+  const server = mysql.createServer();
+  const sockets = new Set();
+  server.on('connection', connection => {
+    sockets.add(connection.stream);
+    connection.stream.once('close', () => sockets.delete(connection.stream));
+    connection.on('error', () => {});
+    connection.serverHandshake({ protocolVersion: 10, serverVersion: '8.0-fixture', connectionId: 1,
+      statusFlags: 2, characterSet: 45, capabilityFlags: 0xffffff, authCallback: (_, done) => done(null) });
+    connection.on('query', () => {
+      connection.writeColumns([
+        { catalog: 'def', schema: 'fixture', table: 'period', orgTable: 'period', name: 'start_date', orgName: 'start_date', characterSet: 45, columnLength: 10, columnType: mysql.Types.DATE, flags: 0, decimals: 0 },
+        { catalog: 'def', schema: 'fixture', table: 'period', orgTable: 'period', name: 'updated_at', orgName: 'updated_at', characterSet: 45, columnLength: 26, columnType: mysql.Types.DATETIME, flags: 0, decimals: 6 },
+      ]);
+      connection.writeTextRow(['2027-04-01', '2027-03-31 23:59:59.123456']);
+      connection.writeEof();
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); });
+  const runtime = createAgentResources({}, { state: { operations: {} }, useRead: (_, call) => call({
+    resource_type: 'mysql', host: '127.0.0.1', port: server._server.address().port, username: 'fixture', password: 'fixture',
+  }) });
+  t.after(() => runtime.close());
+  const observed = sanitized(await runtime.schema({ resource: 'mysql' }));
+  assert.deepEqual(JSON.parse(JSON.stringify(observed.rows)), [{ start_date: '2027-04-01', updated_at: '2027-03-31 23:59:59.123456' }]);
+  assert.equal(sanitized({ at: new Date('2027-04-01T00:00:00Z'), token: 'private' }).at, '2027-04-01T00:00:00.000Z');
+  assert.equal(sanitized({ at: new Date('2027-04-01T00:00:00Z'), token: 'private' }).token, '[REDACTED]');
+});
 
 test('source search reads the selected repository when child stdin is a pipe', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-source-')); t.after(() => rm(root, { recursive: true, force: true }));
