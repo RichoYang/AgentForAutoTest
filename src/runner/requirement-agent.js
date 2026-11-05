@@ -7,7 +7,8 @@ import { privateDirectory, readJson, writeJson } from './requirement-files.js';
 import { digest, RequirementWait } from './requirement-feishu.js';
 import { askNoTools } from './requirement-generation.js';
 import { createRequirementAdapter } from './requirement-adapter.js';
-import { observationAt, evaluateCaseAssertion } from './requirement-assertions.js';
+import { observationAt } from './requirement-assertions.js';
+import { assertionBinding, compareAgentObservation } from './requirement-agent-assertion-binding.js';
 import { requirementAgentModel } from './requirement-agent-model.js';
 import { agentError, createAgentResources, readSource, resolveInput, sanitized, validateRouteTemplate } from './requirement-agent-resources.js';
 
@@ -38,6 +39,7 @@ const descriptions = {
   cleanup: '按本用例实际变更台账逆序恢复并回查。args:{}。测试场景完成后使用本工具清理，不要为清理再创建一个新的删除/恢复变更。程序也会在finish、异常和恢复时执行此流程。返回逐项实际回执和未决记录；未核验恢复不能开始下一用例。',
 };
 descriptions.plan += ' args:{action:"inspect"}回读当前冻结计划、断言及修正历史；args:{identityCorrections:[{checkId,subject}]}仅修正未比较检查的主体绑定，无需重写大计划，不能包含其他字段。';
+descriptions.assert += ' 字段语义须由实际查询/DOM/源码证明，可用sourceRefs:[已读源码引用]补证。不能用元素数量当金额或把已申请当剩余。差额可用calculation:{terms:[{field:[实际路径],sign:1},{field:[实际路径],sign:-1}]}替代field；程序按真实操作数计算，不改预期。页面要求显示某值时，计算出该值不能替代展示。缺失页面字段使用text/input读取并引用实际路径；缺失会明确记录null/缺失，不能改用count=0冒充金额。';
 export const requirementAgentTools = Object.entries(descriptions).map(([name, description]) => ({ name: 'test_' + name, description,
   inputSchema: { type: 'object', properties: { args: { type: 'object', additionalProperties: true } }, required: ['args'], additionalProperties: false } }));
 
@@ -120,10 +122,11 @@ export function createRequirementAgent(config, options) {
       kind === 'mutation' ? '核对具体变更和恢复目标都与 verify 回读的唯一业务对象相同，归属声明能由快照与所引源码证明。创建时请求必须写入 businessKey 或对应的唯一关联；修改时请求 ID 必须来自该对象回读；恢复必须能还原快照且不影响其他对象。不能凭模型声明或仅同一资源判定目标一致；恢复触发的新副作用也要覆盖。'
       : kind === 'operation' ? '核对操作及 access 与所引源码是否一致。查询须有目标入口、核心业务实现和实际数据查询的证据，不能只凭模型声明、方法名或HTTP方法。核心业务链已明确查询时，标准ORM查询、DTO转换、查询条件构造、字典/权限读取等辅助逻辑不要求递归展开全部实现；没有具体写入线索时，不得因理论上任意辅助方法可能写入而无限追溯。跨服务调用按已提供的客户端契约、调用用途和业务实现综合判断；可见调用触发保存/提交/消息/调度或核心路径无法核实时拒绝并定位具体缺口。写操作须有实际入口或已检查数据库结构。不能允许跨项目资源、DDL、任意代码或把已知写入标成查询。'
         : kind === 'measurement' ? '核对基线与实际观测的测量口径是否可比较，只看查询、绑定参数、字段路径及原用例，不看结果值。相同别名下的列映射、JSON字段、过滤范围、聚合算法、排序或资源变化不得误作业务变化。允许原用例要求的跨对象/期间比较及语义等价的不同查询；字段拼错或口径无法核实时拒绝并说明具体差异，要求重新查询，不能产生产品失败或改写期望。'
+        : kind === 'assertion_binding' ? '核实实际取值字段或计算确实测量原预期要求的业务指标。只判断取值语义，不判断数值是否满足预期。元素count/visible不能冒充金额，已申请/已使用不能冒充剩余，success不能冒充业务数值；不能凭字段名相似或模型声明接受。API根据已读响应DTO/构造逻辑及实际请求定位，SQL根据投影、聚合与过滤核实，页面根据实际选择器/read类型、DOM结构和已核验就绪状态核实。字段缺失可以如实记录失败，但必须证明选择器或响应路径对应所需字段；错误字段或未核实绑定应拒绝并指出所需源码/观测。计算操作数必须是所需同口径业务量，正负号与业务公式一致；页面要求显示剩余时，分配减已用的算术不能代替页面实际显示。实际API不直接提供剩余时，可用同响应中已核实的分配减已用计算。不要根据实测值倒推或改写期望。'
         : '对照原用例完整预期逐条审核检查是否无弱化、遗漏或自证。页面展示必须 page 证据，数据库/审批/账务等分别取适用渠道。数值预期来自用例或独立前置，不能用待测输出作预期。确认主体/期间/切换、负例和不变性全覆盖。允许拆分复合条件。subject只能是对应渠道能回读的实际业务对象和期间；前后时点、切换序号、环境标签须放steps，不能伪装成响应身份。专属数据不存在时不要求响应含不存在的ID；前置与收尾由变更台账回读核验，不要把它们加成无法取身份的业务断言。',
       kind === 'mutation' ? 'hostAuthentication 是本轮连接器从真实登录回执提取的身份及脱敏响应，不是模型自报。对于操作当前登录用户的接口，可将该身份与数据库快照及接口使用认证用户ID的实现共同核对；不能仅因请求未重复携带用户ID拒绝，也不能接受与实际身份不一致的目标。' : '',
       kind === 'operation' && payload.spec?.kind === 'database' ? '这是授权数据库上的直接核对或准备操作，不要求业务仓存在完全相同的SQL入口。以所给实际schemas、实体/业务规则和SQL本身核实表、字段、只读语义或结构化CRUD；不要要求为临时快照查询先在产品源码新增接口。' : '',
-      JSON.stringify({ ...payload, environmentProof: scope.resourceCatalog }),
+      JSON.stringify({ kind, ...payload, environmentProof: scope.resourceCatalog }),
     ].join('\n\n'), { cwd: options.workDir, codexBin: options.codexBin,
       onOutput: raw => evidence(scope, kind + '-review-raw', { raw }) });
     await evidence(scope, kind + '-review', { payload, result });
@@ -382,10 +385,7 @@ export function createRequirementAgent(config, options) {
           if (!check) throw agentError('Check is not in the frozen plan');
           const observation = knownObservation(args.observationId);
           if (observation.channel !== check.channel || check.channel === 'page' && !observation.data.screenshot) throw agentError('Actual evidence channel does not match the required channel');
-          if (check.channel === 'page' && (args.field?.[0] !== 'values'
-            || args.identity?.some(identity => identity.field?.[0] !== 'values'))) {
-            throw agentError('Page assertions and subject identities must use observed DOM values; captured API traffic is diagnostic evidence only');
-          }
+          const binding = assertionBinding(check, observation, args, state.sources);
           if (observation.at < current.planAt) throw agentError('Read a fresh scenario observation after freezing expectations');
           for (const [dimension, value] of Object.entries(check.subject ?? {})) {
             const identity = args.identity?.find(item => item.dimension === dimension);
@@ -397,11 +397,17 @@ export function createRequirementAgent(config, options) {
             if (before && after && (!isDeepStrictEqual(before, after) || !isDeepStrictEqual(check.basis.field, args.field))) {
               await review(scope, 'measurement', { requirement: check.requirement, row: scope.row, channel: check.channel,
                 subject: check.subject, explanation: check.basis.explanation,
-                baseline: { query: before, field: check.basis.field }, actual: { query: after, field: args.field } });
+                baseline: { query: before, field: check.basis.field }, actual: { query: after, field: args.field, calculation: args.calculation } });
             }
           }
-          const comparison = evaluateCaseAssertion(observation.data, { ...check, assertion: check.id, field: args.field,
-            fragment: check.requirement, encoding: check.type === 'number' ? 'decimal-text' : undefined });
+          current.measurementBindings ??= {};
+          const bindingKey = digest([check.id, binding]);
+          if (!current.measurementBindings[bindingKey]) {
+            await review(scope, 'assertion_binding', binding);
+            current.measurementBindings[bindingKey] = { at: new Date().toISOString(), checkId: check.id };
+            await saveState();
+          }
+          const comparison = compareAgentObservation(check, observation, args);
           const entry = await evidence(scope, '业务断言', { check, observationId: observation.observationId, comparison });
           current.assertions[check.id] ??= [];
           current.assertions[check.id].push({ ...comparison, evidence: entry, observationId: observation.observationId });

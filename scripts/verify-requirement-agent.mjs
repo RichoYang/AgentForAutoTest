@@ -44,7 +44,8 @@ const handler = async (req, res) => {
   }
   if (url.pathname === '/objects' && req.method === 'POST') {
     if (objects.has(key)) { res.statusCode = 409; return res.end(JSON.stringify({ error: 'duplicate' })); }
-    objects.set(key, { key, amount: input.amount, period: input.period });
+    objects.set(key, { key, amount: input.amount, period: input.period,
+      ...(['derived-api', 'misleading-api'].includes(mode) ? { appliedAmount: input.appliedAmount ?? 20 } : {}) });
     if (mode === 'lost-receipt' && !receiptFailures.has(key)) { receiptFailures.add(key); return res.destroy(); }
     return res.end(JSON.stringify({ created: true, key }));
   }
@@ -52,8 +53,20 @@ const handler = async (req, res) => {
     if (mode === 'cleanup-retry' && objects.has(key) && !cleanupFailures.has(key)) { cleanupFailures.add(key); res.statusCode = 503; return res.end('{"error":"temporary cleanup failure"}'); }
     objects.delete(key); cleanupFailures.delete(key); receiptFailures.delete(key); return res.end('{"deleted":true}');
   }
-  if (url.pathname === '/objects' && req.method === 'GET') return res.end(JSON.stringify(objects.has(key)
-    ? { exists: true, ...objects.get(key) } : { exists: false }));
+  if (url.pathname === '/objects' && req.method === 'GET') {
+    const object = objects.get(key);
+    // These fixture-only modes exercise semantic binding. diagnosticAmount is
+    // unrelated telemetry even when it happens to equal a requirement's value.
+    // Accounting response contract for this isolated service: allocatedAmount
+    // is the account's total allocation; appliedAmount is its effective used
+    // allocation (no pending or cancelled applications exist in this fixture).
+    // Available allocation is allocatedAmount minus appliedAmount. A returned
+    // remainingAmount is the service's reported available allocation.
+    const accounting = object && ['derived-api', 'misleading-api'].includes(mode)
+      ? { allocatedAmount: object.amount, appliedAmount: object.appliedAmount, diagnosticAmount: 80,
+        ...(mode === 'misleading-api' ? { remainingAmount: 0 } : {}) } : {};
+    return res.end(JSON.stringify(object ? { exists: true, ...object, ...accounting } : { exists: false }));
+  }
   if (url.pathname === '/page') {
     res.setHeader('content-type', 'text/html; charset=utf-8');
     return res.end(`<label>对象<input id="key" value="${String(key ?? '').replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')}"></label><input id="amount" readonly value="-1"><div id="busy">加载中</div>
@@ -85,11 +98,16 @@ async function skill(name, refs) {
   return { path: folder, sha256: hash.digest('hex') };
 }
 const headers = ['系统', '页面', '用例类型', '前置条件', '模块', '测试场景', '操作步骤', '预期结果', '测试数据', '测试结果', '备注说明', '测试截图', '用户问题', '对接BP', '测试用户', '测试截至日期'];
-const expected = mode === 'multi-object'
+const expected = ['derived-api', 'misleading-api'].includes(mode)
+  ? (mode === 'derived-api' ? '1. API返回已分配100元、已用20元，按已分配减已用核算剩余80元。'
+    : '1. API返回的剩余金额为80元，来自已分配100元减已用20元；分配、已用和诊断金额不能替代剩余金额。')
+    + '\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。'
+  : mode === 'multi-object'
   ? '1. 账户A在2026-11的接口金额为100元，账户B在2026-12的接口金额为250元。\n2. 页面在A、B、A之间切换，每次完成加载后账户编号正确、金额分别为100元、250元、100元，两个账户保持独立。'
   : '1. 账户A的接口金额为100元。\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。';
 const row = ['隔离系统', '/page', 'S1--主流程', '1. 在本机隔离环境创建本轮专属账户A，金额100元，期间2026-11；账户业务键必须使用本轮runPrefix。',
   '金额展示', '自主创建并核对接口和页面', '1. 读取源码并创建专属账户A。\n2. 从接口读取A。\n3. 打开A的页面并等待业务加载完成。\n4. 核对页面与接口金额和对象。', expected, ...Array(8).fill('')];
+if (['derived-api', 'misleading-api'].includes(mode)) row[3] += '\n2. 专属账户已分配100元、已用20元；独立期望剩余80元。';
 if (mode === 'multi-object') {
   row[3] += '\n2. 创建独立账户B，金额250元、期间2026-12，使用另一个本轮专属业务键。';
   row[6] += '\n5. 按A、B、A顺序切换页面，并回查两个对象没有互相覆盖。';
@@ -121,7 +139,7 @@ const config = { projects: { demo: { displayName: '隔离系统', repoPath: repo
 await writeJson(path.join(root, 'acceptance-input.json'), { job, mode, url });
 try {
   const dependencies = { client,
-    generate: async () => ({ projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'rules', rule: '接口与页面均显示100元并对应正确账户。' }],
+    generate: async () => ({ projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'rules', rule: ['derived-api', 'misleading-api'].includes(mode) ? expected : '接口与页面均显示100元并对应正确账户。' }],
       caseRequirements: [['R1']], manifest: { headers, module_order: ['金额展示'], required_texts: [], rows: [row] } }) };
   const emit = async event => console.log(JSON.stringify(event));
   if (mode === 'retry-native') {
@@ -134,6 +152,6 @@ try {
   const result = await runRequirementTest(job, config, emit, dependencies);
   await writeJson(path.join(root, 'result.json'), { result, remaining: [...objects.values()], preferences, requests });
   console.log(JSON.stringify({ result, remaining: objects.size }));
-  const wanted = mode === 'wrong-page' ? result.requirementSummary?.fail === 1 : result.requirementSummary?.pass === 1;
+  const wanted = ['wrong-page', 'misleading-api'].includes(mode) ? result.requirementSummary?.fail === 1 : result.requirementSummary?.pass === 1;
   if (result.outcome !== 'ready' || !wanted || objects.size || preferences.language !== 'en') process.exitCode = 1;
 } finally { await new Promise(resolve => server.close(resolve)); }

@@ -175,6 +175,7 @@ test('measurement query mismatches are recoverable tool errors while matching qu
     cases: { 'C1@1': { startedAt: '2026-01-01T00:00:00Z', planAt: '2026-01-01T00:00:02Z', plan, assertions: {}, aliases: {}, observations: Object.keys(observations), errors: [] } } }));
   let reviews = 0;
   const adapter = createRequirementAgent({}, { workDir: root, review: async prompt => {
+    if (!prompt.includes('"kind":"measurement"')) return { accepted: true, errors: [] };
     reviews++; assert.match(prompt, /JSON_OBJECT/); assert.doesNotMatch(prompt, /"hash":"different"|"hash":"changed"/);
     return { accepted: false, errors: ['actual.query.sql maps name to reason instead of name'] };
   }, agentModel: async ({ call }) => ({ close: async () => {}, async turn() {

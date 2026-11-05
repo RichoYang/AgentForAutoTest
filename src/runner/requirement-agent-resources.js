@@ -372,10 +372,15 @@ export function createAgentResources(config, scope) {
           if (!session.ready) throw agentError('Use a business-ready condition before page observation (loading hidden, busy=false, completed revision); not the expected amount');
           data.ready = session.ready;
           data.values = {};
+          data.measurements = {};
+          data.dom = await page.locator('body').ariaSnapshot();
           for (const [key, binding] of Object.entries(args.fields ?? {})) {
             const node = page.locator(binding.selector);
-            data.values[key] = binding.read === 'visible' ? await node.isVisible() : binding.read === 'input' ? await node.inputValue()
-              : binding.read === 'count' ? await node.count() : binding.read === 'attribute' ? await node.getAttribute(binding.attribute) : await node.allTextContents();
+            const matches = await node.count();
+            data.measurements[key] = { ...binding, matches };
+            data.values[key] = binding.read === 'visible' ? await node.isVisible() : binding.read === 'count' ? matches
+              : !matches ? (binding.read === 'input' || binding.read === 'attribute' ? null : [])
+                : binding.read === 'input' ? await node.inputValue() : binding.read === 'attribute' ? await node.getAttribute(binding.attribute) : await node.allTextContents();
           }
           const filename = `page-${digest([scope.item.caseId, scope.attempt, Date.now()]).slice(0, 24)}.png`;
           await page.screenshot({ path: path.join(scope.reports, filename), fullPage: true });

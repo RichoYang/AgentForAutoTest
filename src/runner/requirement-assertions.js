@@ -179,3 +179,19 @@ export function evaluateCaseAssertion(data, rule) {
     ...(inputs ? { inputs } : {}), compared: comparable,
     passed: comparable && unit === rule.unit && compare[rule.operator]() };
 }
+
+// Actual business values may be derived from multiple independently observed
+// operands. This never changes the frozen expected value or its provenance.
+export function evaluateDerivedAssertion(data, rule, terms) {
+  if (!Array.isArray(terms) || !terms.length || terms.some(term => !Array.isArray(term.field) || ![1, -1].includes(term.sign))) {
+    throw new Error('calculation.terms needs field paths and sign 1 or -1');
+  }
+  const actualInputs = terms.map(term => ({ field: term.field, sign: term.sign,
+    ...observedValue(data, { field: term.field, type: 'number', encoding: 'decimal-text', unit: rule.unit }) }));
+  if (actualInputs.some(input => !input.comparable)) return { assertion: rule.assertion, fragment: rule.fragment,
+    expected: rule.expected, expectedUnit: rule.unit, actualInputs, compared: false, passed: false,
+    reason: 'Every calculation operand must be an observed numeric value; missing, empty or array values are not zero' };
+  const actual = compareDecimal('0', actualInputs).exact;
+  const result = evaluateCaseAssertion({ actual }, { ...rule, field: ['actual'], encoding: 'decimal-text' });
+  return { ...result, field: undefined, calculation: { terms }, actualInputs };
+}

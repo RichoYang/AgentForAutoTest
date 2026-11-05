@@ -123,7 +123,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
   const adapter = settings.adapter ? await loadAdapter(settings.adapter) : settings.execution
     ? (settings.execution.mode === 'agent' ? createRequirementAgent : createRequirementAdapter)(settings.execution, { workDir, codexBin, plan, agentModel, review }) : await loadAdapter();
   const adapterBinding = settings.adapter ?? [settings.execution, await Promise.all(['adapter', 'assertions', 'release', 'subject', 'plan',
-    ...(settings.execution.mode === 'agent' ? ['agent', 'agent-model', 'agent-resources'] : [])]
+    ...(settings.execution.mode === 'agent' ? ['agent', 'agent-model', 'agent-resources', 'agent-assertion-binding'] : [])]
     .map(name => hashFile(fileURLToPath(new URL('./requirement-' + name + '.js', import.meta.url)))))];
   const binding = digest([adapterBinding, environment.name, environment.platform, environment.resources, environment.lockKey]);
   const migrating = journal.executionBinding && binding !== journal.executionBinding;
