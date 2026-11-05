@@ -10,6 +10,20 @@ import { digest } from './requirement-feishu.js';
 
 const exec = promisify(execFile);
 export const agentError = message => Object.assign(new Error(message), { safeMessage: message });
+// mysql2 sends JavaScript numbers as DOUBLE. Older MySQL 8.0 servers can
+// reprepare the entire statement and lose a neighbouring BIGINT string bind.
+// Decimal text lets the server apply the type derived from each SQL expression.
+export function mysqlParameters(values) {
+  return values.map((value, index) => {
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value) || Number.isInteger(value) && !Number.isSafeInteger(value)) {
+        throw agentError(`SQL parameter ${index + 1} is not an exact finite number; pass the original decimal or integer as a string`);
+      }
+      return String(value);
+    }
+    return typeof value === 'boolean' ? (value ? '1' : '0') : value;
+  });
+}
 const identifier = value => {
   if (!/^[a-zA-Z0-9_]+$/.test(value ?? '')) throw agentError('Invalid database identifier');
   return '`' + value + '`';
@@ -117,6 +131,9 @@ export function createAgentResources(config, scope) {
     return mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
       password: resource.password, database: database || (resource.database_name === 'not_specified' ? undefined : resource.database_name),
       supportBigNumbers: true, bigNumberStrings: true, decimalNumbers: false, dateStrings: true,
+      // We do not use query attributes; early 8.0 implementations interpret
+      // the execute attribute flag as a server cursor and never send its rows.
+      flags: ['-CLIENT_QUERY_ATTRIBUTES'],
       multipleStatements: false, connectTimeout: 10000 });
   }
   async function database(spec, input, resource) {
@@ -128,7 +145,7 @@ export function createAgentResources(config, scope) {
         }
         await connection.query('SET TRANSACTION READ ONLY');
         await connection.beginTransaction();
-        const [rows] = await connection.execute({ sql: spec.sql, timeout: 30000 }, resolveInput(spec.params ?? [], input));
+        const [rows] = await connection.execute({ sql: spec.sql, timeout: 30000 }, mysqlParameters(resolveInput(spec.params ?? [], input)));
         await connection.rollback();
         return { rows: sanitized(rows), count: rows.length };
       }
@@ -161,9 +178,9 @@ export function createAgentResources(config, scope) {
       } else if (spec.access === 'delete') { sql = `DELETE FROM ${table} WHERE ${condition}`; args = Object.values(where); }
       else throw agentError('Unsupported database operation');
       await connection.beginTransaction();
-      const [result] = await connection.execute({ sql, timeout: 30000 }, args);
+      const [result] = await connection.execute({ sql, timeout: 30000 }, mysqlParameters(args));
       if (!Number.isInteger(spec.expectedRows) || spec.expectedRows < 1 || result.affectedRows !== spec.expectedRows) {
-        await connection.rollback(); throw agentError('Affected row count differs from the planned mutation; rolled back');
+        await connection.rollback(); throw agentError(`Affected row count differs from the planned mutation: expected ${spec.expectedRows}, actual ${result.affectedRows}; rolled back`);
       }
       await connection.commit();
       return { affectedRows: result.affectedRows, insertId: String(result.insertId) };

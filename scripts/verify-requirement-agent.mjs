@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile, realpath, lstat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import mysql from 'mysql2/promise';
 import { runRequirementTest } from '../src/runner/requirement-test.js';
 import { digest } from '../src/runner/requirement-feishu.js';
 import { generatorReferences, regressionReferences, command, writeJson } from '../src/runner/requirement-files.js';
@@ -16,6 +17,19 @@ const repo = path.join(root, 'source'); await mkdir(repo, { recursive: true });
 const objects = new Map(), requests = [];
 const preferences = { key: 'fixture-operator', language: 'en' };
 const mode = process.env.AGENTOS_ACCEPTANCE_MODE ?? 'positive';
+const mysqlFixture = mode === 'mysql-parameters' ? { port: Number(process.env.AGENTOS_TEST_MYSQL_PORT),
+  database: 'aos_native_' + Date.now() } : null;
+if (mysqlFixture) {
+  if (!Number.isInteger(mysqlFixture.port) || mysqlFixture.port <= 1024 || mysqlFixture.port === 3306) throw new Error('Use an explicit dedicated loopback MySQL test port');
+  mysqlFixture.connection = await mysql.createConnection({ host: '127.0.0.1', port: mysqlFixture.port, user: 'root', password: '',
+    flags: ['-CLIENT_QUERY_ATTRIBUTES'], supportBigNumbers: true, bigNumberStrings: true });
+  await mysqlFixture.connection.query('CREATE DATABASE `' + mysqlFixture.database + '`');
+  await mysqlFixture.connection.query('CREATE TABLE `' + mysqlFixture.database + '`.budget (id BIGINT PRIMARY KEY, business_key VARCHAR(160) NOT NULL UNIQUE, amount DECIMAL(18,4) NOT NULL, enabled INT NOT NULL)');
+  await writeFile(path.join(repo, 'budget-contract.sql'), '-- This isolated database is supplied by the mysql resource. budget.amount is available budget in yuan.\n'
+    + '-- Each case owns a row by its exact BIGINT id and unique business_key equal to runPrefix plus its alias.\n'
+    + '-- Prepare amount=100, enabled=1. The scenario changes the same row to 40 and verifies the amount and exact identity. Delete the owned row after the scenario and verify absence.\n'
+    + 'CREATE TABLE budget (id BIGINT PRIMARY KEY, business_key VARCHAR(160) NOT NULL UNIQUE, amount DECIMAL(18,4) NOT NULL, enabled INT NOT NULL);\n');
+}
 const navigation = ['navigation-state', 'authenticated-navigation'].includes(mode);
 const cleanupFailures = new Set(), receiptFailures = new Set();
 const handler = async (req, res) => {
@@ -89,7 +103,8 @@ catch { await command('git', ['init', '-b', 'main', repo]); await command('git',
 const server = createServer(handler); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const url = 'http://127.0.0.1:' + server.address().port;
 const iniPath = path.join(root, 'resources.ini');
-await writeFile(iniPath, '[Demo.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nresource_type=website\nbase_url=' + url + '\nusername=fixture\npassword=fixture-local-only\n');
+await writeFile(iniPath, '[Demo.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nresource_type=website\nbase_url=' + url + '\nusername=fixture\npassword=fixture-local-only\n'
+  + (mysqlFixture ? '\n[Demo.Uat.Mysql]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nresource_type=mysql\nhost=127.0.0.1\nport=' + mysqlFixture.port + '\nusername=root\npassword=\ndatabase_name=' + mysqlFixture.database + '\n' : ''));
 const skillsRoot = process.env.AGENTOS_REQUIREMENT_SKILLS_ROOT;
 if (!skillsRoot) throw new Error('Set AGENTOS_REQUIREMENT_SKILLS_ROOT');
 async function skill(name, refs) {
@@ -98,16 +113,21 @@ async function skill(name, refs) {
   return { path: folder, sha256: hash.digest('hex') };
 }
 const headers = ['系统', '页面', '用例类型', '前置条件', '模块', '测试场景', '操作步骤', '预期结果', '测试数据', '测试结果', '备注说明', '测试截图', '用户问题', '对接BP', '测试用户', '测试截至日期'];
-const expected = ['derived-api', 'misleading-api'].includes(mode)
+let expected = ['derived-api', 'misleading-api'].includes(mode)
   ? (mode === 'derived-api' ? '1. API返回已分配100元、已用20元，按已分配减已用核算剩余80元。'
     : '1. API返回的剩余金额为80元，来自已分配100元减已用20元；分配、已用和诊断金额不能替代剩余金额。')
     + '\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。'
   : mode === 'multi-object'
   ? '1. 账户A在2026-11的接口金额为100元，账户B在2026-12的接口金额为250元。\n2. 页面在A、B、A之间切换，每次完成加载后账户编号正确、金额分别为100元、250元、100元，两个账户保持独立。'
   : '1. 账户A的接口金额为100元。\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。';
+if (mysqlFixture) expected += '\n3. 数据库专属预算行的大整数ID保持准确；将初始100元改为40元后，回读可用预算为40元，业务键仍属于本轮账户A；清理后该行不存在。';
 const row = ['隔离系统', '/page', 'S1--主流程', '1. 在本机隔离环境创建本轮专属账户A，金额100元，期间2026-11；账户业务键必须使用本轮runPrefix。',
   '金额展示', '自主创建并核对接口和页面', '1. 读取源码并创建专属账户A。\n2. 从接口读取A。\n3. 打开A的页面并等待业务加载完成。\n4. 核对页面与接口金额和对象。', expected, ...Array(8).fill('')];
 if (['derived-api', 'misleading-api'].includes(mode)) row[3] += '\n2. 专属账户已分配100元、已用20元；独立期望剩余80元。';
+if (mysqlFixture) {
+  row[3] += '\n2. 在mysql资源的budget表创建本轮专属行，id为2000000000000000001（必须按字符串保留），business_key使用本轮runPrefix，amount=100，enabled=1。';
+  row[6] += '\n5. 冻结独立预期后，将该数据库行的amount更新为40并回读核验身份与金额；结束时恢复并删除专属行，核验无残留。';
+}
 if (mode === 'multi-object') {
   row[3] += '\n2. 创建独立账户B，金额250元、期间2026-12，使用另一个本轮专属业务键。';
   row[6] += '\n5. 按A、B、A顺序切换页面，并回查两个对象没有互相覆盖。';
@@ -131,6 +151,7 @@ const settings = { bot: { profile: 'local-qa' }, allowedChatIds: ['oc_local'], r
   skills: { generator: await skill('lark-testcase-by-prd-order-generator', generatorReferences), regression: await skill('run-full-requirement-regression', regressionReferences) },
   environment: { name: 'UAT', platform: 'Demo', iniPath, lockKey: 'local', resources: { platform: { section: 'Demo.Uat.Platform', scope: 'full_crud', reversibleSharedWrites: navigation } } },
   execution: { mode: 'agent' } };
+if (mysqlFixture) settings.environment.resources.mysql = { section: 'Demo.Uat.Mysql', scope: 'full_crud' };
 if (mode === 'authenticated-navigation') settings.execution.login = { resource: 'platform', path: '/login',
   tokenField: ['token'], header: 'token', identityFields: { userId: ['userId'] }, accountSelector: '#account', passwordSelector: '#password', submitSelector: '#login' };
 const job = { id: 'JOB-isolated-agent-' + Date.now(), projectId: 'demo', agentProfile: 'local-qa', chatId: 'oc_local', senderId: 'ou_local',
@@ -139,7 +160,7 @@ const config = { projects: { demo: { displayName: '隔离系统', repoPath: repo
 await writeJson(path.join(root, 'acceptance-input.json'), { job, mode, url });
 try {
   const dependencies = { client,
-    generate: async () => ({ projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'rules', rule: ['derived-api', 'misleading-api'].includes(mode) ? expected : '接口与页面均显示100元并对应正确账户。' }],
+    generate: async () => ({ projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'rules', rule: ['derived-api', 'misleading-api', 'mysql-parameters'].includes(mode) ? expected : '接口与页面均显示100元并对应正确账户。' }],
       caseRequirements: [['R1']], manifest: { headers, module_order: ['金额展示'], required_texts: [], rows: [row] } }) };
   const emit = async event => console.log(JSON.stringify(event));
   if (mode === 'retry-native') {
@@ -150,8 +171,16 @@ try {
     job.requirement.retryRequest = 'local-fixture-retry-command';
   }
   const result = await runRequirementTest(job, config, emit, dependencies);
-  await writeJson(path.join(root, 'result.json'), { result, remaining: [...objects.values()], preferences, requests });
+  const remainingDatabaseRows = mysqlFixture ? (await mysqlFixture.connection.query('SELECT id,business_key,amount FROM `' + mysqlFixture.database + '`.budget'))[0] : [];
+  await writeJson(path.join(root, 'result.json'), { result, remaining: [...objects.values()], remainingDatabaseRows, preferences, requests });
   console.log(JSON.stringify({ result, remaining: objects.size }));
   const wanted = ['wrong-page', 'misleading-api'].includes(mode) ? result.requirementSummary?.fail === 1 : result.requirementSummary?.pass === 1;
-  if (result.outcome !== 'ready' || !wanted || objects.size || preferences.language !== 'en') process.exitCode = 1;
-} finally { await new Promise(resolve => server.close(resolve)); }
+  if (result.outcome !== 'ready' || !wanted || objects.size || remainingDatabaseRows.length || preferences.language !== 'en') process.exitCode = 1;
+} finally {
+  await new Promise(resolve => server.close(resolve));
+  if (mysqlFixture) {
+    const [rows] = await mysqlFixture.connection.query('SELECT id FROM `' + mysqlFixture.database + '`.budget');
+    if (!rows.length) await mysqlFixture.connection.query('DROP DATABASE `' + mysqlFixture.database + '`');
+    await mysqlFixture.connection.end();
+  }
+}
