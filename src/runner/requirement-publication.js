@@ -65,8 +65,31 @@ export async function publishCases({ client, settings, source, template, manifes
   }
   const sheet = copied.sheets.find(item => item.title === '测试场景');
   const read = async grid => client.readGrid(file.token, grid, grid.grid_properties.row_count, manifest.headers.length);
+  // Published case definitions are immutable. Execution annotations belong to
+  // their author and are neither overwritten nor imported as this job's results.
+  const verify = async (actual, revision) => {
+    if (!receipt.verified) return equalMatrix(actual, expected);
+    const comparison = comparePublishedCases(actual, expected);
+    if (!comparison.matches) {
+      receipt.contentConflict = { at: new Date().toISOString(), revision, cells: comparison.conflicts };
+      await save();
+      return false;
+    }
+    if (comparison.annotations.length) {
+      const hash = digest(comparison.annotations);
+      receipt.annotationSnapshots ??= [];
+      if (!receipt.annotationSnapshots.some(item => item.hash === hash)) {
+        receipt.annotationSnapshots.push({ at: new Date().toISOString(), revision, hash,
+          source: 'external-workbook-annotations', importedAsResults: false, cells: comparison.annotations });
+        await save();
+      }
+    }
+    if (revision !== receipt.revision || comparison.annotations.length) receipt.lastVerifiedRevision = revision;
+    delete receipt.contentConflict;
+    return true;
+  };
   const before = await read(sheet);
-  if (!equalMatrix(before, expected)) {
+  if (!await verify(before, copied.revision)) {
     if (!receipt.fileToken || receipt.verified) {
       throw new RequirementWait('publication_conflict', '飞书文件内容与本轮不符，请核对文件归属和版本。');
     }
@@ -95,14 +118,13 @@ export async function publishCases({ client, settings, source, template, manifes
   if (file.token !== (receipt.fileToken ?? file.token)) throw new RequirementWait('publication_conflict', '发布过程中同名文件被替换。');
   const after = await client.workbook(file.token);
   const verifiedSheet = after.sheets.find(item => item.sheet_id === sheet.sheet_id);
-  if (!verifiedSheet || !equalMatrix(await read(verifiedSheet), expected)) {
+  if (!verifiedSheet || !await verify(await read(verifiedSheet), after.revision)) {
     throw new RequirementWait('publication_version', '已发布用例未通过逐单元格回读核对。');
   }
-  if (receipt.verified && receipt.revision !== null && after.revision !== receipt.revision) {
-    throw new RequirementWait('publication_version', '用例工作簿版本已发生变化，请核对影响范围。');
-  }
+  // A revision alone also changes for result annotations. Content, row order,
+  // headers and auxiliary tabs were independently checked above.
   Object.assign(receipt, { fileToken: file.token, url: file.url, sheetId: sheet.sheet_id,
-    version: digest(expected), revision: after.revision, verified: true });
+    version: digest(expected), revision: receipt.verified ? receipt.revision : after.revision, verified: true });
   await save();
   return receipt;
 }
@@ -114,4 +136,20 @@ function equalMatrix(actual, expected) {
 
 function sameCell(left, right) {
   return left === right || (left && right && typeof left === 'object' && typeof right === 'object' && digest(left) === digest(right));
+}
+
+function comparePublishedCases(actual, expected) {
+  const annotationHeaders = new Set(['测试结果', '备注说明', '测试截图']);
+  const annotations = [], conflicts = [];
+  for (let row = 0; row < Math.max(actual.length, expected.length); row++) {
+    for (let col = 0; col < Math.max(actual[row]?.length ?? 0, expected[row]?.length ?? 0); col++) {
+      const value = actual[row]?.[col] ?? '', original = expected[row]?.[col] ?? '';
+      if (sameCell(value, original)) continue;
+      const cell = { row: row + 1, column: col + 1, header: expected[0]?.[col] ?? '', value, original };
+      if (row > 0 && row < expected.length && annotationHeaders.has(expected[0]?.[col])) annotations.push(cell);
+      else conflicts.push(cell);
+    }
+  }
+  if (actual.length < expected.length) conflicts.push({ reason: 'missing-case-rows', expectedRows: expected.length, actualRows: actual.length });
+  return { matches: conflicts.length === 0, annotations, conflicts };
 }
