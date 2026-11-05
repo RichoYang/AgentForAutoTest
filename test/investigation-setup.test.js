@@ -8,7 +8,7 @@ import {assessInvestigation} from '../src/shared/investigation-review.js';
 import {pollEnrollments} from '../src/control-plane/environment-enrollment.js';
 import {conversationCard} from '../src/control-plane/message-cards.js';
 import {conversationTerminalMention,jobTerminalMention} from '../src/control-plane/requester-mention.js';
-async function fixture(t){const dir=await mkdtemp(path.join(os.tmpdir(),'agentos-setup-chain-'));t.after(()=>rm(dir,{recursive:true,force:true}));const store=new JsonStore(path.join(dir,'state.json'));
+async function fixture(t,automaticCleanup=true){const dir=await mkdtemp(path.join(os.tmpdir(),'agentos-setup-chain-'));if(automaticCleanup)t.after(()=>rm(dir,{recursive:true,force:true}));const store=new JsonStore(path.join(dir,'state.json'));
  await store.transact(s=>{s.conversations=[{id:'root',messageId:'message',questionId:'q',chatId:'group',senderId:'ou_member',profile:'owner',role:'owner_intake',chatType:'group',status:'sent',attachments:[]}];s.questions={q:{id:'q',rootTurnId:'root',latestTurnId:'root',chatId:'group',projectId:'p',generation:1}};});
  await store.createJob({projectId:'p',chatId:'group',questionId:'q',senderId:'ou_member',originProfile:'owner',taskIntent:'analysis',workflow:'analysis_review',stage:'developer',instruction:'Check original amounts',context:[{stage:'developer',result:{summary:'Source already checked'}}],attachments:[{id:'image',path:'/synthetic'}]});
  const job=await store.leaseNext('r');return{dir,store,job};}
@@ -38,9 +38,11 @@ test('completed enrollment resumes original requester without borrowing approval
 });
 test('HTTP source setup routes once without opening a connection and rejects credentials',async t=>{
  const {createControlPlane}=await import('../src/control-plane/server.js');
- const {dir,store,job}=await fixture(t);
- const app=await createControlPlane({dataDir:dir,storeFile:store.file,conversationFile:path.join(dir,'conversations.json'),memoryFile:path.join(dir,'memory.json'),runnerToken:'r',projects:{projects:{p:{repoPath:dir}},chatProjectMap:{group:'p'}},agents:{agents:{developer:{profile:'dev'}}},feishuClient:{enabled:false},conversationOptions:{enabled:false}});
- await new Promise(r=>app.server.listen(0,'127.0.0.1',r));t.after(async()=>{app.server.closeAllConnections();await new Promise(r=>app.server.close(r));});
+ const {dir,store,job}=await fixture(t,false);
+ let app;
+ t.after(async()=>{await app?.conversations.stop();if(app?.server.listening){app.server.closeAllConnections();await new Promise(r=>app.server.close(r));}await rm(dir,{recursive:true,force:true});});
+ app=await createControlPlane({dataDir:dir,storeFile:store.file,conversationFile:path.join(dir,'conversations.json'),memoryFile:path.join(dir,'memory.json'),runnerToken:'r',projects:{projects:{p:{repoPath:dir}},chatProjectMap:{group:'p'}},agents:{agents:{developer:{profile:'dev'}}},feishuClient:{enabled:false},conversationOptions:{enabled:false}});
+ await new Promise(r=>app.server.listen(0,'127.0.0.1',r));
  const endpoint=`http://127.0.0.1:${app.server.address().port}/api/v1/jobs/${job.id}/events`;
  const send=r=>fetch(endpoint,{method:'POST',headers:{authorization:'Bearer r','content-type':'application/json'},body:JSON.stringify({type:'completed',runnerId:'r',leaseId:job.lease.id,result:r})});
  const bad=result();bad.environmentSetup.url='mysql://user:secret@db.example/uat_db';assert.notEqual((await send(bad)).status,200);

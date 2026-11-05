@@ -97,7 +97,7 @@ test('subject, browser query and natural assertion boundary', async t => {
   assert.equal(rendered.status, baseline ? '失败' : '通过');
   assert.equal(requested.filter(item => item.path === '/query').length, baseline ? 0 : 1);
   const natural = bindCaseAssertions('1. 页面显示预算余额为100元', [{ operation: 'balance', checks: [check(['balance'], 100)] }], operations);
-  assert.equal(natural.missing.length, baseline ? 1 : 0);
+  assert.equal(natural.missing.length, 1, 'page assertions cannot be satisfied with API-only evidence');
   saved.push({ natural, original: '1. 页面显示预算余额为100元' });
   if (baseline) for (const expected of ['1. 预算余额100元且不含无效占用', '1. 预算余额＝总额－有效占用', '1. 预算余额大于99元']) {
     saved.push({ original: expected, compiled: bindCaseAssertions(expected, [{ operation: 'balance', checks: [check(['balance'], 100)] }], operations) });
@@ -116,7 +116,7 @@ test('subject, browser query and natural assertion boundary', async t => {
     { id: 'total', label: '总额', type: 'number', unit: '元', field: ['total'] },
     { id: 'occupied', label: '有效占用', type: 'number', unit: '元', field: ['occupied'] },
     { id: 'invalid', label: '无效占用', type: 'boolean', field: ['invalid'] });
-  const formula = '1. 页面显示预算余额＝总额－有效占用，且不含无效占用';
+  const formula = '1. 预算余额＝总额－有效占用，且不含无效占用';
   const formulaChecks = [{ field: ['balance'], assertion: 1 }, check(['invalid'], false, 'equals', 2)];
   const evaluate = (expected, checks) => run('balance', values, checks, expected, context);
   assert.equal((await evaluate(formula, formulaChecks.slice(0, 1))).status, '未执行');
@@ -128,8 +128,8 @@ test('subject, browser query and natural assertion boundary', async t => {
   occupied = undefined;
   assert.equal((await evaluate(formula, formulaChecks)).status, '阻断');
   for (const [expected, operator, limit, status] of [
-    ['在页面上可见预算余额等于100元', 'equals', 100, '通过'],
-    ['页面显示预算余额高于99元', 'gt', 99, '通过'],
+    ['在页面上可见预算余额等于100元', 'equals', 100, '未执行'],
+    ['页面显示预算余额高于99元', 'gt', 99, '未执行'],
     ['预算余额大于100元', 'gt', 100, '失败'],
     ['预算余额小于101元', 'lt', 101, '通过'],
     ['预算余额低于100元', 'lt', 100, '失败'],
@@ -188,20 +188,24 @@ test('generated natural-language cases keep their contract and evidence through 
   const server = createServer((request, response) => {
     const url = new URL(request.url, 'http://localhost');
     resources.push({ method: request.method, path: url.pathname, parameters: Object.fromEntries(url.searchParams) });
-    response.end(JSON.stringify({ org: url.searchParams.get('org'), balance: 100, total: 160, used: 60, invalid: false }));
+    response.setHeader('content-type', 'text/html; charset=utf-8');
+    response.end('<span id="org">A</span><span id="balance">100</span><span id="total">160</span><span id="used">60</span>');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
     await new Promise(resolve => server.close(resolve));
     if (evidenceRoot) await writeJson(path.join(root, 'requests.json'), { resources, closed: !server.listening, realModel });
   });
-  const catalog = { readBudget: { kind: 'http', resource: 'platform', path: '/budget', inputs: ['org'],
+  const catalog = { readBudget: { kind: 'browser', authenticated: false, resource: 'platform', path: '/budget', inputs: ['org'],
+    actions: [{ kind: 'navigate', path: '/budget', query: { org: 'org' } }],
+    selectors: { org: { selector: '#org', read: 'text' }, balance: { selector: '#balance', read: 'text' },
+      total: { selector: '#total', read: 'text' }, used: { selector: '#used', read: 'text' }, invalid: { selector: '#invalid', read: 'visible' } },
     outputs: { org: ['org'], balance: ['balance'], total: ['total'], used: ['used'], invalid: ['invalid'] },
-    subject: { organization: { input: 'org', output: ['org'] } }, observations: [
+    subject: { organization: { input: 'org', output: ['values', 'org'] } }, observations: [
       balance, { id: 'total', label: '总额', aliases: ['预算总额'], type: 'number', unit: '元', field: ['total'] },
       { id: 'used', label: '有效占用', aliases: ['有效占用金额'], type: 'number', unit: '元', field: ['used'] },
       { id: 'invalid', label: '无效占用', type: 'boolean', field: ['invalid'] },
-    ] } };
+    ].map(item => ({ ...item, field: ['values', ...item.field], ...(item.type === 'number' ? { encoding: 'decimal-text' } : {}) })) } };
   const execution = { operations: catalog, dimensions: { organization: { labels: ['组织代码', '组织'], pattern: '[A-Z]', required: true } } };
   const localSkill = async (name, refs) => {
     const folder = path.join(skillsRoot, name);

@@ -76,7 +76,7 @@ export async function generateValidatedCases(options, settings, casesFile, { gen
   }
 }
 
-export async function askNoTools(instructions, { codexBin, cwd, images = [] }) {
+export async function askNoTools(instructions, { codexBin, cwd, images = [], onOutput }) {
   const executable = await resolveCodexBinary(codexBin);
   const env = await codexEnvironment();
   const args = ['exec', '--ignore-user-config', '--ignore-rules', '--ephemeral', '--skip-git-repo-check',
@@ -102,8 +102,14 @@ export async function askNoTools(instructions, { codexBin, cwd, images = [] }) {
   if (items.some(item => !['reasoning', 'agent_message'].includes(item.type))) {
     throw new RequirementWait('generator', '模型出现了预期外的工具活动，产物未采用。');
   }
-  try { return JSON.parse(items.filter(item => item.type === 'agent_message').at(-1)?.text); }
-  catch { throw new RequirementWait('generator', '模型未返回符合约定的结构。'); }
+  const raw = items.filter(item => item.type === 'agent_message').at(-1)?.text;
+  await onOutput?.(raw ?? '');
+  try { return JSON.parse(raw); }
+  catch {
+    const error = new RequirementWait('generator', '模型未返回符合约定的结构。');
+    error.rawOutput = raw ?? '';
+    throw error;
+  }
 }
 
 export async function validateCases(draft, source, template, skill, config, casesFile) {

@@ -42,7 +42,10 @@ export function caseSubject(scope, dimensions) {
       values[dimension] = { value: distinct[0], sources: [...new Map([...selected, ...anchored.filter(item => item.value === distinct[0])]
         .map(item => [JSON.stringify(item), item])).values()] };
     }
-    else if (distinct.length > 1 || contract.required === true || sources.some(item => contract.labels?.some(label => item.text.includes(label)))) {
+    else if (distinct.length > 1) {
+      values[dimension] = { candidates: distinct.map(value => ({ value, sources: selected.filter(item => item.value === value) })) };
+    }
+    else if (contract.required === true || sources.some(item => contract.labels?.some(label => item.text.includes(label)))) {
       gaps.push('无法独立确定用例维度 ' + dimension);
     }
   }
@@ -55,7 +58,10 @@ export function bindSubjectInput({ spec, step, input, expected, lineage, index }
   const required = new Set([...Object.keys(bindings), ...(step.checks.length ? Object.keys(expected) : [])]);
   for (const name of required) {
     const binding = bindings[name];
-    const intended = expected[name];
+    const available = expected[name];
+    const selected = step.subject?.[name];
+    const intended = available?.candidates
+      ? available.candidates.find(candidate => same(candidate.value, selected)) : available;
     const value = input[binding?.input];
     const reference = step.input[binding?.input];
     const upstream = reference && typeof reference === 'object' ? lineage[reference.from] : null;

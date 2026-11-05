@@ -6,6 +6,7 @@ import { RequirementWait, digest } from './requirement-feishu.js';
 import { privateDirectory, readJson, writeJson } from './requirement-files.js';
 import { createRequirementAdapter } from './requirement-adapter.js';
 import { caseReleaseRequirement, matchesCaseRelease } from './requirement-release.js';
+import { createRequirementAgent } from './requirement-agent.js';
 
 const writeOperations = ['create', 'update', 'delete', 'trigger'];
 const credentialField = /password|token|secret|cookie|connection_string/i;
@@ -73,6 +74,12 @@ export async function requirementResources(environment, { allowUnavailable = fal
   };
   return {
     names: [...permitted.keys()],
+    catalog: Object.fromEntries([...permitted].map(([key, { section, binding }]) => [key, {
+      section: binding.section, scope: binding.scope, environment: section.environment,
+      resource_type: section.resource_type, base_url: section.base_url, management_url: section.management_url,
+      database_name: section.database_name, status: section.status, ai_access: section.ai_access,
+      ai_operation_mode: section.ai_operation_mode,
+    }])),
     assertWrite,
     identity(key) {
       const item = permitted.get(key);
@@ -109,21 +116,63 @@ export async function loadAdapter(spec) {
   return adapter;
 }
 
-export async function executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, save, progress, codexBin, plan }) {
+export async function executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, save, progress, codexBin, plan, project, agentModel, review }) {
   const environment = settings.environment;
   const resources = await requirementResources(environment, { allowUnavailable: true });
   const adapter = settings.adapter ? await loadAdapter(settings.adapter) : settings.execution
-    ? createRequirementAdapter(settings.execution, { workDir, codexBin, plan }) : await loadAdapter();
-  const adapterBinding = settings.adapter ?? [settings.execution, await Promise.all(['adapter', 'assertions', 'release', 'subject']
+    ? (settings.execution.mode === 'agent' ? createRequirementAgent : createRequirementAdapter)(settings.execution, { workDir, codexBin, plan, agentModel, review }) : await loadAdapter();
+  const adapterBinding = settings.adapter ?? [settings.execution, await Promise.all(['adapter', 'assertions', 'release', 'subject', 'plan',
+    ...(settings.execution.mode === 'agent' ? ['agent', 'agent-model', 'agent-resources'] : [])]
     .map(name => hashFile(fileURLToPath(new URL('./requirement-' + name + '.js', import.meta.url)))))];
   const binding = digest([adapterBinding, environment.name, environment.platform, environment.resources, environment.lockKey]);
-  if (journal.executionBinding && binding !== journal.executionBinding) {
+  const migrating = journal.executionBinding && binding !== journal.executionBinding;
+  const pendingMutations = (journal.mutations ?? []).filter(item => item.cleanup?.verified !== true);
+  if (migrating && pendingMutations.length) {
     throw new RequirementWait('environment_version', '运行时权限或适配器版本已变化，需恢复原绑定后再处理已构造的数据。');
   }
   if (!/^[a-z0-9_-]+$/.test(environment.lockKey ?? '')) throw new RequirementWait('environment_config', '缺少共享资源锁分组。');
   const lockRoot = await privateDirectory(settings.lockDirectory);
   const lockFile = path.join(lockRoot, environment.lockKey + '.json');
   let lock = await readJson(lockFile);
+  const retryRequest = job.requirement.retryRequest;
+  const retry = retryRequest && retryRequest !== journal.lastRetryRequest;
+  if ((migrating || retry) && (lock && (lock.jobId !== job.id || lock.binding !== journal.executionBinding))) {
+    throw new RequirementWait('environment_busy', '原任务资源锁身份已变化，不能迁移或重试。');
+  }
+  if (retry && pendingMutations.length) throw new RequirementWait('cleanup_pending', '重试前须对账并恢复原尝试的变更，台账已保留。');
+  if (migrating || retry) {
+    journal.executionHistory ??= [];
+    journal.executionHistory.push(structuredClone({ binding: journal.executionBinding, at: new Date().toISOString(),
+      reason: migrating ? 'adapter_upgrade_without_pending_effects' : 'retry_unexecuted', results: journal.results,
+      preparations: journal.preparations, executionSteps: journal.executionSteps, cleanup: journal.cleanup, mutations: journal.mutations }));
+    journal.caseAttempts ??= {};
+    for (const item of index) {
+      if (!journal.results?.[item.caseId] || journal.results[item.caseId].status === '未执行') {
+        const attempted = journal.results?.[item.caseId] || journal.preparations?.[item.caseId] || journal.executionCases?.[item.caseId];
+        journal.caseAttempts[item.caseId] = attempted ? (journal.caseAttempts[item.caseId] ?? 1) + 1 : 1;
+        if (journal.results) delete journal.results[item.caseId];
+        if (journal.preparations) delete journal.preparations[item.caseId];
+        if (journal.executionSteps) delete journal.executionSteps[item.caseId];
+      }
+    }
+    journal.cleanup = null;
+    journal.mutations = [];
+    journal.reportHistory ??= [];
+    if (journal.artifact) journal.reportHistory.push({ artifact: journal.artifact, reportId: journal.reportId, reportTime: journal.reportTime });
+    for (const field of ['artifact', 'reportId', 'reportTime', 'visualReview', 'visualProgress']) delete journal[field];
+    journal.executionBinding = binding;
+    if (retry) journal.lastRetryRequest = retryRequest;
+    // Recovery of a crash between these two atomic writes is idempotent.
+    journal.bindingMigration = { from: lock?.binding ?? null, to: binding };
+    await save();
+    if (lock) { await writeJson(lockFile, { jobId: job.id, binding }); lock = await readJson(lockFile); }
+    delete journal.bindingMigration;
+    await save();
+  }
+  if (journal.bindingMigration && lock?.jobId === job.id && lock.binding === journal.bindingMigration.from) {
+    await writeJson(lockFile, { jobId: job.id, binding }); lock = await readJson(lockFile);
+    delete journal.bindingMigration; await save();
+  }
   if (journal.cleanup?.verified === true) {
     if (lock?.jobId === job.id && lock.binding === binding) await unlink(lockFile);
     return;
@@ -154,6 +203,8 @@ export async function executeCases({ job, settings, journal, source, index, mani
   };
   const standards = regression.files['references/execution-standard.md'];
   const scope = { source, index, manifest, reports: reportDir, standards, useRead, checkOutput: resources.checkOutput,
+    jobId: job.id, sourceRoot: project?.repoPath, resourceNames: resources.names, resourceCatalog: resources.catalog, progress,
+    skillRules: regression.files['SKILL.md'],
     runPrefix: 'AOS_' + job.id.replaceAll('-', '_'), projectId: job.projectId, environment: environment.name,
     requirements: journal.requirements, repositories: journal.repositories, casesUrl: journal.publication.url };
   journal.results ??= {};
@@ -201,6 +252,38 @@ export async function executeCases({ job, settings, journal, source, index, mani
     await save();
     return { release, releaseEvidence };
   };
+  const clean = async mutations => adapter.cleanup({ ...scope, mutations, prior: journal.cleanup,
+    async restore(key, operation, apply, resourceName) {
+      const mutation = journal.mutations.find(item => item.key === key);
+      if (!mutation) throw new RequirementWait('mutation_scope', '清理操作缺少本轮变更记录。');
+      const target = resourceName ?? mutation.intent.resource;
+      if (target !== mutation.intent.resource && target !== mutation.intent.restoreSpec?.resource) throw new RequirementWait('mutation_scope', '恢复资源与保存的恢复契约不符。');
+      if (operation === 'read') return useRead(target, resource => apply(resource, mutation));
+      await confirmWriteTarget(target, operation);
+      return resources.use(target, operation, resource => apply(resource, mutation));
+    },
+    async saveCleanup(key, observation) {
+      const mutation = journal.mutations.find(item => item.key === key);
+      mutation.cleanup = { ...mutation.cleanup, ...resources.checkOutput(observation) };
+      await save();
+    },
+  });
+  if (settings.execution?.mode === 'agent' && (journal.cleanup || journal.inFlight)) {
+    // Resume always reconciles recorded effects first, including a crash before a receipt.
+    const recovered = resources.checkOutput(await clean(journal.mutations));
+    journal.cleanup = recovered; await save();
+    if (!recovered.verified) throw new RequirementWait('cleanup_pending', '恢复回读仍存在未决变更，保留资源锁等待继续清理。');
+    journal.cleanupHistory ??= []; journal.cleanupHistory.push(recovered);
+    if (!job.requirement.cleanupOnly) {
+      const unfinished = journal.inFlight;
+      if (unfinished && !journal.results[unfinished]) {
+        journal.caseAttempts ??= {}; journal.caseAttempts[unfinished] = (journal.caseAttempts[unfinished] ?? 1) + 1;
+        delete journal.preparations[unfinished]; delete journal.executionSteps[unfinished];
+      }
+      journal.inFlight = null; journal.cleanup = null; await save();
+    }
+  }
+  try {
   if (!job.requirement.cleanupOnly && !journal.cleanup) {
     await collectRelease();
     for (const item of index) {
@@ -212,7 +295,13 @@ export async function executeCases({ job, settings, journal, source, index, mani
       }
       if (journal.results[item.caseId]) continue;
       journal.executionCases[item.caseId] ??= { caseVersion, publicationVersion: journal.publication.version };
-      const caseInput = { ...scope, item, row, headers: manifest.headers };
+      const caseInput = { ...scope, item, row, headers: manifest.headers, attempt: journal.caseAttempts?.[item.caseId] ?? 1,
+        getMutations: () => journal.mutations.filter(record => record.caseId === item.caseId),
+        async cleanupCase() {
+          const result = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
+          journal.caseCleanup ??= {}; journal.caseCleanup[item.caseId] = result; await save(); return result;
+        },
+        async savePreparation(preparation) { journal.preparations[item.caseId] = resources.checkOutput(preparation); await save(); } };
       await progress('执行用例 ' + item.caseId, Object.keys(journal.results).length, index.length);
       const version = caseReleaseRequirement(item, row, manifest.headers, settings.execution?.caseReleases);
       if (version) {
@@ -246,7 +335,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
         const prior = journal.mutations.find(record => record.key === key);
         if (prior) {
           if (digest(prior.intent) !== digest(intent)) throw new RequirementWait('mutation_scope', '恢复时操作范围与已保存的变更不一致。');
-          if (prior.phase === 'applied') return prior.receipt;
+          if (prior.phase === 'applied' && !intent.agent) return prior.receipt;
           const observed = resources.checkOutput(await adapter.reconcile({ ...caseInput, intent, key }));
           if (observed?.status === 'applied' && observed.receipt?.evidence?.length) {
             prior.phase = 'applied';
@@ -258,6 +347,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
           if (observed?.status !== 'not_applied' || !observed.evidence?.length) {
             throw new RequirementWait('mutation_uncertain', '上次变更结果无法确认，需核对外部状态后继续或恢复清理。');
           }
+          if (prior.phase === 'applied') throw new RequirementWait('mutation_uncertain', '此前已生效变更回读不再满足，不能自动重复提交。');
         }
         await confirmWriteTarget(intent.resource, intent.operation);
         const record = prior ?? { key, caseId: item.caseId, intent: resources.checkOutput(intent), phase: 'prepared', at: new Date().toISOString() };
@@ -283,11 +373,22 @@ export async function executeCases({ job, settings, journal, source, index, mani
           } } : {}),
           resumed: previous === item.caseId, mutations: journal.mutations.filter(record => record.caseId === item.caseId) }));
       } catch (error) {
+        if (settings.execution?.mode === 'agent' && error instanceof RequirementWait
+          && ['agent_no_progress', 'execution_plan', 'execution_evidence'].includes(error.code)) {
+          const recovered = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
+          journal.caseCleanup ??= {}; journal.caseCleanup[item.caseId] = recovered; await save();
+          if (!recovered.verified) throw new RequirementWait('cleanup_pending', '当前用例尚有未决变更，不能启动后续用例。');
+          const remaining = index.slice(index.indexOf(item) + 1).map(next => manifest.rows[next.row - 2]);
+          const continuation = resources.checkOutput(await adapter.canContinue(caseInput, remaining, error));
+          if (!continuation.independent) throw error;
+          result = { status: '未执行', actual: error.message, retryable: true, evidence: continuation.evidence };
+        } else {
         if (!(error instanceof RequirementWait) || error.code !== 'environment_scope') throw error;
         const file = 'resource-blocked-' + digest(item.caseId).slice(0, 24) + '.json';
         await writeJson(path.join(reportDir, file), { caseId: item.caseId, reason: error.message });
         result = { status: '阻断', actual: error.message, evidence: [{ path: file, type: '环境权限核验', sanitized: true }],
           blocker: { dependency: '已授权的非生产资源', required_action: '核对受影响资源的环境归属和操作权限。' } };
+        }
       }
       if (!['通过', '失败', '阻断', '未执行', '不适用'].includes(result?.status) || !result.actual
         || !result.evidence?.length || (result.status === '失败' && !result.issue?.expected_result)
@@ -305,7 +406,30 @@ export async function executeCases({ job, settings, journal, source, index, mani
       journal.results[item.caseId] = { ...result, at: new Date().toISOString() };
       journal.inFlight = null;
       await save();
+      if (settings.execution?.mode === 'agent') {
+        let cleanup = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
+        if (!cleanup.verified) {
+          // A lost response or transient recovery request gets a fresh readback.
+          // The adapter compares before/after state before issuing another write.
+          cleanup = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
+        }
+        journal.caseCleanup ??= {};
+        journal.caseCleanup[item.caseId] = cleanup;
+        await save();
+        if (!cleanup.verified) throw new RequirementWait('cleanup_pending', '该用例的变更尚未恢复；先处理清理，未启动后续用例。');
+      }
     }
+  }
+  } catch (error) {
+    if (settings.execution?.mode === 'agent') {
+      journal.cleanup = resources.checkOutput(await clean(journal.mutations));
+      await save();
+      if (!journal.cleanup.verified) throw new RequirementWait('cleanup_pending', '执行中断后的清理尚未核验；保留原台账与资源锁，恢复后先清理。');
+      // The campaign has not completed; a later resume must still process remaining cases.
+      journal.cleanupHistory ??= []; journal.cleanupHistory.push(journal.cleanup);
+      journal.cleanup = null; await save();
+    }
+    throw error;
   }
 
   if (journal.cleanup?.verified !== true) {
@@ -313,20 +437,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
     const prior = journal.cleanup;
     journal.cleanup = { verified: false, pending: journal.mutations.map(item => item.key) };
     await save();
-    const restore = async (key, operation, apply) => {
-      const mutation = journal.mutations.find(item => item.key === key);
-      if (!mutation) throw new RequirementWait('mutation_scope', '清理操作缺少本轮变更记录。');
-      if (operation === 'read') return useRead(mutation.intent.resource, resource => apply(resource, mutation));
-      await confirmWriteTarget(mutation.intent.resource, operation);
-      return resources.use(mutation.intent.resource, operation, resource => apply(resource, mutation));
-    };
-    const cleanup = resources.checkOutput(await adapter.cleanup({ ...scope, mutations: journal.mutations, prior, restore,
-      async saveCleanup(key, observation) {
-        const mutation = journal.mutations.find(item => item.key === key);
-        mutation.cleanup = { ...mutation.cleanup, ...resources.checkOutput(observation) };
-        await save();
-      },
-    }));
+    const cleanup = resources.checkOutput(await clean(journal.mutations));
     journal.cleanup = cleanup;
     await save();
     if (cleanup?.verified !== true || !cleanup.evidence?.length || cleanup.pending?.length) {

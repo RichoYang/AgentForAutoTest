@@ -104,6 +104,7 @@ function requirementCommandText(content, mentions = []) {
 }
 
 function requirementCommand(text) {
+  if (/^(?:请)?重试(?:未执行|未执行用例|未执行的用例)$/.test(text)) return 'retry_unexecuted';
   if (/^(?:请)?(?:继续|恢复)(?:测试|任务|执行|运行)?(?:一下|吧)?$/.test(text)) return 'resume';
   if (/^(?:请)?(?:暂停|取消|停止)(?:测试|任务|执行|运行)?(?:一下|吧)?$/.test(text)) return text.includes('暂停') ? 'pause' : 'cancel';
   if (text === '恢复清理' || text === '继续清理') return 'cleanup';

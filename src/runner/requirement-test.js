@@ -28,7 +28,13 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
   };
   if (journal.version !== 1 || journal.projectId !== job.projectId || journal.url !== job.requirement.url
     || journal.environment !== settings.environment?.name) throw new Error('需求测试检查点与本轮绑定不符');
-  const save = () => writeJson(journalFile, journal);
+  let pendingSave = Promise.resolve();
+  const save = () => {
+    const snapshot = structuredClone(journal);
+    const result = pendingSave.then(() => writeJson(journalFile, snapshot));
+    pendingSave = result.catch(() => {});
+    return result;
+  };
   const sourceFile = path.join(workDir, 'requirement.json');
   const templateFile = path.join(workDir, 'template.json');
   const casesFile = path.join(workDir, 'cases.json');
@@ -191,7 +197,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       await save();
     }
     await executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, save, progress, codexBin: config.codexBin,
-      plan: dependencies.plan });
+      plan: dependencies.plan, project, agentModel: dependencies.agentModel, review: dependencies.review });
 
     stage = '测试报告验证';
     journal.phase = stage;

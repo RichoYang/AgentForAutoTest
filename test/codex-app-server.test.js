@@ -30,6 +30,18 @@ function fakeServer({ hold = [] } = {}) {
   return { app, children, requests, notify };
 }
 
+test('dynamic tool dispatch is opt-in and cannot approve unrelated native tools', async t => {
+  const { app, requests } = fakeServer(); t.after(() => app.close()); await app.start();
+  app.receive({ id: 900, method: 'item/tool/call', params: { tool: 'test_read' } });
+  assert.equal(requests.find(item => item.id === 900).error.code, -32601);
+  app.options.onToolCall = async params => ({ success: true, contentItems: [{ type: 'inputText', text: params.tool }] });
+  app.receive({ id: 901, method: 'item/tool/call', params: { tool: 'test_read' } });
+  await new Promise(setImmediate);
+  assert.equal(requests.find(item => item.id === 901).result.contentItems[0].text, 'test_read');
+  app.receive({ id: 902, method: 'item/commandExecution/requestApproval', params: {} });
+  assert.equal(requests.find(item => item.id === 902).error.code, -32601);
+});
+
 test('stdio initialization is shared, answers finish without process exit and thread events stay isolated', async (t) => {
   const { app, children, requests, notify } = fakeServer();
   t.after(() => app.close());

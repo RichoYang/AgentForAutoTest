@@ -8,6 +8,7 @@ import { readJson, writeJson } from './requirement-files.js';
 import { bindCaseAssertions, compileCaseAssertions, evaluateCaseAssertion, observationAt as field } from './requirement-assertions.js';
 import { bindSubjectInput, caseSubject, verifySubjectOutput } from './requirement-subject.js';
 import { verifyRequirementRelease } from './requirement-release.js';
+import { repairPlan } from './requirement-plan.js';
 
 function target(resource, relative, base = resource.base_url ?? resource.management_url) {
   const origin = new URL(base);
@@ -77,15 +78,14 @@ async function session(resource, login, run, effect, queries = new Map()) {
         allowEffect = false;
         return guardedRequest(route);
       }
-      const query = [...queries.values()].find(item => request.method() === 'POST' && request.url() === item.url.href);
-      if (query) {
+      const matches = [...queries.values()].filter(item => request.method() === 'POST' && request.url() === item.url.href);
+      if (matches.length) {
         let payload;
-        try { payload = request.postDataJSON(); } catch { return block(route, '只读查询请求无法解析', query); }
-        if (!payload || Array.isArray(payload) || typeof payload !== 'object'
-          || Object.keys(payload).length !== Object.keys(query.params).length
-          || Object.entries(query.params).some(([key, value]) => !Object.hasOwn(payload, key) || payload[key] !== value)) {
-          return block(route, '只读查询请求参数与已绑定输入不一致', query);
-        }
+        try { payload = request.postDataJSON(); } catch { return block(route, '只读查询请求无法解析', matches[0]); }
+        const query = payload && !Array.isArray(payload) && typeof payload === 'object' && matches.find(item =>
+          Object.keys(payload).length === Object.keys(item.params).length
+          && Object.entries(item.params).every(([key, value]) => Object.hasOwn(payload, key) && payload[key] === value));
+        if (!query) return block(route, '只读查询请求参数与已绑定输入不一致', matches[0]);
         return guardedRequest(route, query);
       }
       return request.method() === 'GET' ? guardedRequest(route) : block(route, '请求不在已登记的只读查询或写入意图内');
@@ -107,7 +107,10 @@ async function session(resource, login, run, effect, queries = new Map()) {
       const query = queries.get(name);
       if (!query) throw new Error('浏览器动作引用未登记的查询');
       await Promise.race([failed, Promise.all([
-        page.waitForResponse(response => response.url() === query.url.href && response.request().method() === 'POST')
+        page.waitForResponse(response => response.url() === query.url.href && response.request().method() === 'POST'
+          && Object.entries(query.params).every(([key, value]) => {
+            try { return digest(response.request().postDataJSON()?.[key]) === digest(value); } catch { return false; }
+          }))
           .then(response => response.finished()),
         act(),
       ])]);
@@ -235,7 +238,9 @@ async function callResource(resource, spec, input, login, effect, operations = {
       else if (action.kind === 'check' && typeof value === 'boolean') await locator.setChecked(value);
       else throw new Error('页面操作或输入未登记');
       if (action.waitFor) await page.locator(action.waitFor).waitFor();
+      if (action.ready) await waitBusinessReady(page, action.ready);
     }
+    if (spec.ready) await waitBusinessReady(page, spec.ready);
     const values = {};
     for (const [name, selector] of Object.entries(spec.selectors ?? {})) {
       const locator = page.locator(typeof selector === 'string' ? selector : selector.selector);
@@ -250,6 +255,20 @@ async function callResource(resource, spec, input, login, effect, operations = {
   throw new Error('未登记的执行操作');
 }
 
+export async function waitBusinessReady(page, ready) {
+  const rules = Array.isArray(ready) ? ready : [ready];
+  for (const rule of rules) {
+    if (!rule?.selector) throw new Error('业务就绪条件缺少 selector');
+    if (rule.state) await page.locator(rule.selector).waitFor({ state: rule.state, timeout: rule.timeoutMs ?? 30000 });
+    else if (Object.hasOwn(rule, 'text') || rule.attribute) {
+      await page.waitForFunction(({ selector, text, attribute, value }) => {
+        const node = document.querySelector(selector);
+        return Boolean(node) && (attribute ? node.getAttribute(attribute) === value : node.textContent.trim() === text);
+      }, rule, { timeout: rule.timeoutMs ?? 30000 });
+    } else throw new Error('业务就绪条件需要 state、text 或 attribute/value');
+  }
+}
+
 function browserQueries(resource, spec, input, operations) {
   const queries = new Map();
   for (const [name, binding] of Object.entries(spec.queries ?? {})) {
@@ -261,7 +280,6 @@ function browserQueries(resource, spec, input, operations) {
     const expected = params(query, { ...binding.fixed, ...mapped });
     if ((query.inputs ?? []).some(key => !Object.hasOwn(expected, key))) throw new Error('浏览器查询缺少登记参数');
     const url = target(resource, query.path);
-    if ([...queries.values()].some(item => item.url.href === url.href)) throw new Error('浏览器查询入口有重复绑定');
     queries.set(name, { name, url, params: expected });
   }
   return queries;
@@ -287,7 +305,8 @@ function normalizedSteps(plan, operations) {
         || !Number.isInteger(check.assertion))) {
       throw new RequirementWait('execution_plan', '计划引用未登记操作、观测字段或前置步骤。');
     }
-    return { operation: step.operation, input: step.input, checks: step.checks, ...(step.when ? { when: step.when } : {}) };
+    return { operation: step.operation, input: step.input, checks: step.checks,
+      ...(step.subject ? { subject: step.subject } : {}), ...(step.when ? { when: step.when } : {}) };
   });
 }
 
@@ -369,19 +388,18 @@ export function createRequirementAdapter(config, options) {
         throw new RequirementWait('execution_plan', '发布用例的断言契约与当前操作目录不一致，请核对同版本的业务观测定义。');
       }
       const subject = caseSubject(scope, config.dimensions);
-      const plan = await (options.plan ?? askNoTools)([
+      const { plan, steps: normalized } = await repairPlan({ generate: options.plan ?? askNoTools, scope, operations,
+        normalize: normalizedSteps, options: { cwd: options.workDir, workDir: options.workDir, codexBin: options.codexBin }, prompt: [
         '根据回归 Skill 与本轮用例选择已登记操作。仅输出 JSON {steps:[{operation,input,checks:[{field,operator,expected,assertion}]}],missing:[]}',
         '输入可引用前序观测 {from:从0开始的步骤编号,field:[路径]}。条件步骤可用 when:{ref:{from,field},equals:值}。条件跳过后缺少的断言会标记验证不足。',
         '每项断言使用 {assertion,field}；assertion 是 compiled.clauses 中的编号，field 绑定登记的观测。程序负责运算和期望值。计划应使用 subject 中的确定对象和维度；不能猜测或用其他对象替代。缺少前置或无法执行时写入 missing。',
+        '存在多个合法主体时，每个步骤用 subject:{维度名:候选value} 明确选择候选，分别绑定各次切换的输入、观测和断言。',
         scope.standards,
         JSON.stringify({ headers: scope.headers, row: scope.row, compiled, subject, operations: Object.fromEntries(Object.entries(operations)
           .map(([name, spec]) => [name, { kind: spec.kind, description: spec.description, inputs: spec.inputs ?? [],
             outputs: Object.keys(spec.outputs ?? spec.lookup?.outputs ?? spec.selectors ?? {}), observations: spec.observations, subject: spec.subject }])) }),
-      ].join('\n\n'), { cwd: options.workDir, codexBin: options.codexBin });
-      if (!Array.isArray(plan?.steps) || !Array.isArray(plan?.missing) || plan.missing.some(item => typeof item !== 'string')) {
-        throw new RequirementWait('execution_plan', '执行计划格式无效。');
-      }
-      const bound = bindCaseAssertions(expected, normalizedSteps(plan, operations), operations, compiled);
+      ].join('\n\n') });
+      const bound = bindCaseAssertions(expected, normalized, operations, compiled);
       const prerequisites = bound.steps.flatMap((step, index) => {
         const spec = Object.hasOwn(operations, step.operation) && operations[step.operation];
         if (spec.kind !== 'fixture' && spec.precondition !== true) return [];

@@ -286,6 +286,10 @@ export async function runReportBuilder(skill, input, workDir, reportDir, now) {
     if (check.valid !== true) throw new Error('Schema validation failed');
     const report = builderOutput(await command(process.execPath, [...args, '--output', output, '--preview-dir', previewDir, '--force'], { cwd: workDir }));
     if (report.sheetCount !== 15 || await hashFile(output) !== report.sha256) throw new Error('Report hash or topology mismatch');
+    report.builderSha256 = report.sha256;
+    await fitReportRows(builder, output, previewDir, payload);
+    report.sha256 = await hashFile(output);
+    report.layoutVersion = 'autofit-1';
     const counts = await verifyWorkbookCounts(builder, output, payload);
     const previews = (await readdir(previewDir)).filter(file => /^\d{2}-.+\.png$/.test(file)).sort();
     if (previews.length !== 15) throw new Error('Missing report previews');
@@ -299,6 +303,31 @@ export async function runReportBuilder(skill, input, workDir, reportDir, now) {
     return { ...report, previewHashes, ...counts };
   } catch {
     throw new RequirementWait('report_validation', '报告专用构建器未完成结构、证据或预览核验，已保留本轮台账。');
+  }
+}
+
+// Keep the pinned Skill's schema/content/15-sheet contract. Its fixed 72pt body
+// rows clip real agent evidence; fit only row heights, then render the final file.
+export async function fitReportRows(builder, output, previewDir, payload) {
+  const library = createRequire(builder).resolve('@oai/artifact-tool');
+  const { FileBlob, SpreadsheetFile } = await import(pathToFileURL(library).href);
+  const { WORKBOOK_CONTRACT } = await import(pathToFileURL(builder).href);
+  const workbook = await SpreadsheetFile.importXlsx(await FileBlob.load(output));
+  const sections = ['cases', 'fix_verifications', 'prerequisites', 'mutation_ledger', 'issues', 'code_chains',
+    'config_restorations', 'cleanup_records', 'repositories', 'export_validations', 'blockers', 'retained_data', 'evidence_index'];
+  const letter = n => n <= 26 ? String.fromCharCode(64 + n) : letter(Math.floor((n - 1) / 26)) + letter((n - 1) % 26 + 1);
+  for (let i = 2; i < WORKBOOK_CONTRACT.length; i++) {
+    const contract = WORKBOOK_CONTRACT[i], sheet = workbook.worksheets.getItem(contract.name);
+    const rows = Math.max(3, (payload[sections[i - 2]]?.length ?? 0) + 2);
+    sheet.getRange(`A3:${letter(contract.headers.length)}${rows}`).format.autofitRows();
+  }
+  workbook.recalculate();
+  await (await SpreadsheetFile.exportXlsx(workbook)).save(output);
+  for (let i = 2; i < WORKBOOK_CONTRACT.length; i++) {
+    const contract = WORKBOOK_CONTRACT[i];
+    const rows = Math.max(3, (payload[sections[i - 2]]?.length ?? 0) + 2);
+    const preview = await workbook.render({ sheetName: contract.name, range: `A1:${letter(contract.headers.length)}${rows}`, scale: 1.15, format: 'png' });
+    await writeFile(path.join(previewDir, `${String(i + 1).padStart(2, '0')}-${contract.name}.png`), new Uint8Array(await preview.arrayBuffer()));
   }
 }
 

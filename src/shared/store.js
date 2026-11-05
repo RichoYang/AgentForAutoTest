@@ -726,7 +726,9 @@ function routeRequirementJob(state, input) {
     return { ...current(prior.status === 'cancelling' ? 'requirement_stopping' : 'requirement_status'), changed: true };
   }
   const cleanup = command === 'cleanup';
+  const retry = command === 'retry_unexecuted';
   const canResume = ['awaiting_clarification', 'paused'].includes(prior.status)
+    || retry && ['completed', 'failed', 'blocked'].includes(prior.status)
     || cleanup && prior.status === 'cancelled' && prior.events.some(event => event.type === 'cancelled' && event.processesExited);
   if (!canResume) return current('requirement_invalid_transition');
   if (prior.result?.requirementWait === 'project_confirmation' && command !== 'confirm' && !cleanup) {
@@ -746,6 +748,8 @@ function routeRequirementJob(state, input) {
     prior.requirement.confirmedProject = true;
   }
   if (cleanup) prior.requirement.cleanupOnly = true;
+  else delete prior.requirement.cleanupOnly;
+  if (retry) prior.requirement.retryRequest = input.sourceMessageId;
   delete prior.requirement.stopMode;
   prior.status = 'queued';
   prior.lease = null;

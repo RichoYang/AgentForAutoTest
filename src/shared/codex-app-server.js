@@ -106,6 +106,17 @@ export class CodexAppServer extends EventEmitter {
       }
       else entry?.resolve(message.result);
     } else if (message.id !== undefined) {
+      if (message.method === 'item/tool/call' && typeof this.options.onToolCall === 'function') {
+        // Opt-in only: ordinary conversations keep their deny-by-default behavior.
+        const child = this.child;
+        Promise.resolve().then(() => this.options.onToolCall(message.params)).then(result => {
+          if (this.child === child) this.write({ id: message.id, result });
+        }, () => {
+          if (this.child === child) this.write({ id: message.id, result: { success: false,
+            contentItems: [{ type: 'inputText', text: 'Tool execution failed; reconcile recorded effects before retrying.' }] } });
+        });
+        return;
+      }
       // Conversation process has no permission to approve tools or perform actions.
       this.write({ id: message.id, error: { code: -32601, message: 'AgentOS conversation does not authorize tool requests' } });
     } else this.emit('notification', message);
@@ -146,7 +157,9 @@ export class CodexAppServer extends EventEmitter {
         if (method === 'turn/started') turnId = event.turn.id;
         if (method === 'error') timing.retries += event.willRetry ? 1 : 0;
         if (['item/agentMessage/delta', 'item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(method)) timing.firstOutputMs ??= Date.now() - started;
-        onEvent?.(method, { elapsedMs: Date.now() - started, willRetry: event.willRetry ?? false });
+        onEvent?.(method, { elapsedMs: Date.now() - started, willRetry: event.willRetry ?? false,
+          ...(event.item ? { item: { type: event.item.type, name: event.item.name, tool: event.item.tool,
+            status: event.item.status } } : {}) });
         if (method === 'item/completed' && event.item?.type === 'agentMessage') final = event.item.text ?? final;
         if (method === 'turn/completed') {
           if (event.turn.status !== 'completed') return finish(new Error(event.turn.error?.message ?? `Codex turn ${event.turn.status}`));

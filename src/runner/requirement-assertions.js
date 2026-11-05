@@ -118,8 +118,10 @@ export function bindCaseAssertions(expectedText, steps, operations, compiled = c
     const checks = step.checks.flatMap(check => {
       const source = compiled.clauses[check.assertion - 1];
       const goal = source?.predicate;
+      // Preserve required evidence channel even when the business predicate removes UI wording.
+      const ui = /页面|界面|显示|展示|可见|看到/.test(source?.fragment ?? '');
       const contract = spec.observations?.find(item => item.id === goal?.observation && digest(item.field) === digest(check.field));
-      if (!goal || !contract || (check.operator !== undefined && check.operator !== goal.operator)
+      if (!goal || !contract || (ui && spec.kind !== 'browser') || (check.operator !== undefined && check.operator !== goal.operator)
         || (Object.hasOwn(check, 'expected') && check.expected !== goal.expected)) return [];
       const operands = goal.expression?.map(term => ({ ...term, binding: spec.observations.find(item => item.id === term.id) }));
       if (operands?.some(term => !term.binding)) return [];
