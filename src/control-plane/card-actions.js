@@ -74,6 +74,7 @@ async function applyCardAction(context, event) {
     if (!admin && !creator) throw new Error('只有本任务发起人或真人管理员可以操作；转交后身份未识别时，请核对跨应用真人身份映射。');
     const value = parse(event.action_value);
     action = event.action_name?.startsWith('clarify_') ? 'clarify' : value.action;
+    if (job.workflow === 'requirement_test' && !['refresh', 'cancel'].includes(action)) throw new Error('请在原话题继续需求测试。');
     version = action === 'clarify' ? event.action_name.slice('clarify_'.length) : value.version;
     if (!['cancel', 'approve', 'approve_environment', 'renew_environment', 'clarify', 'refresh'].includes(action)) throw new Error('不支持的卡片操作。');
     if (action === 'approve' && !admin) throw new Error('只有真人管理员可以确认进入下一阶段。');

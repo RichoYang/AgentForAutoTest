@@ -15,6 +15,9 @@ export function jobTerminalMention(job, projects = {}) {
   if(job.setupTurnId)return null;
   if(job.connectionEnrollmentPending && !job.connectionEnrollmentHandled && job.status === 'completed') return null;
   if (job?.originChatType !== 'group' || job.nextJobId) return null;
+  if (job.workflow === 'requirement_test' && job.status === 'awaiting_clarification') {
+    return mention(job.originMessageId, job.originProfile, job.senderId, '需求测试等待处理，请查看本话题的任务卡。');
+  }
   if(job.status==='awaiting_clarification'&&job.result?.browserLoginRequired){
     const ids=(job.environmentAccess?.approvalOwnerIds??[]).filter(id=>OPEN_ID.test(id));
     const instruction = job.result?.browserActionRequired === 'automation'

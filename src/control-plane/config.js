@@ -68,7 +68,7 @@ export async function saveProjects(file, projects) {
 
 function chatDeliverySettings(value) {
   const result = {};
-  for (const key of ['topicChatIds', 'retiredChatIds']) {
+  for (const key of ['topicChatIds', 'retiredChatIds', 'messageExcludedChatIds']) {
     if (value[key] === undefined) continue;
     if (!Array.isArray(value[key]) || value[key].some(id => typeof id !== 'string' || !id.trim())) throw new Error('Invalid chat delivery settings');
     result[key] = [...new Set(value[key])];

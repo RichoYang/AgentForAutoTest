@@ -17,8 +17,8 @@
 
 ```powershell
 Set-Location D:\projects
-git clone https://github.com/angelaboy0113/agentos.git
-Set-Location .\agentos
+git clone https://github.com/RichoYang/AgentForAutoTest.git
+Set-Location .\AgentForAutoTest
 git switch main
 git pull --ff-only
 git rev-parse HEAD

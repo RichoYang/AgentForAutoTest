@@ -51,7 +51,7 @@ export class ReportDelivery {
   try{
    if(!/^[a-f0-9]{64}$/.test(entry.item.verificationHash??'')){await this.context.store.transact(state=>Object.assign(state.reportDeliveries[key],{superseded:true,error:'旧文件无最终核验记录，保留本地，不自动发送'}));return;}
    const {file}=await reportFile(this.context.config.dataDir,entry.sourceJobId,entry.item,{includeContent:false});
-   const prepared=await prepareReportParts(file);
+   const prepared=await prepareReportParts(file,{binary:entry.item.kind==='requirement-xlsx'});
    try{
     if(await hashFile(file)!==entry.item.sha256)throw new Error('文件在分卷时发生变化');
     const ids=[];

@@ -103,6 +103,10 @@ export class JsonStore {
         const existing = state.jobs.find((job) => job.id === state.processedMessages[input.sourceMessageId]);
         return { job: existing, duplicate: true };
       }
+      if (input.requirement) {
+        const result = routeRequirementJob(state, input);
+        if (result) return result;
+      }
       // A same-question supplement adds execution context; it cannot replace the root request.
       const question = input.questionId && state.questions?.[input.questionId];
       if (input.taskIntent === 'analysis' && question && question.projectId === input.projectId && question.chatId === input.chatId) {
@@ -140,6 +144,7 @@ export class JsonStore {
         instruction: input.instruction,
         originalQuestion: input.originalQuestion ?? input.instruction,
         taskIntent: input.taskIntent ?? 'implementation',
+        ...(input.requirement ? { requirement: structuredClone(input.requirement) } : {}),
         ...(input.taskIntent==='analysis'&&input.analysisScope==='attachments'?{analysisScope:'attachments'}:{}),
         ...(input.taskIntent === 'analysis' ? { questionScopePolicy: 'original-question-v1' } : {}),
         ...(input.sourceEnvironment ? { sourceEnvironment: input.sourceEnvironment } : {}),
@@ -156,6 +161,7 @@ export class JsonStore {
         createdAt: now,
         updatedAt: now,
       };
+      if (input.requirement) attachRequirementQuestion(state, job);
       state.jobs.push(job);
       if (input.sourceMessageId) state.processedMessages[input.sourceMessageId] = job.id;
       return { job, duplicate: false };
@@ -456,7 +462,7 @@ export class JsonStore {
       if (event.leaseId && (job.lease?.id !== event.leaseId || job.lease?.runnerId !== event.runnerId)) {
         throw new Error('Stale or foreign Runner lease');
       }
-      if (['cancelled', 'completed', 'failed', 'blocked', 'awaiting_approval', 'awaiting_clarification', 'awaiting_environment_approval'].includes(job.status)) {
+      if (['cancelled', 'paused', 'completed', 'failed', 'blocked', 'awaiting_approval', 'awaiting_clarification', 'awaiting_environment_approval'].includes(job.status)) {
         throw new Error('Task is already terminal');
       }
       const entry = { id: createId('EVT'), at: new Date().toISOString(), ...event };
@@ -470,8 +476,9 @@ export class JsonStore {
       }
       if (event.type === 'cancelled') {
         if (job.status !== 'cancelling' || !event.leaseId || !event.processesExited) throw new Error('Cancellation requires process-exit acknowledgement');
-        job.status = 'cancelled';
+        job.status = job.requirement?.stopMode === 'pause' ? 'paused' : 'cancelled';
         job.lease = null;
+        if (job.workflow === 'requirement_test' && event.result) job.result = event.result;
       }
       if (event.type === 'completed' && job.status !== 'cancelling') {
         if (event.result?.outcome === 'partial' && job.environmentAccess) {
@@ -488,6 +495,11 @@ export class JsonStore {
           || !event.result.verifiedArtifacts?.length || !event.result.handoff?.risks?.length
           || !event.result.sourceSync?.repositories?.length)) throw new Error('Invalid partial analysis evidence');
         if(job.environmentAccess&&event.result?.exportFiles?.length)recordReportFiles(job,event.result.exportFiles,state.questions?.[job.questionId]?.generation);
+        if (job.workflow === 'requirement_test' && event.result?.requirementReport) {
+          const file = event.result.requirementReport;
+          recordReportFiles(job, [file], state.questions?.[job.questionId]?.generation);
+          job.reportReviews[file.id] = { status: 'accepted', verificationHash: file.verificationHash };
+        }
         recordReportReview(job,event.result);
         job.result = event.result ?? null;
         job.status = event.result?.outcome === 'blocked' ? 'blocked' : needsClarification(job, event.result)
@@ -665,7 +677,7 @@ export class JsonStore {
     return this.transactEffect(effectKey, (state) => {
       const job = requireJob(state, jobId);
       guard(state, job);
-      if (!['running', 'queued', 'awaiting_instruction', 'awaiting_clarification', 'awaiting_approval', 'awaiting_environment_approval'].includes(job.status)) {
+      if (!['running', 'queued', 'paused', 'awaiting_instruction', 'awaiting_clarification', 'awaiting_approval', 'awaiting_environment_approval'].includes(job.status)) {
         throw new Error('当前任务已结束或正在停止，不能重复取消。');
       }
       job.status = job.status === 'running' ? 'cancelling' : 'cancelled';
@@ -684,6 +696,84 @@ function makeNextJob(job, stage, routing, now) {
     status: 'queued', lease: null, events: [], result: null, notificationIds: [],
     nextJobId: undefined, approvedBy: undefined, approvedAt: undefined,
     createdAt: now, updatedAt: now };
+}
+
+function routeRequirementJob(state, input) {
+  const request = input.requirement;
+  const prior = state.jobs.find(job => job.requirement && job.projectId === input.projectId
+    && job.agentProfile === input.agentProfile && job.chatId === input.chatId
+    && (job.requirement.root === request.root || job.originMessageId === request.parent
+      || state.cardMessages?.['question:' + job.questionId]?.messageId === request.parent && request.parent));
+  if (!prior) {
+    if (!input.requirementAddressed) return { reason: 'requirement_unaddressed' };
+    return request.url ? null : { reason: 'missing_requirement' };
+  }
+  if (prior.senderId !== input.senderId) return { reason: 'requirement_requester_mismatch' };
+  if (request.url && request.url !== prior.requirement.url) return { reason: 'different_requirement' };
+  const command = input.requirementCommand;
+  const current = reason => ({ current: prior, reason });
+  if (command === 'status') return current('requirement_status');
+  if (!command) return current('requirement_unknown_command');
+  if (command === 'pause' || command === 'cancel') {
+    if (!['queued', 'running', 'awaiting_clarification', 'paused'].includes(prior.status)
+      || prior.status === 'paused' && command === 'pause') return current('requirement_invalid_transition');
+    prior.requirement.stopMode = command;
+    prior.status = prior.status === 'running' ? 'cancelling' : command === 'pause' ? 'paused' : 'cancelled';
+    prior.updatedAt = new Date().toISOString();
+    prior.events.push({ id: createId('EVT'), type: prior.status === 'cancelling' ? 'cancel_requested' : prior.status,
+      ...(prior.status === 'cancelled' ? { processesExited: true } : {}), by: input.senderId, at: prior.updatedAt });
+    state.processedMessages[input.sourceMessageId] = prior.id;
+    return { ...current(prior.status === 'cancelling' ? 'requirement_stopping' : 'requirement_status'), changed: true };
+  }
+  const cleanup = command === 'cleanup';
+  const canResume = ['awaiting_clarification', 'paused'].includes(prior.status)
+    || cleanup && prior.status === 'cancelled' && prior.events.some(event => event.type === 'cancelled' && event.processesExited);
+  if (!canResume) return current('requirement_invalid_transition');
+  if (prior.result?.requirementWait === 'project_confirmation' && command !== 'confirm' && !cleanup) {
+    return current('requirement_confirmation_required');
+  }
+  if (prior.result?.requirementWait === 'material_clarification' && !cleanup && command !== 'material_confirm') {
+    return current('requirement_material_confirmation');
+  }
+  if (command === 'material_confirm') {
+    const decision = request.materialConfirmation;
+    if (prior.result?.requirementWait !== 'material_clarification' || !decision?.answer
+      || !prior.result.requirementQuestions?.includes(decision.id)) return current('requirement_material_confirmation');
+    prior.requirement.materialConfirmations = { ...prior.requirement.materialConfirmations, [decision.id]: decision.answer };
+  }
+  if (command === 'confirm') {
+    if (prior.result?.requirementWait !== 'project_confirmation') return current('requirement_invalid_transition');
+    prior.requirement.confirmedProject = true;
+  }
+  if (cleanup) prior.requirement.cleanupOnly = true;
+  delete prior.requirement.stopMode;
+  prior.status = 'queued';
+  prior.lease = null;
+  prior.result = null;
+  prior.updatedAt = new Date().toISOString();
+  prior.events.push({ id: createId('EVT'), type: 'clarification_received', at: prior.updatedAt, by: input.senderId });
+  state.questions[prior.questionId].generation++;
+  state.processedMessages[input.sourceMessageId] = prior.id;
+  return { job: prior, duplicate: false };
+}
+
+function attachRequirementQuestion(state, job) {
+  const turnId = createId('CHAT');
+  const questionId = createId('QST');
+  job.questionId = questionId;
+  state.questions ??= {};
+  state.conversations ??= [];
+  state.questions[questionId] = {
+    id: questionId, rootTurnId: turnId, latestTurnId: turnId, messageId: job.originMessageId,
+    threadRootId: job.requirement.root, chatId: job.chatId, projectId: job.projectId, profile: job.agentProfile,
+    senderId: job.senderId, createdAt: job.createdAt, replyInThread: true,
+    title: job.projectName + ' · 需求测试', generation: 1,
+  };
+  state.conversations.push({
+    id: turnId, questionId, messageId: job.originMessageId, projectId: job.projectId,
+    chatId: job.chatId, profile: job.agentProfile, senderId: job.senderId, chatType: 'group',
+    role: job.agentRole, status: 'sent', content: '需求测试', createdAt: job.createdAt, outcome: { jobId: job.id },
+  });
 }
 
 function needsClarification(job, result) {

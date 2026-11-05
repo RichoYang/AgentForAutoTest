@@ -8,7 +8,7 @@ import { conversationTerminalMention, jobTerminalMention } from './requester-men
 import { isAdministrator, isTaskCreator } from './authorization.js';
 export const questionTitle = text => publicText(text).replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/\*\*|__|~~|`/g, '').replace(/\s+/g, ' ').trim().slice(0,60) || '附件问题';
 const pending = (turn) => ['queued', 'thinking', 'decided'].includes(turn.status);
-export const activeQuestionJob = (job) => ['queued', 'running', 'cancelling', 'awaiting_approval', 'awaiting_clarification', 'awaiting_environment_approval'].includes(job?.status);
+export const activeQuestionJob = (job) => ['queued', 'running', 'cancelling', 'paused', 'awaiting_approval', 'awaiting_clarification', 'awaiting_environment_approval'].includes(job?.status);
 
 // A reply is an explicit association. Never infer a question from model prose or the latest user in the group.
 export function attachQuestion(state, turn, event, projects) {
@@ -58,7 +58,7 @@ export function questionView(state, questionId, projects = {}) {
   card.header.subtitle.content = `${q.id} · ${label}`;
   card.config.summary.content = `${questionTitle(q.title)} · ${label}`;
   if (useJob) {
-    const roles = { developer: '开发', owner_report: '负责人汇总', owner_intake: '负责人', pm: 'PM', qa: '测试', owner_audit: '审计' };
+    const roles = { requirement_test: '需求测试', developer: '开发', owner_report: '负责人汇总', owner_intake: '负责人', pm: 'PM', qa: '测试', owner_audit: '审计' };
     const stages = state.jobs.filter((item) => item.questionId === q.id).map((item) => item.stage);
     const flow = stages.filter((stage, index) => stage !== stages[index - 1]).slice(-6)
       .map((stage, index, compact) => `${roles[stage] ?? '处理'}${index < compact.length - 1 ? ' ✓' : ''}`).join(' → ');

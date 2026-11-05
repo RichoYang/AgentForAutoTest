@@ -6,7 +6,7 @@ import {ContactChannels} from './contact-channels.js';
 import {isPrivate,cardDestination} from './private-cards.js';
 import {ContactDirectory} from './contact-directory.js';
 import {ReportDelivery} from './report-delivery.js';
-import {validateReportFiles} from '../shared/report-files.js';
+import {reportFile,validateReportFiles} from '../shared/report-files.js';
 import { TeamKnowledgeService } from './team-knowledge.js';
 import { queryRejection } from '../shared/query-repair.js';
 import { enrollmentTarget } from './environment-enrollment.js';
@@ -19,7 +19,8 @@ import { publishQuestion, questionJob, questionView } from './questions.js';
 import http from 'node:http';
 import { createReadStream } from 'node:fs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { controlConfig, loadAgents, loadProjects, saveProjects } from './config.js';
 import { FeishuClient, parseFeishuMessage } from './feishu.js';
@@ -37,6 +38,7 @@ import { handleCardAction } from './card-actions.js';
 import { jobTerminalMention } from './requester-mention.js';
 import { adminOverview, adminRecordDetail, adminRecords } from './admin-view.js';
 import { CODEX_MODELS, CODEX_REASONING_EFFORTS, loadCodexRuntimeSettings, saveCodexRuntimeSettings } from '../shared/codex-runtime.js';
+import { handleRequirementMessage, validateRequirementRoutes } from './requirement-testing.js';
 
 const adminDirectory = fileURLToPath(new URL('./admin/', import.meta.url));
 
@@ -45,6 +47,10 @@ export async function createControlPlane(overrides = {}) {
   await loadEnvironments();
   const projects = overrides.projects ?? await loadProjects(config.projectsFile);
   const agents = overrides.agents ?? await loadAgents(config.agentsFile);
+  const requirementRoutes = validateRequirementRoutes(projects, agents);
+  if (requirementRoutes.size && config.feishu.transport !== 'lark-cli') {
+    throw new Error('Requirement testing requires verified local Feishu event sources');
+  }
   const store = new JsonStore(config.storeFile);
   await store.reconcileLegacyResults();
   await store.reconcileInvestigationState(agents.agents?.owner_intake?.profile ?? null);
@@ -56,7 +62,7 @@ export async function createControlPlane(overrides = {}) {
   const authorizeBrowser = async (initial,waiting,request)=>{const current=await store.getJob(initial.id);if(current?.status==='awaiting_clarification'&&current?.result?.browserLoginRequired){const type=request.resourceType();const tail=new URL(request.url()).pathname.split('/').at(-1);return type==='document'||['script','stylesheet','image','font'].includes(type)||/^(login|signin|authenticate|auth|captcha|verify)$/i.test(tail);}if(current?.status!=='running')return false;verifyApprovedPlan(await loadEnvironments(),current.environmentAccess);return true;};
   const browserMode = process.env.AGENTOS_BROWSER_MODE ?? (process.platform === 'darwin' ? 'shared-chrome' : 'isolated');
   if (!['shared-chrome','isolated'].includes(browserMode)) throw new Error('Invalid AGENTOS_BROWSER_MODE');
-  const context = { config, projects, agents, store, feishu, adminSessionToken: randomBytes(32).toString('base64url'),
+  const context = { config, projects, agents, store, feishu, requirementRoutes, adminSessionToken: randomBytes(32).toString('base64url'),
     websiteBrowser: overrides.websiteBrowser ?? (browserMode === 'shared-chrome' ? new SharedChromeBrowser(authorizeBrowser) : new WebsiteBrowser(config.dataDir,undefined,authorizeBrowser)) };
   context.cloudFiles=overrides.cloudFiles??new CloudFiles(context);
   context.controlReceipts=new ControlReceipts(store);
@@ -105,7 +111,7 @@ export async function createControlPlane(overrides = {}) {
     conversations.start().catch((error) => console.error('[conversation-start]', error.message));
   });
   server.once('close', () => { cards.stop();void (async()=>{await context.retention.close();await Promise.allSettled([conversations.stop(),context.reports.close(),context.websiteBrowser.close(),context.knowledge.close()]);})(); });
-  return { server, config, projects, agents, store, conversations, cards, retention:context.retention };
+  return { server, config, projects, agents, store, requirementRoutes, conversations, cards, retention:context.retention };
 }
 
 export async function repairStaleTerminalQuestionCards(context) {
@@ -195,6 +201,13 @@ async function route(context) {
     return json(response, 200, { ok: true, service: 'agentos-control-plane', conversationEngine: 'codex', conversationProtocol: 3,
       conversationScope: 'question-profile-project-v2',
       questionCards: context.conversations.questionCards, environmentAccessPolicy: 'scoped-read-auto-v2',
+      requirementProjects: [...context.requirementRoutes.values()].map(route => ({
+        projectId: route.projectId, environment: route.test.environment?.name ?? null,
+        executionAdapterConfigured: Boolean(route.test.adapter || route.test.execution),
+        releaseManifestConfigured: Boolean(route.test.execution?.releaseManifest?.path),
+        releaseRequiredComponents: Object.keys(route.test.execution?.releaseManifest?.components ?? {}).length,
+        releaseEvidencePolicy: 'case-scoped',
+      })),
       investigationConvergence: 'evidence-progress-v1', stateStorage: 'bounded-context-json-v1',
       controlRequestProtocol: CONTROL_PROTOCOL, stateReadPolicy:'stat-cache-detached-v1', stateProjectionPolicy:'detached-select-singleflight-v1',retention:context.retention.status(),stateReads:store.readMetrics,processMemory:{rssBytes:process.memoryUsage().rss,heapUsedBytes:process.memoryUsage().heapUsed,heapTotalBytes:process.memoryUsage().heapTotal}, pendingControlRequests:context.controlReceipts.pending.size, stateTransaction:store.lastTransaction??null,
       memoryPolicy: 'question-native-or-sender-extractive-v2', memoryStatus: context.conversations.memory.status,
@@ -435,6 +448,24 @@ async function route(context) {
       verifyCompletedPlan(await loadEnvironments(),job.environmentAccess??{},body.result.environmentEvidence);
       body.result.exportFiles=await validateReportFiles(config.dataDir,job.id,body.result.exportFiles);
     }
+    if (body.type === 'completed' && job.workflow === 'requirement_test' && body.result?.outcome === 'ready'
+      && !body.result.requirementReport) throw new Error('Requirement test completion needs a verified workbook');
+    if (body.type === 'completed' && body.result?.requirementReport) {
+      if (job.workflow !== 'requirement_test' || body.result.requirementReport.kind !== 'requirement-xlsx'
+        || body.result.outcome !== 'ready') throw new Error('Invalid requirement report registration');
+      await reportFile(config.dataDir, job.id, body.result.requirementReport, { includeContent: false });
+    }
+    if (job.workflow === 'requirement_test' && ['cancelled', 'failed'].includes(body.type)) {
+      const checkpoint = await readFile(path.join(config.dataDir, 'requirement-tests', job.id, 'journal.json'), 'utf8')
+        .then(JSON.parse, () => null).catch(() => null);
+      const pending = checkpoint?.cleanup?.verified !== true && Boolean(checkpoint?.mutations?.length || checkpoint?.inFlight);
+      body.result = {
+        finalMessage: (body.type === 'cancelled' ? job.requirement?.stopMode === 'pause' ? '需求测试已暂停，可回复继续测试。' : '需求测试已取消。' : '需求测试执行中断。')
+          + (pending ? '本轮有待核对的业务状态，已保留变更和证据。请在原话题 @ 专员并回复“恢复清理”。'
+            : '已保留本轮检查点。'),
+        requirementWait: pending ? 'cleanup_pending' : null,
+      };
+    }
     let committedEvent;
     const result=await commitControl(context,async()=>{committedEvent=await store.appendEvent(job.id,body,routing);return {ok:true,job:committedEvent.job};});
     if(['completed','failed','cancelled'].includes(body.type)&&!body.result?.browserLoginRequired)await context.websiteBrowser.release(job.id);
@@ -509,6 +540,9 @@ export async function handleLarkCliEvent(context, event) {
   if(expiredMessage(event,context.config.retention))return {ignored:true,reason:'local_retention_expired'};
   if (event.type !== 'im.message.receive_v1' || ['bot', 'app'].includes(event.sender_type)) return null;
   if (context.projects.retiredChatIds?.includes(event.chat_id)) return { ignored: true, reason: 'retired_group' };
+  if (context.projects.messageExcludedChatIds?.includes(event.chat_id)) return { ignored: true, reason: 'dedicated_requirement_chat' };
+  if (context.requirementRoutes?.has(event.agent_profile)) return handleRequirementMessage(context, event);
+  if (context.requirementRoutes?.size) return { ignored: true, reason: 'requirement_profile_required' };
   const messageId = event.message_id ?? event.id;
   const role = event.agent_role ?? 'owner_intake';
   const sourceProfile = event.agent_profile ?? null;

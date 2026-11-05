@@ -25,7 +25,7 @@ AI 可以完成大部分技术步骤，但不能代替真人完成账号登录�
 1. 飞书实施手册：
    https://weilongmeiwei.feishu.cn/docx/PAsOd7Zq4oHNlAxhWCjcIXMSnqg
 2. AgentOS GitHub 仓库：
-   https://github.com/angelaboy0113/agentos
+   https://github.com/RichoYang/AgentForAutoTest
 3. 克隆仓库后必须阅读：AGENTS.md、README.md、docs/getting-started.md、
    docs/ai-deployment-prompt.md、docs/architecture.md、docs/storage-and-data.md、
    docs/team-knowledge.md、SECURITY.md、

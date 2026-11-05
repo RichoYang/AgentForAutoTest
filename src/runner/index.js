@@ -12,6 +12,12 @@ export class AgentRunner {
     this.stopped = false;
   }
 
+  get capabilities() {
+    return Object.values(this.config.projects ?? {}).some(project => project.requirementTest)
+      ? ['requirement_test', 'owner_intake', 'pm', 'developer', 'qa', 'owner_audit', 'owner_report']
+      : ['owner_intake', 'pm', 'developer', 'qa', 'owner_audit', 'owner_report'];
+  }
+
   async start() {
     if (!this.config.runnerToken) throw new Error('AGENTOS_RUNNER_TOKEN is required');
     console.log(`[runner] ${this.config.runnerId} started with ${this.config.executor} executor`);
@@ -35,14 +41,14 @@ export class AgentRunner {
       platform: process.platform,
       nodeVersion: process.version,
       executor: this.config.executor,
-      capabilities: ['owner_intake', 'pm', 'developer', 'qa', 'owner_audit', 'owner_report'],
+      capabilities: this.capabilities,
     });
   }
 
   async lease() {
     const response = await this.post('/api/v1/jobs/lease', {
       runnerId: this.config.runnerId,
-      capabilities: ['owner_intake', 'pm', 'developer', 'qa', 'owner_audit', 'owner_report'],
+      capabilities: this.capabilities,
     });
     return response.job;
   }

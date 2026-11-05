@@ -83,7 +83,7 @@ export function jobCard(job, now = Date.now(), { startAt = job.createdAt } = {})
   const labels = { running: ['执行中', 'blue'], queued: ['等待执行', 'blue'], completed: ['当前阶段已完成', 'green'],
     awaiting_environment_approval: ['待环境负责人批准查询', 'orange'],
     awaiting_approval: ['待真人确认', 'orange'], awaiting_clarification: ['待补充信息', 'orange'],
-    blocked: ['任务受阻 / 未通过', 'red'], failed: ['执行失败', 'red'], cancelled: ['已取消 / 已停止', 'grey'],
+    blocked: ['任务受阻 / 未通过', 'red'], failed: ['执行失败', 'red'], cancelled: ['已取消 / 已停止', 'grey'], paused: ['已暂停', 'grey'],
     cancelling: ['正在停止', 'orange'], resubmitted: ['补充已提交', 'blue'] };
   const terminalState = ['completed', 'blocked', 'failed', 'cancelled'].includes(job.status);
   const [label, color] = expired ? ['查询申请已过期 · 可重新申请', 'orange'] : !terminalState && job.result?.browserActionRequired === 'automation' ? ['等待本机浏览器授权 · 放行后自动继续', 'orange'] : !terminalState && job.result?.browserLoginRequired ? ['等待本机登录 · 登录后自动继续', 'orange'] : job.taskIntent === 'analysis' && job.result?.outcome === 'partial' && ['completed', 'awaiting_approval'].includes(job.status)
@@ -122,7 +122,7 @@ export function jobCard(job, now = Date.now(), { startAt = job.createdAt } = {})
   if (job.taskIntent === 'analysis') metadata?.push(md(job.environmentAccess ? '环境只读查询 · 不修改数据库或配置' : '只读分析 · 不修改代码', true));
   if (job.nextJobId) metadata?.push(md(`已交给项目负责人汇总 · ${publicText(job.nextJobId)}`, true));
   if (job.delegation) metadata?.push(md(`协作：${stageLabel(job.delegation.fromStage)} → ${stageLabel(job.delegation.toStage)}`, true));
-  if (job.status === 'awaiting_clarification' && !job.result?.browserLoginRequired) elements.push({ tag: 'form', name: 'clarification_form', elements: [
+  if (job.status === 'awaiting_clarification' && job.workflow !== 'requirement_test' && !job.result?.browserLoginRequired) elements.push({ tag: 'form', name: 'clarification_form', elements: [
     { tag: 'input', name: 'clarification', input_type: 'multiline_text', rows: 3, max_length: 1000, required: true,
       width: 'fill', placeholder: { tag: 'plain_text', content: '填写需要补充的范围、路径或验收要求…' } },
     { tag: 'button', name: `clarify_${jobActionVersion(job)}`, form_action_type: 'submit', type: 'primary_filled',

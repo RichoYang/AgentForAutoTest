@@ -1,6 +1,8 @@
 # Angel AgentOS
 
-**成品版本：v1.44.0** · GitHub：<https://github.com/angelaboy0113/agentos>
+**程序版本：v1.45.0** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
+
+本项目的源码、后续修改和提交统一维护在此仓库。历史验证覆盖包的合并关系及维护约定见 [源码维护](docs/source-maintenance.md)。
 
 第一次部署请按顺序阅读：
 
@@ -15,8 +17,8 @@
 最短入口：
 
 ```powershell
-git clone https://github.com/angelaboy0113/agentos.git
-Set-Location .\agentos
+git clone https://github.com/RichoYang/AgentForAutoTest.git
+Set-Location .\AgentForAutoTest
 npm ci
 .\scripts\initialize-local.ps1
 .\scripts\doctor.ps1
@@ -28,6 +30,8 @@ npm ci
 启动成功后，在运行 AgentOS 的同一台电脑打开 <http://127.0.0.1:8787/admin>。这是本机管理入口，用于查看运行状态、任务与回复记录、处理耗时，并调整 AgentOS 使用的 Codex 模型和推理强度。管理页面不负责启动 AgentOS；服务未运行时页面也不会打开。模型设置对新任务和新会话生效，正在执行的任务不会被中途切换。详细说明见 [本机管理控制台](docs/admin-console.md)。
 
 项目修改须遵循 [AGENTS.md](./AGENTS.md) 的角色、验证和文档一致性要求；公开仓库不包含本机运行数据或内部飞书同步快照。
+
+独立项目测试工程师可使用现有应用接入[需求测试工作流](docs/requirement-testing.md)。在话题里单独 @ 项目机器人并发送需求链接，项目绑定、飞书文档身份、SIT 资源和执行适配器由部署者配置。
 
 基于飞书群聊驱动本地 Codex 的开发团队控制面。当前版本已支持两种接入方式：本机直接复用 `lark-cli` 长连接（无需公网域名），或由公网 HTTPS 控制面接收飞书回调。开发电脑上的 Runner 主动领取任务：代码修改使用隔离 Git worktree，只读分析使用配置的真实源码目录；关键状态回传飞书。
 

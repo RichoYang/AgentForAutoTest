@@ -10,7 +10,7 @@ import { runnerConfig } from '../runner/config.js';
 async function main() {
   const adminToken = process.env.AGENTOS_ADMIN_TOKEN || randomBytes(32).toString('hex');
   const runnerToken = process.env.AGENTOS_RUNNER_TOKEN || randomBytes(32).toString('hex');
-  const { server, config, projects, agents, store } = await createControlPlane({
+  const { server, config, projects, agents, store, requirementRoutes } = await createControlPlane({
     adminToken,
     runnerToken,
     feishu: { transport: 'lark-cli' },
@@ -23,6 +23,8 @@ async function main() {
     serverUrl: `http://${config.host}:${config.port}`,
     adminToken: config.adminToken,
     dataDir: config.dataDir,
+    requirementRoutes,
+    excludedMessageChats: projects.messageExcludedChatIds,
     editedMentions: (await loadConversationSettings(config.conversationFile)).editedMentions,
     watchedChatIds: Object.keys(projects.chatProjectMap ?? {}).filter(id=>!projects.retiredChatIds?.includes(id)),
     cliEntry: config.feishu.cliEntry,

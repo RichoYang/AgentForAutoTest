@@ -21,7 +21,7 @@ async function* records(file,maxBytes){
 }
 // Temporary transport copies are derived only from an already verified report.
 // No caller-selected destination or global download URL is accepted.
-export async function prepareReportParts(file,{maxBytes=FEISHU_FILE_PART_BYTES}={}){
+export async function prepareReportParts(file,{maxBytes=FEISHU_FILE_PART_BYTES,binary=false}={}){
  if(!Number.isSafeInteger(maxBytes)||maxBytes<16)throw new Error('文件分卷大小无效');
  const info=await stat(file);
  if(info.size<=maxBytes)return {parts:[{file,name:path.basename(file),bytes:info.size,sha256:await hashFile(file)}],close:async()=>{}};
@@ -32,6 +32,7 @@ export async function prepareReportParts(file,{maxBytes=FEISHU_FILE_PART_BYTES}=
  try{
   let header,mode='csv';
   try{
+   if(binary)throw new WideRecord();
    for await(const record of records(file,maxBytes)){
     if(!header){header=record;if(header.length>=maxBytes)throw new WideRecord();continue;}
     if(header.length+record.length>maxBytes)throw new WideRecord();
@@ -50,7 +51,9 @@ export async function prepareReportParts(file,{maxBytes=FEISHU_FILE_PART_BYTES}=
     let offset=0;while(offset<chunk.length){if(!current)await start(Buffer.alloc(0),'.bin');const n=Math.min(maxBytes-current.bytes,chunk.length-offset);await current.handle.writeFile(chunk.subarray(offset,offset+n));current.bytes+=n;offset+=n;if(current.bytes===maxBytes)await finish();}
    }await finish();
   }
-  const originalSha256=await hashFile(file),name=path.basename(file,'.csv')+'.README.txt',instructions=mode==='csv'
+  const originalSha256=await hashFile(file),name=path.basename(file,'.csv')+'.README.txt',instructions=binary
+   ? '这些二进制分卷按 part 编号顺序拼接后还原原 XLSX；请核对原文件 SHA-256。'
+   : mode==='csv'
    ? '这些CSV分卷均可用Excel独立打开，每卷重复表头。按part编号依次查看；合并时仅保留第一卷表头。单元格内换行保留，未截断或丢弃记录。'
    : '单条CSV记录超过飞书单文件容量，故发送原文件的二进制分卷；.bin不能单独用Excel打开。在同一目录按文件名顺序拼接后恢复CSV。\nmacOS/Linux: cat '+path.basename(file,'.csv')+'.part*.bin > '+path.basename(file)+'\nWindows PowerShell: $o=[IO.File]::Create("'+path.basename(file)+'"); try { Get-ChildItem "'+path.basename(file,'.csv')+'.part*.bin" | Sort-Object Name | ForEach-Object { $s=[IO.File]::OpenRead($_.FullName); try {$s.CopyTo($o)} finally {$s.Dispose()} } } finally {$o.Dispose()}';
   const content='AgentOS完整文件分卷交付\n原文件：'+path.basename(file)+'\n原文件字节数：'+info.size+'\n原文件SHA-256：'+originalSha256+'\n'+instructions+'\n'+parts.map(p=>p.name+' | bytes='+p.bytes+(mode==='csv'?' | 数据行='+p.rows:'')+' | sha256='+p.sha256).join('\n')+'\n';

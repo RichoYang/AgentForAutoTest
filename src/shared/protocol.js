@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 export const WORKFLOWS = {
+  requirement_test: ['requirement_test'],
   analysis_review: ['developer', 'owner_report'],
   continuous_analysis: ['developer'],
   full_delivery: ['owner_intake', 'pm', 'developer', 'qa', 'owner_audit', 'owner_report'],
@@ -96,6 +97,7 @@ export function nextStage(workflow, currentStage) {
 
 export function stageLabel(stage) {
   return ({
+    requirement_test: '需求测试',
     owner_intake: '项目负责人受理',
     pm: 'PM需求与Spec',
     developer: '开发实现',

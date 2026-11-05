@@ -3,7 +3,9 @@ import {lstat,realpath,readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import path from 'node:path';
 export async function reportFile(dataDir,jobId,item,{includeContent=true}={}){
- if(!/^[A-Za-z0-9_-]{1,100}$/.test(jobId)||!/^report-[a-f0-9-]{36}$/.test(item?.id??'')||item.filename!==item.id+'.csv'||item.complete!==true||!Number.isSafeInteger(item.rowCount)||item.rowCount<0||!Number.isSafeInteger(item.bytes)||item.bytes<1||!/^[a-f0-9]{64}$/.test(item.sha256??''))throw new Error('报表文件登记信息无效');
+ const workbook=item?.kind==='requirement-xlsx';
+ const validName=workbook?typeof item.filename==='string'&&/^[^<>:"/\\|?*\x00-\x1f]+\.xlsx$/.test(item.filename):item?.filename===item?.id+'.csv';
+ if(!/^[A-Za-z0-9_-]{1,100}$/.test(jobId)||!/^report-[a-f0-9-]{36}$/.test(item?.id??'')||!validName||item.complete!==true||!Number.isSafeInteger(item.rowCount)||item.rowCount<0||!Number.isSafeInteger(item.bytes)||item.bytes<1||!/^[a-f0-9]{64}$/.test(item.sha256??''))throw new Error('报表文件登记信息无效');
  const root=await realpath(path.join(dataDir,'exports')),file=path.join(dataDir,'exports',jobId,item.filename);
  const jobRoot=path.join(dataDir,'exports',jobId),jobInfo=await lstat(jobRoot),jobActual=await realpath(jobRoot);
  if(jobInfo.isSymbolicLink()||!jobActual.startsWith(root+path.sep))throw new Error('报表任务目录无效');
@@ -16,6 +18,9 @@ export async function reportFile(dataDir,jobId,item,{includeContent=true}={}){
  const body=await readFile(receiptPath);if(createHash('sha256').update(body).digest('hex')!==item.verificationHash)throw new Error('报表核验记录摘要不符');
  const receipt=JSON.parse(body.toString());
  if(receipt.version!==1||receipt.status!=='verified'||receipt.file?.sha256!==item.sha256||receipt.file?.id!==item.id||receipt.coverage?.rowCount!==item.rowCount)throw new Error('报表核验记录与文件不符');
+ if(workbook&&(receipt.kind!==item.kind||receipt.file.filename!==item.filename||receipt.schemaVersion!=='1.0'||receipt.sheetCount!==15
+   ||!(/^[a-f0-9]{64}$/.test(receipt.visualReviewHash??''))
+   ||Object.keys(receipt.previewHashes??{}).length!==15||Object.values(receipt.previewHashes).some(value=>!/^[a-f0-9]{64}$/.test(value))))throw new Error('需求测试工作簿缺少专用构建器核验回执');
  return {file:actual,...(includeContent?{content:await readFile(actual)}:{})};
 }
 export async function validateReportFiles(dataDir,jobId,files){

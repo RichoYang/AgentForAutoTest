@@ -2,6 +2,14 @@
 
 遵循上级工作区 AGENTS.md。本文件补充 AgentOS 专属要求。
 
+## 本部署的源码与推送约定（2026-11-05）
+
+- 用户指定的统一源码仓库为 `https://github.com/RichoYang/AgentForAutoTest`，维护分支为 `main`；本机正式工作目录为 `D:\DevelopProject\AgentOS`。原上游仅保留为 `upstream` 参考，不向原上游推送本项目修改。
+- 在该电脑参与本项目时，先读取 `D:\Develop\AgentForAutoTest\AGENTS.md`、`Agent.md`、`Memory.md`，再按当前任务确定范围；记忆待办不自动成为执行授权。
+- 后续涉及 AgentOS 源码的授权修改，在完成适用检查后提交并推送至上述仓库。认证从本机 `D:\DevelopProject\config.ini` 的 `[GitHubKey]` 节读取 `admin_key`；只用于当前进程鉴权，不输出密钥，不写入远端 URL、Git 配置、源码、日志或提交。
+- `AgentOS-isolation-evidence-20261104` 与 `AgentOS-isolation-evidence-20261105` 是历史补丁及验证证据，不再作为独立源码维护。两批补丁和之后的修复已汇入正式工作树；不要用旧覆盖包回盖新源码。
+- 提交、推送与部署分别记录。源码推送不自动授权重启专员、执行真实需求或业务数据写入。合并关系和维护步骤见 [源码维护](docs/source-maintenance.md)。
+
 ## AI 开发规范与 AgentOS 的边界
 
 - 团队工程规范的入口在 `config/harness.json`，可替换为部署团队自己的权威规范来源；实际随程序执行的共同与岗位约束在 `config/roles/`。

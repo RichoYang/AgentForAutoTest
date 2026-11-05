@@ -104,8 +104,13 @@ export class LarkEventSource {
       await rename(`${file}.tmp`, file);
       return this.deliverCallback(file);
     }
-    if (event.type !== 'im.message.receive_v1' || event.sender_type === 'bot') return;
+    if (event.type !== 'im.message.receive_v1' || event.sender_type === 'bot' || this.config.excludedMessageChats?.includes(event.chat_id)) return;
     if (!isForThisBot(event, this.config.botOpenId)) return;
+    if (this.config.requirementBot) {
+      if (event.app_id && event.app_id !== this.config.requirementBot.appId) return;
+      event.receiving_app_id = this.config.requirementBot.appId;
+      event.receiving_bot_id = this.config.requirementBot.openId;
+    }
     event.agent_profile = this.config.profile ?? null;
     event.agent_role = this.config.role ?? null;
     event.attachments = await this.downloadAttachments(event);
@@ -194,6 +199,12 @@ export async function startLarkEventSource(config) {
   await mkdir(cwd, { recursive: true });
   if (!config.reuseIsolatedConfig) await prepareIsolatedConfig(configDir, config.larkConfigFile);
   const source = new LarkEventSource({ ...config, cwd, configDir });
+  if (config.requirementBot && config.eventKey !== 'card.action.trigger') {
+    const options = { cliEntry: config.cliEntry, profile: config.profile, configDir };
+    const identity = await runLarkCli(['auth', 'status', '--verify', '--json'], options);
+    if (identity.appId !== config.requirementBot.appId || identity.identities?.bot?.openId !== config.requirementBot.openId
+      || identity.identities.bot.verified !== true) throw new Error('Feishu requirement robot identity verification failed');
+  }
   console.log(`[lark-event] starting ${config.role ?? 'default'} via profile ${config.profile ?? 'default'} in ${configDir}`);
   const running = source.start();
   if(config.eventKey!=='card.action.trigger' && config.editedMentions?.enabled && config.editedMentions.profiles.includes(config.profile) && config.botOpenId) {
@@ -227,6 +238,7 @@ export function larkEventSourcePlans(config, agents = {}) {
       role: agent.routeFromText ? null : role,
       profile: agent.profile || null,
       botOpenId: agent.openId,
+      requirementBot: config.requirementRoutes?.get(agent.profile)?.test.bot,
     };
     plans.push(scoped);
     // Both subscriptions share this bot's bus and isolated auth, never another bot's profile.
@@ -239,7 +251,7 @@ export function larkEventSourcePlans(config, agents = {}) {
 export function isForThisBot(event, botOpenId) {
   if (!Array.isArray(event.mentions) || event.mentions.length === 0) return true;
   if (!botOpenId) return event.chat_type === 'p2p';
-  return event.mentions.some((mention) => [mention.id, mention.open_id, mention.user_id]
+  return event.mentions.some((mention) => [mention.id?.open_id ?? mention.id, mention.open_id, mention.user_id]
     .filter(Boolean).includes(botOpenId));
 }
 
