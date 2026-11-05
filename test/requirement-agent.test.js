@@ -56,6 +56,44 @@ test('source search reads the selected repository when child stdin is a pipe', a
   assert.throws(() => validateRouteTemplate('/page?key={$input:"key"}', '$.spec.path'), /spec.path uses \{parameter\}/);
 });
 
+test('connector retains public authenticated identity and rejects changed or secret identities across recovery', async t => {
+  let userId = 'operator-A', loginCount = 0, writes = 0;
+  const server = createServer(async (req, res) => {
+    if (req.url === '/login') {
+      for await (const _ of req) { /* consume fixture credentials without logging */ }
+      loginCount++; res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify({ data: { userId, token: 'private-session', password: 'never-export' } }));
+    }
+    if (req.url === '/preference') { writes++; return res.end('{}'); }
+    res.setHeader('content-type', 'text/html');
+    res.end('<input id="account"><input id="password"><button id="login" onclick="fetch(\'/login\',{method:\'POST\'})">login</button>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const resource = { base_url: 'http://127.0.0.1:' + server.address().port, username: 'fixture', password: 'secret' };
+  const config = { login: { resource: 'platform', path: '/login', tokenField: ['data', 'token'],
+    identityFields: { userId: ['data', 'userId'] }, accountSelector: '#account', passwordSelector: '#password', submitSelector: '#login' } };
+  const open = settings => createAgentResources(settings, { state: { operations: {} } });
+  const first = open(config);
+  const proof = await first.authenticationEvidence('platform', resource);
+  assert.deepEqual(proof.identity, { userId: 'operator-A' });
+  assert.equal(proof.response.data.token, '[REDACTED]'); assert.equal(proof.response.data.password, '[REDACTED]');
+  assert.doesNotMatch(JSON.stringify(proof), /private-session|never-export/);
+  await first.verifyAuthentication('platform', resource, proof);
+  await assert.rejects(first.verifyAuthentication('platform', resource, { identity: { userId: 'operator-other' } }), /identity changed/);
+  assert.equal(await first.authenticationEvidence('unrelated', resource), null);
+  assert.equal(loginCount, 1); await first.close();
+  userId = 'operator-B';
+  const recovered = open(config);
+  await assert.rejects(recovered.verifyAuthentication('platform', resource, proof), /identity changed/);
+  assert.equal(writes, 0); await recovered.close();
+  const badConfig = structuredClone(config); badConfig.login.identityFields.userId = ['data', 'token'];
+  const invalid = open(badConfig);
+  await assert.rejects(invalid.authenticationEvidence('platform', resource), /not a public identity/);
+  await assert.rejects(invalid.authenticationEvidence('platform', resource), /not a public identity/);
+  assert.equal(loginCount, 4); await invalid.close();
+});
+
 test('adapter upgrade advances an interrupted attempt once and leaves untouched retry cases unchanged', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-attempt-')); t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, 'reports'));
@@ -123,6 +161,9 @@ test('resource form credentials stay inside the connector and browser faults are
   const operation = { kind: 'http', access: 'read', resource: 'scheduler', path: '/protected', method: 'GET' };
   assert.equal((await runtime.performSpec(operation, {}, resource)).body.authenticated, true);
   assert.equal((await runtime.performSpec(operation, {}, resource)).body.authenticated, true); assert.equal(logins, 1);
+  const request = await runtime.performSpec({ kind: 'http', access: 'read', resource: 'platform', method: 'GET',
+    path: '/amount?account={account}', query: { period: { $input: 'period' }, token: 'never-export' }, authenticated: false }, { account: 'A & B', period: '2027-04' }, resource);
+  assert.deepEqual(request.request.query, { account: 'A & B', period: '2027-04', token: '[REDACTED]' });
   const page = args => runtime.browser({ resource: 'platform', ...args });
   await page({ action: 'fault', operation: 'amount', delayMs: 100, status: 200, body: { amount: 0 } });
   await page({ action: 'goto', path: '/' });
@@ -172,6 +213,43 @@ test('multi-object steps bind independently, wrong candidate is rejected, and as
   assert.equal((await adapter.execute({ ...pageScope, preparation: await adapter.prepare(pageScope) })).status, '通过');
 });
 
+test('a page screenshot cannot launder captured API values into a page assertion', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-page-origin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, 'source.js'), 'GET /amount returns {key:"A",amount:100}; read-only');
+  const server = createServer((req, res) => {
+    if (req.url === '/amount') { res.setHeader('content-type', 'application/json'); return setTimeout(() => res.end('{"key":"A","amount":100}'), 100); }
+    res.setHeader('content-type', 'text/html');
+    res.end('<input id="key" value="A"><input id="amount" value="0"><div id="busy">loading</div><script>fetch("/amount").then(r=>r.json()).then(()=>document.querySelector("#busy").remove())</script>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const adapter = createRequirementAgent({}, { workDir: root, review: async () => ({ accepted: true, errors: [] }),
+    agentModel: async ({ call }) => ({ close: async () => {}, async turn() {
+      const invoke = (name, args) => call('test_' + name, { args }, name);
+      const source = await invoke('source', { action: 'read', path: 'source.js' });
+      await invoke('register', { name: 'amount', reason: 'Fixture read contract', sourceRefs: [source.sourceRef], spec: { kind: 'http', resource: 'platform', method: 'GET', path: '/amount', access: 'read', authenticated: false } });
+      await invoke('observe', { operation: 'amount', input: {}, subject: { key: 'A' } });
+      await invoke('plan', { version: 1, steps: ['Open page and wait until business load finishes'], prerequisites: [], checks: [
+        { id: 'amount', line: 1, requirement: '页面金额100元', channel: 'page', subject: { key: 'A' }, expected: 100,
+          operator: 'equals', type: 'number', unit: '元', basis: { quote: '页面金额100元' } }] });
+      await invoke('browser', { resource: 'platform', action: 'goto', path: '/' });
+      const observed = await invoke('browser', { resource: 'platform', action: 'observe', ready: { selector: '#busy', state: 'hidden' }, fields: { key: { selector: '#key', read: 'input' }, amount: { selector: '#amount', read: 'input' } } });
+      assert.equal(observed.data.network.find(entry => entry.path === '/amount').body.amount, 100);
+      const args = { checkId: 'amount', observationId: observed.observationId, field: ['network', 0, 'body', 'amount'], identity: [{ dimension: 'key', field: ['values', 'key'] }] };
+      await assert.rejects(invoke('assert', args), /observed DOM values/);
+      await assert.rejects(invoke('assert', { ...args, field: ['values', 'amount'], identity: [{ dimension: 'key', field: ['network', 0, 'body', 'key'] }] }), /observed DOM values/);
+      const compared = await invoke('assert', { ...args, field: ['values', 'amount'] });
+      assert.equal(compared.passed, false);
+      await invoke('finish', { actual: '页面实际0元，接口100元；页面不符合预期。', classification: '产品' });
+      return { text: 'Recorded page failure' };
+    } }) });
+  const result = await adapter.execute({ item: { caseId: 'PAGE' }, attempt: 1, checkOutput: value => value, reports: root, sourceRoot: root,
+    source: {}, headers: ['预期结果'], row: ['1. 页面金额100元'], standards: '', resourceNames: ['platform'],
+    useRead: (_, call) => call({ base_url: 'http://127.0.0.1:' + server.address().port }) });
+  assert.equal(result.status, '失败');
+});
+
 test('tool channel evidence cannot be relabelled and runner migrates an old unexecuted attempt without changing publication', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-tools-')); t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, 'reports')); await writeFile(path.join(root, 'source.js'), 'GET /budget returns {key:"A",amount:0}; read-only');
@@ -184,9 +262,18 @@ test('tool channel evidence cannot be relabelled and runner migrates an old unex
     results: { C1: { status: '未执行', actual: 'old unavailable', evidence: [] } }, mutations: [] };
   const originalPublication = structuredClone(journal.publication);
   const job = { id: 'JOB-local', projectId: 'demo', requirement: {} };
+  const priorObservation = { observationId: 'old-observation', caseKey: 'C1@1', channel: 'api',
+    data: { body: { key: 'A', amount: 100 } }, at: '2026-01-01T00:00:00Z' };
+  await writeFile(path.join(root, 'agent-tool-state.json'), JSON.stringify({ version: 1, operations: {}, sources: {}, schemas: {},
+    observations: { 'old-observation': priorObservation }, cases: { 'C1@1': { observations: ['old-observation'], aliases: {} } } }));
   let captured;
-  const agentModel = async ({ call }) => ({ close: async () => {}, async turn() {
+  const agentModel = async ({ call }) => ({ close: async () => {}, async turn(prompt) {
     const invoke = (name, args) => call('test_' + name, { args }, 'call-' + name);
+    assert.equal(JSON.parse(prompt).priorAttemptReference[0].caseKey, 'C1@1');
+    const history = await invoke('evidence', { observationId: 'old-observation' });
+    assert.equal(history.historical, true); assert.equal(history.usableForCurrentAssertion, false);
+    assert.equal(history.at, priorObservation.at); assert.equal(history.data.body.amount, 100);
+    await assert.rejects(invoke('alias', { alias: 'A', value: 'A', observationId: 'old-observation', field: ['body', 'key'] }), /case attempt/);
     const source = await invoke('source', { action: 'read', path: 'source.js' });
     await invoke('register', { name: 'budget', sourceRefs: [source.sourceRef], reason: 'read', spec: { kind: 'http', resource: 'platform', access: 'read', path: '/budget', method: 'GET', authenticated: false } });
     await invoke('register', { name: 'update_budget', sourceRefs: [source.sourceRef], reason: 'module permission fixture', spec: { kind: 'http', resource: 'platform', access: 'update', path: '/budget', method: 'PUT', authenticated: false } });
@@ -203,7 +290,10 @@ test('tool channel evidence cannot be relabelled and runner migrates an old unex
     await assert.rejects(invoke('plan', invalid), /subject.phase/);
     const stringLine = structuredClone(plan); stringLine.checks[0].line = '1';
     await assert.rejects(invoke('plan', stringLine), /checks\[0\]\.line must be a 1-based integer/);
+    const staleBaseline = structuredClone(plan); staleBaseline.checks[0].basis = { observationId: 'old-observation', field: ['body', 'amount'], explanation: 'historical baseline' };
+    await assert.rejects(invoke('plan', staleBaseline), /case attempt/);
     await invoke('plan', plan);
+    await assert.rejects(invoke('assert', { checkId: 'balance', observationId: 'old-observation', field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'key'] }] }), /case attempt/);
     const observed = await invoke('observe', { operation: 'budget', input: {}, subject: { account: 'A' } });
     await assert.rejects(invoke('assert', { checkId: 'balance', observationId: observed.observationId, field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'wrong'] }] }));
     captured = await invoke('assert', { checkId: 'balance', observationId: observed.observationId, field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'key'] }] });

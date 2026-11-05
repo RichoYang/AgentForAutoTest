@@ -18,7 +18,7 @@ const instructions = `你是项目需求测试专员。你必须亲自使用工�
 写入只用 mutate；必须有 before/after 回读条件、实际归属和可验证恢复操作，新建业务数据用 runPrefix。已有数据仅在资源目录 reversibleSharedWrites 或 sharedTargets 授权时用 shared=true，businessKey为回读可证明的原对象唯一ID，完整保存修改前状态并恢复；不能借共享许可新建无归属对象。失败或丢失回执后先查询并对账，不能盲目重提。
 前置可用 mutate purpose=prepare 构造，scenario 写入前用 plan 固定每个原预期的检查、渠道和独立预期。期望来自原文或已核实的初始数据，不得取本次待验证接口返回值充当期望。
 plan 检查按原预期编号逐项列全，UI 断言须 browser.observe 的真实页面状态及截图；金额按适用要求同时记录 API、数据库与守恒。每次切换主体和期间后重新观察并绑定。assert 由程序计算，不可自报 passed。
-浏览器 inspect 返回 DOM、拦截的 API；遇未登记 POST 时调查并登记查询再重试。等待 loading 消失、busy=false、请求版本等业务就绪信号，不以目标金额出现作为等待条件来隐藏错误。
+浏览器 inspect 返回 DOM、拦截的 API；遇未登记 POST 时调查实际语义：查询登记只读契约，真实初始化写入登记 browser goto/click 与 effect 后通过 mutate 回读恢复。仅登记 HTTP 写操作不会授权浏览器写入。等待 loading 消失、busy=false、请求版本等业务就绪信号，不以目标金额出现作为等待条件来隐藏错误。
 可恢复的参数、规划、查询、页面问题持续修正。有新证据时没有整任务时长或轮数上限。真实外部阻塞须说明具体资源、操作、已尝试替代路径及解除条件。最终用 finish 提交事实摘要；没有 finish 回执不得宣布用例完成。程序依据实际断言和台账判定，并负责清理与回读。`;
 
 const descriptions = {
@@ -27,7 +27,7 @@ const descriptions = {
   read_sql: '执行只读事务 SQL，结果完整落盘，模型按 offset/limit 取页。args:{resource,database,sql,params:[],offset?,limit?}，仅 SELECT/SHOW/DESCRIBE/EXPLAIN/WITH；禁止文件、锁或延时函数。返回 observationId。',
   register: '登记从源码发现的操作，经独立源码审查后可用。args:{name,sourceRefs:[sourceRef],reason,spec:{resource,kind:"http"|"database"|"browser",access:"read"|"create"|"update"|"delete"|"trigger",...}}。http:{path(支持/{id}参数),method,body?,query?,authenticated?}；database read:{database,sql,params}；database writes:{database,table,values?,where?,expectedRows}；browser writes:{action:"click",selector,effect:{path,method,body?}}或{action:"goto",path:"/页面路径",effect:{path,method,body?}}。导航触发的写入同样必须mutate并回读恢复。值用 {$input:"参数名"} 从调用 input 取。禁止存密钥；名字不可改变含义；读 POST 必须由源码证实，消息/调度入口也走 http 并记账。',
   observe: '调用登记的只读操作并保留完整响应。args:{operation,input:{},subject:{别名或维度:真实值},offset?,limit?}。返回 observationId 和 evidence，后续断言只能引用实际记录。',
-  evidence: '分页回读本 Job 证据。args:{observationId,field?:[路径],offset?,limit?}。不会重新查业务，也不会把历史时间改为现在。',
+  evidence: '分页回读本 Job 证据。args:{observationId,field?:[路径],offset?,limit?}。旧尝试带 historical=true，只作调查参考；断言/别名/前置基线仍须本次新观测。不会重新查业务或改写历史时间。',
   alias: '将用例代称绑定真实对象或期间以及来源。args:{alias,value,observationId,field:[路径],purpose}。value 必须等于观测字段；支持多对象、多期间和独立基线。',
   mutate: '唯一业务写入通道。args:{id,purpose:"prepare"|"scenario",operation,input:{},businessKey:"新建数据含runPrefix；授权已有数据使用原对象唯一ID",ownership:{field:[回读路径],value:归属键},verify:{operation:只读操作,input:{},stateFields?:[稳定业务状态路径，用于快照比较，省略则比较完整回读],before:[{field,operator:"equals"|"absent"|"contains",expected?}],after:[同格式]},restore:{operation:恢复写操作,input:{}},cleanupAction,shared?:false}。create前记录不存在，后回读确认唯一归属；update/delete之前确认归属。shared只对目录reversibleSharedWrites或sharedTargets授权的已有对象生效，仍须真实身份/快照/恢复。禁止将正常查询假装变更；重复 id 先对账。返回实际回执及 observationId。',
   browser: '本机真实浏览器，凭据由连接器登录。args:{resource,action:"goto"|"inspect"|"fill"|"click"|"select"|"check"|"wait"|"observe"|"fault"|"clear_fault",path?,selector?,value?,subject?:{},ready?:{selector,state:"hidden"|"visible"}|{selector,attribute,value}|{selector,text},fields?:{名称:{selector,read:"text"|"input"|"visible"|"count"|"attribute",attribute?}}}。click 仅导航或查询，业务提交必须登记 browser 操作后 mutate。observe 返回 values、真实截图和 observationId，text 返回数组。fault:{operation:登记只读HTTP名,delayMs?,abort?,status?,body?}只在本浏览器模拟该查询故障，全部证据标注模拟；clear_fault恢复，关闭会话自动解除。',
@@ -108,6 +108,8 @@ export function createRequirementAgent(config, options) {
       kind === 'mutation' ? '核对具体变更和恢复目标都与 verify 回读的唯一业务对象相同，归属声明能由快照与所引源码证明。创建时请求必须写入 businessKey 或对应的唯一关联；修改时请求 ID 必须来自该对象回读；恢复必须能还原快照且不影响其他对象。不能凭模型声明或仅同一资源判定目标一致；恢复触发的新副作用也要覆盖。'
       : kind === 'operation' ? '核对操作及 access 与所引源码是否一致。查询须有目标入口、核心业务实现和实际数据查询的证据，不能只凭模型声明、方法名或HTTP方法。核心业务链已明确查询时，标准ORM查询、DTO转换、查询条件构造、字典/权限读取等辅助逻辑不要求递归展开全部实现；没有具体写入线索时，不得因理论上任意辅助方法可能写入而无限追溯。跨服务调用按已提供的客户端契约、调用用途和业务实现综合判断；可见调用触发保存/提交/消息/调度或核心路径无法核实时拒绝并定位具体缺口。写操作须有实际入口或已检查数据库结构。不能允许跨项目资源、DDL、任意代码或把已知写入标成查询。'
         : '对照原用例完整预期逐条审核检查是否无弱化、遗漏或自证。页面展示必须 page 证据，数据库/审批/账务等分别取适用渠道。数值预期来自用例或独立前置，不能用待测输出作预期。确认主体/期间/切换、负例和不变性全覆盖。允许拆分复合条件。subject只能是对应渠道能回读的实际业务对象和期间；前后时点、切换序号、环境标签须放steps，不能伪装成响应身份。专属数据不存在时不要求响应含不存在的ID；前置与收尾由变更台账回读核验，不要把它们加成无法取身份的业务断言。',
+      kind === 'mutation' ? 'hostAuthentication 是本轮连接器从真实登录回执提取的身份及脱敏响应，不是模型自报。对于操作当前登录用户的接口，可将该身份与数据库快照及接口使用认证用户ID的实现共同核对；不能仅因请求未重复携带用户ID拒绝，也不能接受与实际身份不一致的目标。' : '',
+      kind === 'operation' && payload.spec?.kind === 'database' ? '这是授权数据库上的直接核对或准备操作，不要求业务仓存在完全相同的SQL入口。以所给实际schemas、实体/业务规则和SQL本身核实表、字段、只读语义或结构化CRUD；不要要求为临时快照查询先在产品源码新增接口。' : '',
       JSON.stringify({ ...payload, environmentProof: scope.resourceCatalog }),
     ].join('\n\n'), { cwd: options.workDir, codexBin: options.codexBin,
       onOutput: raw => evidence(scope, kind + '-review-raw', { raw }) });
@@ -216,7 +218,9 @@ export function createRequirementAgent(config, options) {
           if (spec.kind === 'browser') validateRouteTemplate(spec.effect?.path, '$.spec.effect.path');
           if (spec.kind === 'database' && spec.access !== 'read' && !state.schemas[spec.resource + ':' + spec.database + ':' + spec.table]) throw agentError('Inspect database schema first');
           await review(scope, 'operation', { spec, reason: args.reason, sources,
-            schema: state.schemas[spec.resource + ':' + spec.database + ':' + spec.table] });
+            schema: state.schemas[spec.resource + ':' + spec.database + ':' + spec.table],
+            schemas: spec.kind === 'database' ? Object.values(state.schemas).filter(schema => schema.resource === spec.resource
+              && schema.database === spec.database && (spec.table ? schema.table === spec.table : new RegExp('\\b' + schema.table + '\\b', 'i').test(spec.sql ?? ''))) : undefined });
           state.operations[args.name] = scope.checkOutput(spec); await saveState();
           await rememberOperation(args.name, spec, args.sourceRefs);
           return { registered: args.name };
@@ -226,7 +230,11 @@ export function createRequirementAgent(config, options) {
           if (!spec) throw agentError('Register operation first');
           return pageData(await observe(evidenceChannel(spec), await lookup(runtime, scope, spec, args.input ?? {}), args.input, args.subject ?? {}), args);
         }
-        if (name === 'evidence') return pageData(knownObservation(args.observationId), args);
+        if (name === 'evidence') {
+          const record = state.observations[args.observationId];
+          if (!record) throw agentError('Observation does not belong to this Job');
+          return { ...pageData(record, args), historical: record.caseKey !== key, usableForCurrentAssertion: record.caseKey === key };
+        }
         if (name === 'alias') {
           const source = knownObservation(args.observationId);
           if (!sameValue(observationAt(source.data, args.field), args.value)) throw agentError('Alias value does not match its source');
@@ -246,7 +254,14 @@ export function createRequirementAgent(config, options) {
           const snapshot = previous?.intent.snapshot ?? await lookup(runtime, scope, verifySpec, args.verify.input ?? {});
           if (!previous && !conditions(snapshot, args.verify.before)) throw agentError('Readback does not meet the before-state; do not write');
           if (!previous && spec.access !== 'create' && !sameValue(observationAt(snapshot, args.ownership.field), args.businessKey)) throw agentError('Target ownership is not proven by the before snapshot');
-          if (!previous) await review(scope, 'mutation', { mutation: args, snapshot,
+          const authentication = previous?.intent.authentication ?? {};
+          if (!previous) for (const operation of [spec, restoreSpec].filter(operation => ['http', 'browser'].includes(operation.kind) && operation.authenticated !== false)) {
+            if (!authentication[operation.resource]) {
+              const proof = await scope.useRead(operation.resource, resource => runtime.authenticationEvidence(operation.resource, resource));
+              if (proof) authentication[operation.resource] = scope.checkOutput(proof);
+            }
+          }
+          if (!previous) await review(scope, 'mutation', { mutation: args, snapshot, hostAuthentication: authentication,
             write: resolveInput(spec, args.input ?? {}), verify: resolveInput(verifySpec, args.verify.input ?? {}),
             restore: resolveInput(restoreSpec, args.restore.input ?? {}),
             sources: Object.values(state.sources).filter(source => source.text), schemas: state.schemas });
@@ -254,8 +269,9 @@ export function createRequirementAgent(config, options) {
             resource: spec.resource, operation: spec.access, businessKey: args.businessKey, ownership: args.ownership,
             snapshot, stateFields: args.verify.stateFields, beforeHash: snapshotHash(snapshot, args.verify.stateFields), operationSpec: spec, input: args.input ?? {}, verifySpec, verifyInput: args.verify.input ?? {},
             before: args.verify.before, after: args.verify.after, restoreSpec, restoreInput: args.restore.input ?? {},
-            cleanupAction: args.cleanupAction, shared: args.shared === true };
+            cleanupAction: args.cleanupAction, shared: args.shared === true, authentication };
           const receipt = await scope.invoke(intent, async resource => {
+            await runtime.verifyAuthentication(spec.resource, resource, intent.authentication?.[spec.resource]);
             const response = await runtime.performSpec(spec, intent.input, resource);
             const after = await lookup(runtime, scope, verifySpec, intent.verifyInput);
             const entry = await evidence(scope, '业务变更与回读', { intent, response, observed: after });
@@ -332,6 +348,10 @@ export function createRequirementAgent(config, options) {
           if (!check) throw agentError('Check is not in the frozen plan');
           const observation = knownObservation(args.observationId);
           if (observation.channel !== check.channel || check.channel === 'page' && !observation.data.screenshot) throw agentError('Actual evidence channel does not match the required channel');
+          if (check.channel === 'page' && (args.field?.[0] !== 'values'
+            || args.identity?.some(identity => identity.field?.[0] !== 'values'))) {
+            throw agentError('Page assertions and subject identities must use observed DOM values; captured API traffic is diagnostic evidence only');
+          }
           if (observation.at < current.planAt) throw agentError('Read a fresh scenario observation after freezing expectations');
           for (const [dimension, value] of Object.entries(check.subject ?? {})) {
             const identity = args.identity?.find(item => item.dimension === dimension);
@@ -396,8 +416,13 @@ export function createRequirementAgent(config, options) {
           sourceIndex: Object.entries(state.sources).map(([sourceRef, entry]) => ({ sourceRef, path: entry.path, file: entry.file,
             ref: entry.ref, start: entry.start, end: entry.end, sha256: entry.sha256 })),
           existingOperations: state.operations,
+          priorAttemptReference: Object.entries(state.cases).filter(([prior]) => prior !== key && prior.startsWith(scope.item.caseId + '@')).slice(-1)
+            .map(([prior, item]) => ({ caseKey: prior, historicalOnly: true, plan: item.plan, aliases: item.aliases,
+              observations: item.observations.map(id => ({ observationId: id, channel: state.observations[id]?.channel,
+                at: state.observations[id]?.at, input: state.observations[id]?.input })),
+              rule: '只用于复用调查路线。旧观测不能当本次基线/断言，准备数据后必须重新读取并绑定；原断言未完成不等于已验证。' })),
           projectKnowledge: config.knowledgeFile ? await readJson(config.knowledgeFile) : undefined,
-          knowledgePolicy: '历史操作仅作调查线索；当前任务重新读取源码和登记审核后方可调用。实时对象不得从知识推断。',
+          knowledgePolicy: 'existingOperations 是本Job已审核的操作，可直接复用同一契约；需改变契约才另起名称登记。projectKnowledge 是跨任务线索，须核实当前源码和资源再登记。实时对象和基线必须本次回读，不从历史推断。',
           recovery: current, mutations: scope.mutations });
         const seen = new Set();
         while (!finished) {
@@ -441,7 +466,10 @@ export function createRequirementAgent(config, options) {
             if (!mutation.cleanup?.before) await scope.saveCleanup(mutation.key, { before, beforeEvidence: [await evidence(scope, '清理前回读', { before, key: mutation.key })] });
             if (snapshotHash(before, intent.stateFields) !== intent.beforeHash) {
               if (intent.operation !== 'delete' && !sameValue(observationAt(before, intent.ownership.field), intent.businessKey)) throw agentError('Cleanup target ownership cannot be verified');
-              await scope.restore(mutation.key, intent.restoreSpec.access, resource => runtime.performSpec(intent.restoreSpec, intent.restoreInput, resource), intent.restoreSpec.resource);
+              await scope.restore(mutation.key, intent.restoreSpec.access, async resource => {
+                await runtime.verifyAuthentication(intent.restoreSpec.resource, resource, intent.authentication?.[intent.restoreSpec.resource]);
+                return runtime.performSpec(intent.restoreSpec, intent.restoreInput, resource);
+              }, intent.restoreSpec.resource);
             }
             const after = await lookup(runtime, scope, intent.verifySpec, intent.verifyInput);
             if (snapshotHash(after, intent.stateFields) !== intent.beforeHash) throw agentError('Cleanup readback differs from the original snapshot');

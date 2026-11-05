@@ -16,6 +16,7 @@ const repo = path.join(root, 'source'); await mkdir(repo, { recursive: true });
 const objects = new Map(), requests = [];
 const preferences = { key: 'fixture-operator', language: 'en' };
 const mode = process.env.AGENTOS_ACCEPTANCE_MODE ?? 'positive';
+const navigation = ['navigation-state', 'authenticated-navigation'].includes(mode);
 const cleanupFailures = new Set(), receiptFailures = new Set();
 const handler = async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -24,6 +25,19 @@ const handler = async (req, res) => {
   const key = url.searchParams.get('key') ?? input.key;
   requests.push({ method: req.method, path: url.pathname, key, input, at: new Date().toISOString() });
   res.setHeader('content-type', 'application/json');
+  if (url.pathname === '/login' && req.method === 'POST') {
+    res.setHeader('set-cookie', 'session=fixture-token; HttpOnly; SameSite=Strict');
+    return res.end(JSON.stringify({ userId: preferences.key, token: 'fixture-token' }));
+  }
+  if (url.pathname === '/' && mode === 'authenticated-navigation') {
+    res.setHeader('content-type', 'text/html');
+    return res.end('<input id="account"><input id="password" type="password"><button id="login" onclick="fetch(\'/login\',{method:\'POST\',body:JSON.stringify({account:document.querySelector(\'#account\').value,password:document.querySelector(\'#password\').value})})">login</button>');
+  }
+  if (url.pathname === '/preferences' && mode === 'authenticated-navigation') {
+    // The implicit target is the authenticated user, not a user-supplied key.
+    const authenticatedUserId = req.headers.token === 'fixture-token' || req.headers.cookie === 'session=fixture-token' ? 'fixture-operator' : null;
+    if (authenticatedUserId !== preferences.key) { res.statusCode = 401; return res.end('{"error":"unauthenticated"}'); }
+  }
   if (url.pathname === '/preferences' && req.method === 'GET') return res.end(JSON.stringify(preferences));
   if (url.pathname === '/preferences' && req.method === 'POST') {
     preferences.language = input.language ?? 'zh'; return res.end(JSON.stringify(preferences));
@@ -43,14 +57,14 @@ const handler = async (req, res) => {
   if (url.pathname === '/page') {
     res.setHeader('content-type', 'text/html; charset=utf-8');
     return res.end(`<label>对象<input id="key" value="${String(key ?? '').replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')}"></label><input id="amount" readonly value="-1"><div id="busy">加载中</div>
-      <script>${mode === 'navigation-state' ? "fetch('/preferences',{method:'POST'}).then(r=>{if(!r.ok)throw Error('preference update failed');return r.json()}).then(()=>" : ''}fetch('/objects?key='+encodeURIComponent(document.querySelector('#key').value))${mode === 'navigation-state' ? ')' : ''}.then(r=>r.json()).then(d=>setTimeout(()=>{
+      <script>${navigation ? "fetch('/preferences',{method:'POST'}).then(r=>{if(!r.ok)throw Error('preference update failed');return r.json()}).then(()=>" : ''}fetch('/objects?key='+encodeURIComponent(document.querySelector('#key').value))${navigation ? ')' : ''}.then(r=>r.json()).then(d=>setTimeout(()=>{
       document.querySelector('#amount').value=${mode === 'wrong-page' ? '0' : 'd.amount'};
       document.querySelector('#busy').remove();},350));</script>`);
   }
   res.statusCode = 404; res.end('{"error":"not found"}');
 };
 await writeFile(path.join(repo, 'service.mjs'), '// Isolated local service contract and actual handler. Business GET is read-only.\n'
-  + 'const objects = new Map(), requests = [];\nconst preferences={key:"fixture-operator",language:"en"};\nconst mode = ' + JSON.stringify(mode) + '; const cleanupFailures=new Set(), receiptFailures=new Set();\nconst handler = ' + handler.toString()
+  + 'const objects = new Map(), requests = [];\nconst preferences={key:"fixture-operator",language:"en"};\nconst mode = ' + JSON.stringify(mode) + '; const navigation=' + navigation + '; const cleanupFailures=new Set(), receiptFailures=new Set();\nconst handler = ' + handler.toString()
   + ';\n// The Runner resource catalog binds platform to createServer(handler), listening only on 127.0.0.1. requests is in-memory audit only.\n');
 await writeFile(path.join(repo, 'AGENTS.md'), '# 本地隔离测试服务\n仅本机回环资源。阅读 service.mjs 发现接口。对象必须使用当前任务前缀，不改源码。\n');
 try { await lstat(path.join(repo, '.git')); await command('git', ['-C', repo, 'rev-parse', 'HEAD']); }
@@ -59,7 +73,7 @@ catch { await command('git', ['init', '-b', 'main', repo]); await command('git',
 const server = createServer(handler); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const url = 'http://127.0.0.1:' + server.address().port;
 const iniPath = path.join(root, 'resources.ini');
-await writeFile(iniPath, '[Demo.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nresource_type=website\nbase_url=' + url + '\n');
+await writeFile(iniPath, '[Demo.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nresource_type=website\nbase_url=' + url + '\nusername=fixture\npassword=fixture-local-only\n');
 const skillsRoot = process.env.AGENTOS_REQUIREMENT_SKILLS_ROOT;
 if (!skillsRoot) throw new Error('Set AGENTOS_REQUIREMENT_SKILLS_ROOT');
 async function skill(name, refs) {
@@ -94,8 +108,10 @@ const settings = { bot: { profile: 'local-qa' }, allowedChatIds: ['oc_local'], r
   timeZone: 'Asia/Shanghai', reportDirectory: path.join(root, 'reports'), lockDirectory: path.join(root, 'locks'),
   validationCli, powerShell: process.env.AGENTOS_REQUIREMENT_POWERSHELL ?? 'pwsh',
   skills: { generator: await skill('lark-testcase-by-prd-order-generator', generatorReferences), regression: await skill('run-full-requirement-regression', regressionReferences) },
-  environment: { name: 'UAT', platform: 'Demo', iniPath, lockKey: 'local', resources: { platform: { section: 'Demo.Uat.Platform', scope: 'full_crud', reversibleSharedWrites: mode === 'navigation-state' } } },
+  environment: { name: 'UAT', platform: 'Demo', iniPath, lockKey: 'local', resources: { platform: { section: 'Demo.Uat.Platform', scope: 'full_crud', reversibleSharedWrites: navigation } } },
   execution: { mode: 'agent' } };
+if (mode === 'authenticated-navigation') settings.execution.login = { resource: 'platform', path: '/login',
+  tokenField: ['token'], header: 'token', identityFields: { userId: ['userId'] }, accountSelector: '#account', passwordSelector: '#password', submitSelector: '#login' };
 const job = { id: 'JOB-isolated-agent-' + Date.now(), projectId: 'demo', agentProfile: 'local-qa', chatId: 'oc_local', senderId: 'ou_local',
   requirement: { url: sourceBase.url } };
 const config = { projects: { demo: { displayName: '隔离系统', repoPath: repo, baseBranch: 'main', requirementTest: settings } }, dataDir: path.join(root, 'data') };

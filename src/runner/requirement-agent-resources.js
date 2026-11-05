@@ -195,7 +195,8 @@ export function createAgentResources(config, scope) {
           const read = Object.values(operations()).find(op => op.resource === resourceName && op.kind === 'http'
             && op.access === 'read' && op.method === method && op.path === url.pathname);
           const effect = state.effect && state.effect.path === url.pathname && state.effect.method === method;
-          if (!isLogin && !read && !effect) throw agentError('Discover and register this browser request before use: ' + method + ' ' + url.pathname);
+          if (!isLogin && !read && !effect) throw agentError('Browser request needs a verified read contract, or test_mutate with a registered browser goto/click operation and matching effect: '
+            + method + ' ' + url.pathname + '. Registering an HTTP write alone does not authorize browser writes.');
           if (effect) {
             const payload = request.postDataJSON();
             if (digest(payload ?? null) !== digest(state.effect.body ?? null)) throw agentError('Browser submit payload differs from the ledger intent: '
@@ -229,6 +230,22 @@ export function createAgentResources(config, scope) {
         const body = await response.json();
         state.token = (config.login.tokenFields ?? [config.login.tokenField]).map(field => observationAt(body, field)).find(Boolean);
         if (!response.ok() || !state.token) throw agentError('Configured login did not establish a session');
+        const identity = {};
+        for (const [key, field] of Object.entries(config.login.identityFields ?? {})) {
+          if (!Array.isArray(field) || !field.length) throw agentError('Configured login identity field must be a nonempty path: ' + key);
+          const value = observationAt(body, field);
+          if (/password|token|secret|cookie|authorization/i.test(key + ' ' + field.at(-1))
+            || !['string', 'number'].includes(typeof value) || value === '' || value === state.token) {
+            throw agentError('Configured login identity field is missing or is not a public identity: ' + key);
+          }
+          identity[key] = String(value);
+        }
+        state.authentication = { resource: resourceName, at: new Date().toISOString(), path: config.login.path,
+          authenticated: true, identity, response: sanitized(body) };
+      } catch (error) {
+        sessions.delete(resourceName);
+        await browser.close();
+        throw error;
       } finally { state.login = false; }
     }
     return state;
@@ -266,7 +283,8 @@ export function createAgentResources(config, scope) {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(spec.timeoutMs ?? 30000) });
     const text = await response.text();
     let data; try { data = JSON.parse(text); } catch { data = text; }
-    return { status: response.status, body: sanitized(data), path: url.pathname, method: spec.method ?? 'GET' };
+    return { status: response.status, body: sanitized(data), path: url.pathname, method: spec.method ?? 'GET',
+      request: { query: sanitized(Object.fromEntries(url.searchParams)), ...(body !== undefined ? { body: sanitized(body) } : {}) } };
   }
 
   async function performSpec(spec, input, resource) {
@@ -293,6 +311,15 @@ export function createAgentResources(config, scope) {
     throw agentError('Unsupported operation kind');
   }
   return {
+    async authenticationEvidence(resourceName, resource) {
+      if (!config.login || resourceName !== (config.login.resource ?? 'platform')) return null;
+      return (await browserSession(resourceName, resource)).authentication;
+    },
+    async verifyAuthentication(resourceName, resource, expected) {
+      if (!expected || !Object.keys(expected.identity ?? {}).length) return;
+      const actual = await this.authenticationEvidence(resourceName, resource);
+      if (!actual || digest(actual.identity) !== digest(expected.identity)) throw agentError('Authenticated identity changed; reconcile the original target before writing or restoring');
+    },
     performSpec,
     async schema(args) {
       return scope.useRead(args.resource, async resource => {
