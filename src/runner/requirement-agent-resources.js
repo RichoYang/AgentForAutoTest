@@ -47,7 +47,9 @@ export async function readSource(root, args) {
   if (args.action === 'search' || args.action === 'files') {
     const flags = ['--glob', '!node_modules/**', '--glob', '!.git/**', '--glob', '!*.local.*', '--glob', '!settings.xml',
       '--glob', '!*.ini', '--glob', '!*.env*', '--glob', '!.npmrc'];
-    const command = args.action === 'files' ? ['--files', ...flags] : ['-n', ...flags, '--', String(args.pattern)];
+    // execFile keeps stdin as a pipe. An explicit path makes rg search the source
+    // tree instead of waiting forever for input from that still-open pipe.
+    const command = args.action === 'files' ? ['--files', ...flags, '.'] : ['-n', ...flags, '--', String(args.pattern), '.'];
     const result = await exec('rg', command, { cwd: target, windowsHide: true, maxBuffer: 32 * 1024 * 1024 })
       .catch(error => error.code === 1 ? { stdout: '' } : Promise.reject(error));
     const lines = result.stdout.split(/\r?\n/).filter(Boolean);

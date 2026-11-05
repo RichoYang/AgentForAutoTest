@@ -9,7 +9,19 @@ import { createRequirementAdapter } from '../src/runner/requirement-adapter.js';
 import { createRequirementAgent } from '../src/runner/requirement-agent.js';
 import { executeCases } from '../src/runner/requirement-execution.js';
 import { digest, RequirementWait } from '../src/runner/requirement-feishu.js';
-import { createAgentResources } from '../src/runner/requirement-agent-resources.js';
+import { createAgentResources, readSource } from '../src/runner/requirement-agent-resources.js';
+
+test('source search reads the selected repository when child stdin is a pipe', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-source-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'service'));
+  await writeFile(path.join(root, 'service', 'budget.js'), 'export const fiscalBalance = 100;\n');
+  await writeFile(path.join(root, 'secrets.ini'), 'fiscalBalance=private\n');
+  const found = await readSource(root, { action: 'search', path: 'service', pattern: 'fiscalBalance' });
+  assert.equal(found.total, 1); assert.match(found.lines[0], /budget\.js:1:export const fiscalBalance/);
+  const all = await readSource(root, { action: 'search', pattern: 'fiscalBalance' });
+  assert.equal(all.total, 1); assert.doesNotMatch(all.lines.join('\n'), /private/);
+  assert.equal((await readSource(root, { action: 'search', pattern: 'missingPattern' })).total, 0);
+});
 
 test('plan errors retain candidates and correct both syntax and field errors without losing requirements', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-plan-')); t.after(() => rm(root, { recursive: true, force: true }));
