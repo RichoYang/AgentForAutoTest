@@ -14,6 +14,7 @@ const root = path.resolve(process.argv[2] ?? path.join(base, '.local/requirement
 await mkdir(root, { recursive: true });
 const repo = path.join(root, 'source'); await mkdir(repo, { recursive: true });
 const objects = new Map(), requests = [];
+const preferences = { key: 'fixture-operator', language: 'en' };
 const mode = process.env.AGENTOS_ACCEPTANCE_MODE ?? 'positive';
 const cleanupFailures = new Set(), receiptFailures = new Set();
 const handler = async (req, res) => {
@@ -23,6 +24,10 @@ const handler = async (req, res) => {
   const key = url.searchParams.get('key') ?? input.key;
   requests.push({ method: req.method, path: url.pathname, key, input, at: new Date().toISOString() });
   res.setHeader('content-type', 'application/json');
+  if (url.pathname === '/preferences' && req.method === 'GET') return res.end(JSON.stringify(preferences));
+  if (url.pathname === '/preferences' && req.method === 'POST') {
+    preferences.language = input.language ?? 'zh'; return res.end(JSON.stringify(preferences));
+  }
   if (url.pathname === '/objects' && req.method === 'POST') {
     if (objects.has(key)) { res.statusCode = 409; return res.end(JSON.stringify({ error: 'duplicate' })); }
     objects.set(key, { key, amount: input.amount, period: input.period });
@@ -37,15 +42,15 @@ const handler = async (req, res) => {
     ? { exists: true, ...objects.get(key) } : { exists: false }));
   if (url.pathname === '/page') {
     res.setHeader('content-type', 'text/html; charset=utf-8');
-    return res.end(`<label>对象<input id="key" value="${key}"></label><input id="amount" readonly value="-1"><div id="busy">加载中</div>
-      <script>fetch('/objects?key='+encodeURIComponent(document.querySelector('#key').value)).then(r=>r.json()).then(d=>setTimeout(()=>{
+    return res.end(`<label>对象<input id="key" value="${String(key ?? '').replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')}"></label><input id="amount" readonly value="-1"><div id="busy">加载中</div>
+      <script>${mode === 'navigation-state' ? "fetch('/preferences',{method:'POST'}).then(r=>{if(!r.ok)throw Error('preference update failed');return r.json()}).then(()=>" : ''}fetch('/objects?key='+encodeURIComponent(document.querySelector('#key').value))${mode === 'navigation-state' ? ')' : ''}.then(r=>r.json()).then(d=>setTimeout(()=>{
       document.querySelector('#amount').value=${mode === 'wrong-page' ? '0' : 'd.amount'};
       document.querySelector('#busy').remove();},350));</script>`);
   }
   res.statusCode = 404; res.end('{"error":"not found"}');
 };
 await writeFile(path.join(repo, 'service.mjs'), '// Isolated local service contract and actual handler. Business GET is read-only.\n'
-  + 'const objects = new Map(), requests = [];\nconst mode = ' + JSON.stringify(mode) + '; const cleanupFailures=new Set(), receiptFailures=new Set();\nconst handler = ' + handler.toString()
+  + 'const objects = new Map(), requests = [];\nconst preferences={key:"fixture-operator",language:"en"};\nconst mode = ' + JSON.stringify(mode) + '; const cleanupFailures=new Set(), receiptFailures=new Set();\nconst handler = ' + handler.toString()
   + ';\n// The Runner resource catalog binds platform to createServer(handler), listening only on 127.0.0.1. requests is in-memory audit only.\n');
 await writeFile(path.join(repo, 'AGENTS.md'), '# 本地隔离测试服务\n仅本机回环资源。阅读 service.mjs 发现接口。对象必须使用当前任务前缀，不改源码。\n');
 try { await lstat(path.join(repo, '.git')); await command('git', ['-C', repo, 'rev-parse', 'HEAD']); }
@@ -89,7 +94,7 @@ const settings = { bot: { profile: 'local-qa' }, allowedChatIds: ['oc_local'], r
   timeZone: 'Asia/Shanghai', reportDirectory: path.join(root, 'reports'), lockDirectory: path.join(root, 'locks'),
   validationCli, powerShell: process.env.AGENTOS_REQUIREMENT_POWERSHELL ?? 'pwsh',
   skills: { generator: await skill('lark-testcase-by-prd-order-generator', generatorReferences), regression: await skill('run-full-requirement-regression', regressionReferences) },
-  environment: { name: 'UAT', platform: 'Demo', iniPath, lockKey: 'local', resources: { platform: { section: 'Demo.Uat.Platform', scope: 'full_crud' } } },
+  environment: { name: 'UAT', platform: 'Demo', iniPath, lockKey: 'local', resources: { platform: { section: 'Demo.Uat.Platform', scope: 'full_crud', reversibleSharedWrites: mode === 'navigation-state' } } },
   execution: { mode: 'agent' } };
 const job = { id: 'JOB-isolated-agent-' + Date.now(), projectId: 'demo', agentProfile: 'local-qa', chatId: 'oc_local', senderId: 'ou_local',
   requirement: { url: sourceBase.url } };
@@ -108,8 +113,8 @@ try {
     job.requirement.retryRequest = 'local-fixture-retry-command';
   }
   const result = await runRequirementTest(job, config, emit, dependencies);
-  await writeJson(path.join(root, 'result.json'), { result, remaining: [...objects.values()], requests });
+  await writeJson(path.join(root, 'result.json'), { result, remaining: [...objects.values()], preferences, requests });
   console.log(JSON.stringify({ result, remaining: objects.size }));
   const wanted = mode === 'wrong-page' ? result.requirementSummary?.fail === 1 : result.requirementSummary?.pass === 1;
-  if (result.outcome !== 'ready' || !wanted || objects.size) process.exitCode = 1;
+  if (result.outcome !== 'ready' || !wanted || objects.size || preferences.language !== 'en') process.exitCode = 1;
 } finally { await new Promise(resolve => server.close(resolve)); }

@@ -22,6 +22,8 @@
 
 不需要登录的隔离站点可省略 `login`。选择器、字段及鉴权头必须按项目核实，上例不是通用登录协议。另一资源使用表单登录时，可配置 `resourceAuth.<资源名> = {"kind":"form","path":"/login","fields":{"username":"username","password":"password"}}`；值引用该资源的本机凭据字段。凭据仅由连接器读取，模型接收脱敏资源目录。
 
+项目已授权恢复式使用既有测试对象时，可在对应 `environment.resources.<资源名>` 设置 `reversibleSharedWrites: true`，并保持 `scope: "full_crud"`。这允许任务调查后使用既有对象，不要求逐接口名单；每次仍须回读唯一 ID、保存前置快照、证明写入和恢复目标一致。新建对象继续使用任务前缀。未配置时只允许专属测试数据或原有 `sharedTargets` 明确列出的目标。页面导航触发的辅助写入可登记为 `kind:"browser", action:"goto", path:"/页面", effect:{path:"/实际写接口",method:"POST"}`，同样通过 mutate 记录和清理，不能标成只读查询。
+
 群聊入口、需求/用例路径、原话题控制及发布策略沿用[需求测试工作流](requirement-testing.md)。原话题回复「重试未执行」会在同一 Job 保存旧尝试并重新处理未执行用例，原用例索引和发布回执不变。
 
 ## 实际执行链路
@@ -46,4 +48,4 @@ Runner 复用 Codex app-server，通过任务专属动态工具读取本项目�
 
 报告仍先运行原 Skill 版本化构建器，再只适配表体行高并重新渲染，固定 15 表、内容与公式保持。视觉检查、重开计数与摘要均针对最终文件。清理或报告未核验时不能交付为完成。
 
-本机隔离验收：配置 `AGENTOS_REQUIREMENT_SKILLS_ROOT`、本机 Codex 配置及需要的 `AGENTOS_REQUIREMENT_POWERSHELL`，运行 `node scripts/verify-requirement-agent.mjs <独立输出目录>`。`AGENTOS_ACCEPTANCE_MODE` 支持 `positive`、`wrong-page`、`multi-object`、`lost-receipt`、`cleanup-retry`、`retry-native`。真实模型、浏览器、HTTP 和正常 Runner 实际运行，飞书传输与来源是隔离输入；这些结果不能替代项目环境验收。Windows 与其他平台的部署验证需分别记录。
+本机隔离验收：配置 `AGENTOS_REQUIREMENT_SKILLS_ROOT`、本机 Codex 配置及需要的 `AGENTOS_REQUIREMENT_POWERSHELL`，运行 `node scripts/verify-requirement-agent.mjs <独立输出目录>`。`AGENTOS_ACCEPTANCE_MODE` 支持 `positive`、`wrong-page`、`multi-object`、`lost-receipt`、`cleanup-retry`、`retry-native`、`navigation-state`。真实模型、浏览器、HTTP 和正常 Runner 实际运行，飞书传输与来源是隔离输入；这些结果不能替代项目环境验收。Windows 与其他平台的部署验证需分别记录。

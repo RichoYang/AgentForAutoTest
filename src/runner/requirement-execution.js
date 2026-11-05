@@ -79,6 +79,7 @@ export async function requirementResources(environment, { allowUnavailable = fal
       resource_type: section.resource_type, base_url: section.base_url, management_url: section.management_url,
       database_name: section.database_name, status: section.status, ai_access: section.ai_access,
       ai_operation_mode: section.ai_operation_mode,
+      reversibleSharedWrites: binding.reversibleSharedWrites === true, sharedTargets: binding.sharedTargets ?? [],
     }])),
     assertWrite,
     identity(key) {
@@ -136,6 +137,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
   let lock = await readJson(lockFile);
   const retryRequest = job.requirement.retryRequest;
   const retry = retryRequest && retryRequest !== journal.lastRetryRequest;
+  const advancedAttempts = new Set();
   if ((migrating || retry) && (lock && (lock.jobId !== job.id || lock.binding !== journal.executionBinding))) {
     throw new RequirementWait('environment_busy', '原任务资源锁身份已变化，不能迁移或重试。');
   }
@@ -144,12 +146,16 @@ export async function executeCases({ job, settings, journal, source, index, mani
     journal.executionHistory ??= [];
     journal.executionHistory.push(structuredClone({ binding: journal.executionBinding, at: new Date().toISOString(),
       reason: migrating ? 'adapter_upgrade_without_pending_effects' : 'retry_unexecuted', results: journal.results,
-      preparations: journal.preparations, executionSteps: journal.executionSteps, cleanup: journal.cleanup, mutations: journal.mutations }));
+      preparations: journal.preparations, executionSteps: journal.executionSteps, cleanup: journal.cleanup, mutations: journal.mutations,
+      caseAttempts: journal.caseAttempts, executionCases: journal.executionCases, inFlight: journal.inFlight }));
     journal.caseAttempts ??= {};
     for (const item of index) {
       if (!journal.results?.[item.caseId] || journal.results[item.caseId].status === '未执行') {
-        const attempted = journal.results?.[item.caseId] || journal.preparations?.[item.caseId] || journal.executionCases?.[item.caseId];
-        journal.caseAttempts[item.caseId] = attempted ? (journal.caseAttempts[item.caseId] ?? 1) + 1 : 1;
+        const checkpoint = journal.executionCases?.[item.caseId];
+        const attempted = journal.results?.[item.caseId] || journal.preparations?.[item.caseId]
+          || checkpoint && (journal.caseAttempts[item.caseId] === undefined || checkpoint.lastAttempt === journal.caseAttempts[item.caseId]);
+        journal.caseAttempts[item.caseId] = attempted ? (journal.caseAttempts[item.caseId] ?? 1) + 1 : journal.caseAttempts[item.caseId] ?? 1;
+        if (attempted) advancedAttempts.add(item.caseId);
         if (journal.results) delete journal.results[item.caseId];
         if (journal.preparations) delete journal.preparations[item.caseId];
         if (journal.executionSteps) delete journal.executionSteps[item.caseId];
@@ -276,7 +282,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
     journal.cleanupHistory ??= []; journal.cleanupHistory.push(recovered);
     if (!job.requirement.cleanupOnly) {
       const unfinished = journal.inFlight;
-      if (unfinished && !journal.results[unfinished]) {
+      if (unfinished && !journal.results[unfinished] && !advancedAttempts.has(unfinished)) {
         journal.caseAttempts ??= {}; journal.caseAttempts[unfinished] = (journal.caseAttempts[unfinished] ?? 1) + 1;
         delete journal.preparations[unfinished]; delete journal.executionSteps[unfinished];
       }
@@ -295,6 +301,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
       }
       if (journal.results[item.caseId]) continue;
       journal.executionCases[item.caseId] ??= { caseVersion, publicationVersion: journal.publication.version };
+      journal.executionCases[item.caseId].lastAttempt = journal.caseAttempts?.[item.caseId] ?? 1;
       const caseInput = { ...scope, item, row, headers: manifest.headers, attempt: journal.caseAttempts?.[item.caseId] ?? 1,
         getMutations: () => journal.mutations.filter(record => record.caseId === item.caseId),
         async cleanupCase() {
@@ -326,7 +333,9 @@ export async function executeCases({ job, settings, journal, source, index, mani
         await save();
       }
       const invoke = async (intent, apply) => {
-        const shared = intent?.shared === true && environment.resources[intent.resource]?.sharedTargets?.includes(intent.target);
+        const resourceBinding = environment.resources[intent?.resource];
+        const shared = intent?.shared === true && intent.operation !== 'create'
+          && (resourceBinding?.reversibleSharedWrites === true || resourceBinding?.sharedTargets?.includes(intent.target));
         if (!intent?.id || !intent.target || !intent.beforeHash || !intent.cleanupAction || !writeOperations.includes(intent.operation)
           || (!String(intent.businessKey ?? '').includes(scope.runPrefix) && !shared)) {
           throw new RequirementWait('mutation_scope', '测试变更缺少唯一归属、前置快照或可验证的恢复动作。');

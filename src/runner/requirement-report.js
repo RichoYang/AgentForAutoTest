@@ -103,10 +103,12 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
         status: result.status });
       item.issueId = finalId;
     }
-    if (result?.blocker) blockers.push({
-      blocker_id: 'BLOCK-' + item.caseId, case_ids: [item.caseId], status: '未解除', ...result.blocker,
-      evidence_ids: ids,
-    });
+    if (result?.blocker) {
+      const { category, ...blocker } = result.blocker;
+      blockers.push({ blocker_id: 'BLOCK-' + item.caseId, case_ids: [item.caseId], status: '未解除', ...blocker,
+        ...(category ? { dependency: category + '：' + (Array.isArray(blocker.dependency) ? blocker.dependency.join('；') : blocker.dependency) } : {}),
+        evidence_ids: ids });
+    }
     for (const [section, rows] of Object.entries(specialty)) {
       for (const { evidence: entries, ...record } of result?.specialty?.[section] ?? []) {
         const refs = await evidence(entries, item.caseId);
@@ -281,16 +283,20 @@ export async function runReportBuilder(skill, input, workDir, reportDir, now) {
   const builder = path.join(skill.path, 'scripts/build-full-regression-report.mjs');
   const schema = path.join(skill.path, 'references/report-schema-v1.json');
   const args = [builder, '--input', input, '--schema', schema, '--evidence-root', reportDir];
+  let stage = 'schema';
   try {
     const check = builderOutput(await command(process.execPath, [...args, '--validate-only'], { cwd: workDir }));
     if (check.valid !== true) throw new Error('Schema validation failed');
+    stage = 'workbook';
     const report = builderOutput(await command(process.execPath, [...args, '--output', output, '--preview-dir', previewDir, '--force'], { cwd: workDir }));
     if (report.sheetCount !== 15 || await hashFile(output) !== report.sha256) throw new Error('Report hash or topology mismatch');
     report.builderSha256 = report.sha256;
+    stage = 'layout';
     await fitReportRows(builder, output, previewDir, payload);
     report.sha256 = await hashFile(output);
     report.layoutVersion = 'autofit-1';
     const counts = await verifyWorkbookCounts(builder, output, payload);
+    stage = 'previews';
     const previews = (await readdir(previewDir)).filter(file => /^\d{2}-.+\.png$/.test(file)).sort();
     if (previews.length !== 15) throw new Error('Missing report previews');
     const previewHashes = {};
@@ -301,8 +307,10 @@ export async function runReportBuilder(skill, input, workDir, reportDir, now) {
       previewHashes[file] = await hashFile(path.join(previewDir, file));
     }
     return { ...report, previewHashes, ...counts };
-  } catch {
-    throw new RequirementWait('report_validation', '报告专用构建器未完成结构、证据或预览核验，已保留本轮台账。');
+  } catch (error) {
+    const detail = String(error.message).replace(/((?:password|access_token|refresh_token|app_secret|authorization)\s*["']?\s*[:=]\s*)[^\r\n,;]+/gi, '$1[REDACTED]');
+    await writeJson(path.join(workDir, 'report-build-error.json'), { at: new Date().toISOString(), stage, detail });
+    throw new RequirementWait('report_validation', '报告专用构建器未完成' + stage + '核验；字段诊断已保存在 report-build-error.json，本轮台账保持。');
   }
 }
 

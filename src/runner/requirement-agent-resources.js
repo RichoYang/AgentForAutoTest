@@ -1,4 +1,4 @@
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -26,6 +26,24 @@ export function resolveInput(value, input) {
   return value;
 }
 
+export function validateRouteTemplate(value, field = 'path') {
+  if (value && typeof value === 'object' && Object.keys(value).length === 1 && typeof value.$input === 'string') return;
+  if (typeof value !== 'string') throw agentError(field + ' must be a path string or {$input:"parameter"} object');
+  if (/[{}]/.test(value.replace(/\{[A-Za-z][A-Za-z0-9_]*\}/g, ''))) {
+    throw agentError(field + ' uses {parameter} placeholders, e.g. /page?key={key}; do not embed {$input:...} inside a string');
+  }
+}
+
+function resolveRoute(value, input) {
+  validateRouteTemplate(value);
+  const route = resolveInput(value, input);
+  if (typeof route !== 'string') throw agentError('Request path must resolve to a string');
+  return route.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (_, key) => {
+    if (!Object.hasOwn(input, key)) throw agentError('Missing path input: ' + key);
+    return encodeURIComponent(String(input[key]));
+  });
+}
+
 export async function readSource(root, args) {
   const actualRoot = await realpath(root);
   const target = await realpath(path.resolve(root, args.path ?? '.'));
@@ -49,8 +67,10 @@ export async function readSource(root, args) {
       '--glob', '!*.ini', '--glob', '!*.env*', '--glob', '!.npmrc'];
     // execFile keeps stdin as a pipe. An explicit path makes rg search the source
     // tree instead of waiting forever for input from that still-open pipe.
-    const command = args.action === 'files' ? ['--files', ...flags, '.'] : ['-n', ...flags, '--', String(args.pattern), '.'];
-    const result = await exec('rg', command, { cwd: target, windowsHide: true, maxBuffer: 32 * 1024 * 1024 })
+    const directory = (await stat(target)).isDirectory();
+    const searchPath = directory ? '.' : path.basename(target);
+    const command = args.action === 'files' ? ['--files', ...flags, searchPath] : ['-n', ...flags, '--', String(args.pattern), searchPath];
+    const result = await exec('rg', command, { cwd: directory ? target : path.dirname(target), windowsHide: true, maxBuffer: 32 * 1024 * 1024 })
       .catch(error => error.code === 1 ? { stdout: '' } : Promise.reject(error));
     const lines = result.stdout.split(/\r?\n/).filter(Boolean);
     const offset = args.offset ?? 0, limit = args.limit ?? 100;
@@ -176,7 +196,8 @@ export function createAgentResources(config, scope) {
           if (!isLogin && !read && !effect) throw agentError('Discover and register this browser request before use: ' + method + ' ' + url.pathname);
           if (effect) {
             const payload = request.postDataJSON();
-            if (digest(payload) !== digest(state.effect.body)) throw agentError('Browser submit payload differs from the ledger intent');
+            if (digest(payload ?? null) !== digest(state.effect.body ?? null)) throw agentError('Browser submit payload differs from the ledger intent: '
+              + JSON.stringify({ expected: sanitized(state.effect.body ?? null), received: sanitized(payload ?? null) }) + '. Omit effect.body for a request with no body.');
             state.effect = null;
           }
         }
@@ -212,10 +233,7 @@ export function createAgentResources(config, scope) {
   }
 
   async function http(spec, input, resource) {
-    const route = spec.path.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (_, key) => {
-      if (!Object.hasOwn(input, key)) throw agentError('Missing path input: ' + key);
-      return encodeURIComponent(String(input[key]));
-    });
+    const route = resolveRoute(spec.path, input);
     const url = resourceURL(resource, route);
     const query = resolveInput(spec.query ?? {}, input);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
@@ -254,13 +272,20 @@ export function createAgentResources(config, scope) {
     if (spec.kind === 'http') return http(spec, input, resource);
     if (spec.kind === 'browser') {
       const session = await browserSession(spec.resource, resource);
-      session.effect = { ...spec.effect, body: resolveInput(spec.effect.body, input) };
+      const effectPath = resolveRoute(spec.effect.path, input);
+      session.effect = { ...spec.effect, path: effectPath, body: resolveInput(spec.effect.body, input) };
       try {
         const [response] = await Promise.all([
-          session.page.waitForResponse(response => new URL(response.url()).pathname === spec.effect.path && response.request().method() === spec.effect.method),
-          session.page.locator(spec.selector).click(),
+          session.page.waitForResponse(response => new URL(response.url()).pathname === effectPath && response.request().method() === spec.effect.method),
+          spec.action === 'goto'
+            ? session.page.goto(resourceURL(resource, resolveRoute(spec.path, input)).href, { waitUntil: 'domcontentloaded' })
+            : session.page.locator(spec.selector).click(),
         ]);
         return { status: response.status(), body: sanitized(await response.json().catch(() => null)) };
+      } catch (error) {
+        const rejected = session.network.findLast(entry => entry.path === effectPath && entry.error);
+        if (rejected) throw agentError(rejected.error);
+        throw error;
       } finally { session.effect = null; }
     }
     throw agentError('Unsupported operation kind');

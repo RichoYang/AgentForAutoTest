@@ -9,7 +9,7 @@ import { createRequirementAdapter } from '../src/runner/requirement-adapter.js';
 import { createRequirementAgent } from '../src/runner/requirement-agent.js';
 import { executeCases } from '../src/runner/requirement-execution.js';
 import { digest, RequirementWait } from '../src/runner/requirement-feishu.js';
-import { createAgentResources, readSource } from '../src/runner/requirement-agent-resources.js';
+import { createAgentResources, readSource, validateRouteTemplate } from '../src/runner/requirement-agent-resources.js';
 
 test('source search reads the selected repository when child stdin is a pipe', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-source-')); t.after(() => rm(root, { recursive: true, force: true }));
@@ -18,9 +18,38 @@ test('source search reads the selected repository when child stdin is a pipe', a
   await writeFile(path.join(root, 'secrets.ini'), 'fiscalBalance=private\n');
   const found = await readSource(root, { action: 'search', path: 'service', pattern: 'fiscalBalance' });
   assert.equal(found.total, 1); assert.match(found.lines[0], /budget\.js:1:export const fiscalBalance/);
+  assert.equal((await readSource(root, { action: 'search', path: 'service/budget.js', pattern: 'fiscalBalance' })).total, 1);
   const all = await readSource(root, { action: 'search', pattern: 'fiscalBalance' });
   assert.equal(all.total, 1); assert.doesNotMatch(all.lines.join('\n'), /private/);
   assert.equal((await readSource(root, { action: 'search', pattern: 'missingPattern' })).total, 0);
+  assert.throws(() => validateRouteTemplate('/page?key={$input:"key"}', '$.spec.path'), /spec.path uses \{parameter\}/);
+});
+
+test('adapter upgrade advances an interrupted attempt once and leaves untouched retry cases unchanged', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-attempt-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'reports'));
+  const iniPath = path.join(root, 'env.ini');
+  await writeFile(iniPath, '[Demo.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nbase_url=http://127.0.0.1:1');
+  const row = ['dedicated baseline', '1. 金额100元'];
+  const index = ['C1', 'C2'].map((caseId, i) => ({ caseId, row: i + 2, requirementIds: [] }));
+  const journal = { executionBinding: 'old', publication: { url: 'https://fixture.invalid/sheets/Old', version: 'preserved' },
+    results: {}, mutations: [], inFlight: 'C1', caseAttempts: { C1: 2, C2: 2 }, preparations: { C1: { agent: true, prerequisites: [] } },
+    executionCases: Object.fromEntries(index.map(item => [item.caseId, { caseVersion: digest([item.caseId, [], row]) }])) };
+  await executeCases({ job: { id: 'JOB-local', projectId: 'demo', requirement: {} },
+    settings: { environment: { name: 'UAT', platform: 'Demo', iniPath, lockKey: 'local', resources: { platform: { section: 'Demo.Uat.Platform', scope: 'full_crud' } } },
+      lockDirectory: path.join(root, 'locks'), execution: { mode: 'agent' } }, project: { repoPath: root }, journal, source: {}, index,
+    manifest: { headers: ['前置条件', '预期结果'], rows: [row, row] }, regression: { files: { 'references/execution-standard.md': '' } },
+    workDir: root, reportDir: path.join(root, 'reports'), save: async () => {}, progress: async () => {},
+    agentModel: async ({ call }) => ({ close: async () => {}, async turn() {
+      await call('test_finish', { args: { actual: 'Module fixture has no business evidence.', blocker: {
+        dependency: 'fixture', required_action: 'run native acceptance separately', attempts: ['fixture invocation'] } } }, 'finish');
+      return { text: 'Recorded' };
+    } }) });
+  assert.deepEqual(journal.caseAttempts, { C1: 3, C2: 2 });
+  assert.deepEqual(journal.executionHistory[0].caseAttempts, { C1: 2, C2: 2 });
+  assert.equal(journal.executionHistory[0].inFlight, 'C1');
+  assert.equal(journal.executionCases.C1.lastAttempt, 3);
+  assert.equal(journal.cleanup.verified, true);
 });
 
 test('plan errors retain candidates and correct both syntax and field errors without losing requirements', async t => {
@@ -41,7 +70,7 @@ test('plan errors retain candidates and correct both syntax and field errors wit
 
 test('resource form credentials stay inside the connector and browser faults are explicit and reversible', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-resource-')); t.after(() => rm(root, { recursive: true, force: true }));
-  let logins = 0;
+  let logins = 0, navigationWrites = 0;
   const server = createServer(async (req, res) => {
     if (req.url === '/login') {
       let body = ''; for await (const part of req) body += part;
@@ -49,6 +78,8 @@ test('resource form credentials stay inside the connector and browser faults are
       res.setHeader('set-cookie', 'session=local-cookie; HttpOnly'); return res.end('{}');
     }
     if (req.url === '/protected') return res.end(JSON.stringify({ authenticated: req.headers.cookie === 'session=local-cookie' }));
+    if (req.url === '/preference') { navigationWrites++; return res.end('{"updated":true}'); }
+    if (req.url.startsWith('/navigation')) { res.setHeader('content-type', 'text/html'); return res.end('<script>fetch("/preference",{method:"POST"})</script>'); }
     if (req.url === '/amount') return res.end('{"amount":100}');
     res.setHeader('content-type', 'text/html');
     res.end('<span id="busy">loading</span><span id="amount"></span><script>fetch("/amount").then(r=>r.json()).then(d=>{document.querySelector("#amount").textContent=d.amount;document.querySelector("#busy").remove()})</script>');
@@ -69,6 +100,13 @@ test('resource form credentials stay inside the connector and browser faults are
   await page({ action: 'clear_fault' }); await page({ action: 'goto', path: '/' });
   const restored = await page({ action: 'observe', ready: { selector: '#busy', state: 'hidden' }, fields: { amount: { selector: '#amount', read: 'text' } } });
   assert.deepEqual(restored.values.amount, ['100']); assert.equal(restored.simulatedFault, undefined);
+  await page({ action: 'goto', path: '/navigation' });
+  await page({ action: 'wait', ready: { selector: 'body', state: 'visible' } });
+  assert.equal(navigationWrites, 0);
+  const write = await runtime.performSpec({ kind: 'browser', resource: 'platform', access: 'update', action: 'goto',
+    path: '/navigation?object={key}', effect: { path: '/preference', method: 'POST' } }, { key: 'A & B' }, resource);
+  assert.equal(write.status, 200); assert.equal(navigationWrites, 1);
+  assert.match((await page({ action: 'inspect' })).url, /object=A%20%26%20B$/);
 });
 
 test('multi-object steps bind independently, wrong candidate is rejected, and asynchronous page readiness waits for business state', async t => {
@@ -120,11 +158,20 @@ test('tool channel evidence cannot be relabelled and runner migrates an old unex
     const invoke = (name, args) => call('test_' + name, { args }, 'call-' + name);
     const source = await invoke('source', { action: 'read', path: 'source.js' });
     await invoke('register', { name: 'budget', sourceRefs: [source.sourceRef], reason: 'read', spec: { kind: 'http', resource: 'platform', access: 'read', path: '/budget', method: 'GET', authenticated: false } });
+    await invoke('register', { name: 'update_budget', sourceRefs: [source.sourceRef], reason: 'module permission fixture', spec: { kind: 'http', resource: 'platform', access: 'update', path: '/budget', method: 'PUT', authenticated: false } });
+    await assert.rejects(invoke('mutate', { id: 'shared-without-project-grant', purpose: 'prepare', operation: 'update_budget', input: {},
+      businessKey: 'A', ownership: { field: ['body', 'key'], value: 'A' }, shared: true,
+      verify: { operation: 'budget', input: {}, before: [{ field: ['body', 'key'], operator: 'equals', expected: 'A' }],
+        after: [{ field: ['body', 'key'], operator: 'equals', expected: 'A' }] }, restore: { operation: 'update_budget', input: {} },
+      cleanupAction: 'restore the original amount' }), /唯一归属/);
+    assert.equal(journal.mutations.length, 0);
     await invoke('observe', { operation: 'budget', input: {}, subject: { account: 'A' } });
     const plan = { version: 1, steps: ['Read A'], prerequisites: [], checks: [{ id: 'balance', line: 1,
       requirement: '金额100元', channel: 'api', type: 'number', operator: 'equals', expected: 100, unit: '元', subject: { account: 'A' }, basis: { quote: '金额100元' } }] };
     const invalid = structuredClone(plan); invalid.checks[0].subject.phase = 'after-create';
     await assert.rejects(invoke('plan', invalid), /subject.phase/);
+    const stringLine = structuredClone(plan); stringLine.checks[0].line = '1';
+    await assert.rejects(invoke('plan', stringLine), /checks\[0\]\.line must be a 1-based integer/);
     await invoke('plan', plan);
     const observed = await invoke('observe', { operation: 'budget', input: {}, subject: { account: 'A' } });
     await assert.rejects(invoke('assert', { checkId: 'balance', observationId: observed.observationId, field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'wrong'] }] }));
