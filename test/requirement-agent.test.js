@@ -336,12 +336,20 @@ test('tool channel evidence cannot be relabelled and runner migrates an old unex
   const job = { id: 'JOB-local', projectId: 'demo', requirement: {} };
   const priorObservation = { observationId: 'old-observation', caseKey: 'C1@1', channel: 'api',
     data: { body: { key: 'A', amount: 100 } }, at: '2026-01-01T00:00:00Z' };
+  await mkdir(path.join(root, 'diagnostics'));
+  await writeFile(path.join(root, 'diagnostics', 'old-error.json'), JSON.stringify({ tool: 'test_assert',
+    args: { checkId: 'balance', field: ['body', 'count'] }, code: 'Error', message: 'Element count is not money' }));
   await writeFile(path.join(root, 'agent-tool-state.json'), JSON.stringify({ version: 1, operations: {}, sources: {}, schemas: {},
-    observations: { 'old-observation': priorObservation }, cases: { 'C1@1': { observations: ['old-observation'], aliases: {} } } }));
+    observations: { 'old-observation': priorObservation }, cases: { 'C1@1': { observations: ['old-observation'], aliases: {},
+      errors: [{ path: 'old-error.json' }, { path: 'missing-error.json' }] } } }));
   let captured;
   const agentModel = async ({ call }) => ({ close: async () => {}, async turn(prompt) {
     const invoke = (name, args) => call('test_' + name, { args }, 'call-' + name);
     assert.equal(JSON.parse(prompt).priorAttemptReference[0].caseKey, 'C1@1');
+    const priorErrors = JSON.parse(prompt).priorAttemptReference[0].diagnostics;
+    assert.equal(priorErrors[0].message, 'Element count is not money');
+    assert.deepEqual(priorErrors[0].args.field, ['body', 'count']);
+    assert.equal(priorErrors[1].unavailable, true);
     const history = await invoke('evidence', { observationId: 'old-observation' });
     assert.equal(history.historical, true); assert.equal(history.usableForCurrentAssertion, false);
     assert.equal(history.at, priorObservation.at); assert.equal(history.data.body.amount, 100);

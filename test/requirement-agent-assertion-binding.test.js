@@ -27,6 +27,73 @@ test('derived actual values preserve decimal arithmetic and never turn absent op
   assert.equal(unavailable.compared, false); assert.equal(unavailable.missing, undefined);
 });
 
+test('SQL binding includes inspected schema proof only from the measured resource and database', () => {
+  const schema = { resource: 'database', database: 'isolated', table: 'budget', columns: [{ Field: 'id' }, { Field: 'amount' }],
+    indexes: [{ Key_name: 'PRIMARY', Column_name: 'id' }], create: 'CREATE TABLE budget(id BIGINT PRIMARY KEY, amount DECIMAL(18,4))' };
+  const binding = assertionBinding({ requirement: '预算记录不变', channel: 'database', type: 'text' },
+    { data: { rows: [{ hash: 'opaque' }] }, input: { resource: 'database', database: 'isolated', sql: 'SELECT hash FROM budget' } },
+    { field: ['rows', 0, 'hash'] }, {}, { schemas: { correct: schema,
+      wrongResource: { ...schema, resource: 'other' }, wrongDatabase: { ...schema, database: 'other' },
+      unusedTable: { ...schema, table: 'other' } } });
+  assert.deepEqual(binding.databaseSchemas, [schema]);
+  assert.equal(binding.actual, undefined); assert.equal(binding.selected[0].valueType, 'string');
+});
+
+test('binding receives verified array identity and sibling checks without trusting caller proof or hiding wrong results', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-array-binding-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, 'source.js'), 'GET /budget is read-only. rows contain key, period, allocated, invalid and remaining. Invalid occupancy is excluded from remaining.');
+  const server = createServer((req, res) => { res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ rows: [{ key: 'other', period: '2026-10', allocated: 900, invalid: 777, remaining: 80 },
+      { key: 'A', period: '2026-11', allocated: 100, invalid: 777, remaining: 75 }] })); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const expectation = '分配100元、无效占用777元不扣减，剩余80元。';
+  let bindingReviews = 0;
+  const adapter = createRequirementAgent({}, { workDir: root, review: async prompt => {
+    const payload = JSON.parse(prompt.slice(prompt.lastIndexOf('\n\n') + 2));
+    if (payload.kind !== 'assertion_binding') return { accepted: true, errors: [] };
+    bindingReviews++;
+    assert.equal(payload.planContext.originalExpectation, expectation);
+    assert.deepEqual(payload.planContext.checks.map(item => item.id), ['allocated', 'invalid', 'remaining']);
+    assert.ok(payload.planContext.checks.every(item => !Object.hasOwn(item, 'expected')));
+    assert.equal(payload.actual, undefined);
+    assert.deepEqual(payload.verifiedIdentity.map(item => item.value), ['A', '2026-11']);
+    assert.ok(payload.verifiedIdentity.every(item => item.field[2] === 1));
+    if (payload.selected.some(item => item.field[2] !== 1)) return { accepted: false, errors: ['Identity belongs to a different row'] };
+    return { accepted: true, errors: [] };
+  }, agentModel: async ({ call }) => ({ close: async () => {}, async turn() {
+    const invoke = (tool, args) => call('test_' + tool, { args }, tool);
+    const source = await invoke('source', { action: 'read', path: 'source.js' });
+    await invoke('register', { name: 'budget', sourceRefs: [source.sourceRef], reason: 'array contract',
+      spec: { kind: 'http', resource: 'platform', path: '/budget', method: 'GET', access: 'read', authenticated: false } });
+    await invoke('observe', { operation: 'budget', input: {} });
+    await invoke('plan', { version: 1, steps: ['Read the identified row and compare each component'], prerequisites: [],
+      checks: [['allocated', '分配100元', 100], ['invalid', '无效占用777元不扣减', 777], ['remaining', '剩余80元', 80]].map(([id, requirement, expected]) => ({
+        id, line: 1, requirement, channel: 'api', type: 'number', operator: 'equals', expected,
+        subject: { key: 'A', period: '2026-11' }, basis: { quote: expectation } })) });
+    const observed = await invoke('observe', { operation: 'budget', input: {} });
+    const identity = row => ['key', 'period'].map(dimension => ({ dimension, field: ['body', 'rows', row, dimension] }));
+    await assert.rejects(invoke('assert', { checkId: 'remaining', observationId: observed.observationId,
+      field: ['body', 'rows', 0, 'remaining'], identity: identity(0), verifiedIdentity: identity(1) }), /identity differs/);
+    assert.equal(bindingReviews, 0);
+    await assert.rejects(invoke('assert', { checkId: 'remaining', observationId: observed.observationId,
+      field: ['body', 'rows', 0, 'remaining'], identity: identity(1) }), /different row/);
+    for (const id of ['allocated', 'invalid', 'remaining']) {
+      const result = await invoke('assert', { checkId: id, observationId: observed.observationId,
+        field: ['body', 'rows', 1, id], identity: identity(1), sourceRefs: [source.sourceRef] });
+      assert.equal(result.passed, id !== 'remaining');
+      if (id === 'remaining') { assert.equal(result.expected, 80); assert.equal(result.observed, 75); }
+    }
+    await invoke('finish', { actual: 'Correct row has remaining 75; unrelated row with 80 is rejected.' });
+    return { text: 'Recorded' };
+  } }) });
+  const result = await adapter.execute({ item: { caseId: 'C1' }, reports: root, sourceRoot: root, checkOutput: value => value,
+    headers: ['预期结果'], row: [expectation], source: {}, standards: '', mutations: [], resourceNames: ['platform'],
+    useRead: (_, fn) => fn({ base_url: 'http://127.0.0.1:' + server.address().port }) });
+  assert.equal(result.status, '失败'); assert.equal(result.assertions.length, 3); assert.equal(bindingReviews, 4);
+});
+
 test('assertion binding rejects wrong indicators and count-as-money, then records actual computation and missing DOM', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-assertion-semantic-'));
   t.after(() => rm(root, { recursive: true, force: true }));

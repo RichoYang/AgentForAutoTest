@@ -59,7 +59,8 @@ const handler = async (req, res) => {
   if (url.pathname === '/objects' && req.method === 'POST') {
     if (objects.has(key)) { res.statusCode = 409; return res.end(JSON.stringify({ error: 'duplicate' })); }
     objects.set(key, { key, amount: input.amount, period: input.period,
-      ...(['derived-api', 'misleading-api'].includes(mode) ? { appliedAmount: input.appliedAmount ?? 20 } : {}) });
+      ...(['derived-api', 'misleading-api', 'array-identity'].includes(mode) ? { appliedAmount: input.appliedAmount ?? 20 } : {}),
+      ...(mode === 'array-identity' ? { invalidAmount: input.invalidAmount ?? 777 } : {}) });
     if (mode === 'lost-receipt' && !receiptFailures.has(key)) { receiptFailures.add(key); return res.destroy(); }
     return res.end(JSON.stringify({ created: true, key }));
   }
@@ -79,6 +80,13 @@ const handler = async (req, res) => {
     const accounting = object && ['derived-api', 'misleading-api'].includes(mode)
       ? { allocatedAmount: object.amount, appliedAmount: object.appliedAmount, diagnosticAmount: 80,
         ...(mode === 'misleading-api' ? { remainingAmount: 0 } : {}) } : {};
+    // Each allocation row carries its own key and period. The unrelated first
+    // row must not be used for the requested account/period. Invalid occupancy
+    // is listed for evidence but is excluded from effective used/remaining.
+    if (object && mode === 'array-identity') accounting.allocations = [
+      { key: 'comparison-' + object.key, period: '2026-10', allocatedAmount: 900, appliedAmount: 900, invalidAmount: 0, remainingAmount: 0 },
+      { key: object.key, period: object.period, allocatedAmount: object.amount, appliedAmount: object.appliedAmount,
+        invalidAmount: object.invalidAmount, remainingAmount: object.amount - object.appliedAmount }];
     return res.end(JSON.stringify(object ? { exists: true, ...object, ...accounting } : { exists: false }));
   }
   if (url.pathname === '/page') {
@@ -113,7 +121,9 @@ async function skill(name, refs) {
   return { path: folder, sha256: hash.digest('hex') };
 }
 const headers = ['系统', '页面', '用例类型', '前置条件', '模块', '测试场景', '操作步骤', '预期结果', '测试数据', '测试结果', '备注说明', '测试截图', '用户问题', '对接BP', '测试用户', '测试截至日期'];
-let expected = ['derived-api', 'misleading-api'].includes(mode)
+let expected = mode === 'array-identity'
+  ? '1. API的allocations数组中，账户A在2026-11的分配为100元、有效已用为20元、无效占用777元不扣减，剩余80元；按账户和期间定位，不能用其他行替代。\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。'
+  : ['derived-api', 'misleading-api'].includes(mode)
   ? (mode === 'derived-api' ? '1. API返回已分配100元、已用20元，按已分配减已用核算剩余80元。'
     : '1. API返回的剩余金额为80元，来自已分配100元减已用20元；分配、已用和诊断金额不能替代剩余金额。')
     + '\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。'
@@ -123,7 +133,8 @@ let expected = ['derived-api', 'misleading-api'].includes(mode)
 if (mysqlFixture) expected += '\n3. 数据库专属预算行的大整数ID保持准确；将初始100元改为40元后，回读可用预算为40元，业务键仍属于本轮账户A；清理后该行不存在。';
 const row = ['隔离系统', '/page', 'S1--主流程', '1. 在本机隔离环境创建本轮专属账户A，金额100元，期间2026-11；账户业务键必须使用本轮runPrefix。',
   '金额展示', '自主创建并核对接口和页面', '1. 读取源码并创建专属账户A。\n2. 从接口读取A。\n3. 打开A的页面并等待业务加载完成。\n4. 核对页面与接口金额和对象。', expected, ...Array(8).fill('')];
-if (['derived-api', 'misleading-api'].includes(mode)) row[3] += '\n2. 专属账户已分配100元、已用20元；独立期望剩余80元。';
+if (['derived-api', 'misleading-api', 'array-identity'].includes(mode)) row[3] += '\n2. 专属账户已分配100元、已用20元；独立期望剩余80元。';
+if (mode === 'array-identity') row[3] += '\n3. 专属账户无效占用为777元，不参与有效已用和剩余计算。';
 if (mysqlFixture) {
   row[3] += '\n2. 在mysql资源的budget表创建本轮专属行，id为2000000000000000001（必须按字符串保留），business_key使用本轮runPrefix，amount=100，enabled=1。';
   row[6] += '\n5. 冻结独立预期后，将该数据库行的amount更新为40并回读核验身份与金额；结束时恢复并删除专属行，核验无残留。';
@@ -160,7 +171,7 @@ const config = { projects: { demo: { displayName: '隔离系统', repoPath: repo
 await writeJson(path.join(root, 'acceptance-input.json'), { job, mode, url });
 try {
   const dependencies = { client,
-    generate: async () => ({ projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'rules', rule: ['derived-api', 'misleading-api', 'mysql-parameters'].includes(mode) ? expected : '接口与页面均显示100元并对应正确账户。' }],
+    generate: async () => ({ projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'rules', rule: ['derived-api', 'misleading-api', 'mysql-parameters', 'array-identity'].includes(mode) ? expected : '接口与页面均显示100元并对应正确账户。' }],
       caseRequirements: [['R1']], manifest: { headers, module_order: ['金额展示'], required_texts: [], rows: [row] } }) };
   const emit = async event => console.log(JSON.stringify(event));
   if (mode === 'retry-native') {

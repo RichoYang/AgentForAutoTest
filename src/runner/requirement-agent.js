@@ -125,6 +125,7 @@ export function createRequirementAgent(config, options) {
         : kind === 'assertion_binding' ? '核实实际取值字段或计算确实测量原预期要求的业务指标。只判断取值语义，不判断数值是否满足预期。元素count/visible不能冒充金额，已申请/已使用不能冒充剩余，success不能冒充业务数值；不能凭字段名相似或模型声明接受。API根据已读响应DTO/构造逻辑及实际请求定位，SQL根据投影、聚合与过滤核实，页面根据实际选择器/read类型、DOM结构和已核验就绪状态核实。字段缺失可以如实记录失败，但必须证明选择器或响应路径对应所需字段；错误字段或未核实绑定应拒绝并指出所需源码/观测。计算操作数必须是所需同口径业务量，正负号与业务公式一致；页面要求显示剩余时，分配减已用的算术不能代替页面实际显示。实际API不直接提供剩余时，可用同响应中已核实的分配减已用计算。不要根据实测值倒推或改写期望。'
         : '对照原用例完整预期逐条审核检查是否无弱化、遗漏或自证。页面展示必须 page 证据，数据库/审批/账务等分别取适用渠道。数值预期来自用例或独立前置，不能用待测输出作预期。确认主体/期间/切换、负例和不变性全覆盖。允许拆分复合条件。subject只能是对应渠道能回读的实际业务对象和期间；前后时点、切换序号、环境标签须放steps，不能伪装成响应身份。专属数据不存在时不要求响应含不存在的ID；前置与收尾由变更台账回读核验，不要把它们加成无法取身份的业务断言。',
       kind === 'mutation' ? 'hostAuthentication 是本轮连接器从真实登录回执提取的身份及脱敏响应，不是模型自报。对于操作当前登录用户的接口，可将该身份与数据库快照及接口使用认证用户ID的实现共同核对；不能仅因请求未重复携带用户ID拒绝，也不能接受与实际身份不一致的目标。' : '',
+      kind === 'assertion_binding' ? 'verifiedIdentity 是Runner已逐字段核对本次实际观测与冻结subject相等的回执，包含实际字段路径。核对这些身份路径与selected是否属于同一行或同一页面区域；同一数组行已核对月份/主体时，不得仅因使用固定下标而再次要求排序或重复提供响应。身份相等不证明查询过滤正确，也不能用另一行身份为所选行背书。planContext提供同一原始预期行已冻结的拆分检查：结合整组理解当前检查的测量职责，允许分别核对分配、有效占用、无效占用及余额来共同证明排除规则，不要求每一组成项单独证明整句；但兄弟检查不能替代当前检查应测的业务指标，剩余检查仍不得读取已用、诊断值或元素数量。' : '',
       kind === 'operation' && payload.spec?.kind === 'database' ? '这是授权数据库上的直接核对或准备操作，不要求业务仓存在完全相同的SQL入口。以所给实际schemas、实体/业务规则和SQL本身核实表、字段、只读语义或结构化CRUD；不要要求为临时快照查询先在产品源码新增接口。' : '',
       JSON.stringify({ kind, ...payload, environmentProof: scope.resourceCatalog }),
     ].join('\n\n'), { cwd: options.workDir, codexBin: options.codexBin,
@@ -385,12 +386,19 @@ export function createRequirementAgent(config, options) {
           if (!check) throw agentError('Check is not in the frozen plan');
           const observation = knownObservation(args.observationId);
           if (observation.channel !== check.channel || check.channel === 'page' && !observation.data.screenshot) throw agentError('Actual evidence channel does not match the required channel');
-          const binding = assertionBinding(check, observation, args, state.sources);
           if (observation.at < current.planAt) throw agentError('Read a fresh scenario observation after freezing expectations');
+          const verifiedIdentity = [];
           for (const [dimension, value] of Object.entries(check.subject ?? {})) {
             const identity = args.identity?.find(item => item.dimension === dimension);
             if (!identity || !sameValue(observationAt(observation.data, identity.field), value)) throw agentError('Observation identity differs for ' + dimension);
+            verifiedIdentity.push({ dimension, field: identity.field, value: observationAt(observation.data, identity.field),
+              ...(check.channel === 'page' ? { measurement: observation.data.measurements?.[identity.field?.[1]] } : {}) });
           }
+          const binding = assertionBinding(check, observation, args, state.sources, { verifiedIdentity, schemas: state.schemas,
+            planContext: { currentCheckId: check.id,
+              originalExpectation: scope.row[scope.headers.indexOf('预期结果')].split(/\r?\n/).filter(line => line.trim())[check.line - 1],
+              checks: current.plan.checks.filter(item => item.line === check.line).map(item => ({ id: item.id,
+                requirement: item.requirement, channel: item.channel, type: item.type, unit: item.unit, subject: item.subject })) } });
           if (check.basis?.observationId) {
             const baseline = knownObservation(check.basis.observationId);
             const before = measurement(baseline), after = measurement(observation);
@@ -455,6 +463,20 @@ export function createRequirementAgent(config, options) {
       };
       let model;
       try {
+        const priorAttemptReference = await Promise.all(Object.entries(state.cases)
+          .filter(([prior]) => prior !== key && prior.startsWith(scope.item.caseId + '@')).slice(-1)
+          .map(async ([prior, item]) => ({ caseKey: prior, historicalOnly: true, plan: item.plan, aliases: item.aliases,
+            observations: item.observations.map(id => ({ observationId: id, channel: state.observations[id]?.channel,
+              at: state.observations[id]?.at, input: state.observations[id]?.input })),
+            diagnostics: await Promise.all((item.errors ?? []).map(async entry => {
+              if (!entry.path || path.basename(entry.path) !== entry.path) return { evidence: entry.path, unavailable: true };
+              try {
+                const error = await readJson(path.join(options.workDir, 'diagnostics', entry.path));
+                return scope.checkOutput({ evidence: entry.path, at: error.at, tool: error.tool, args: error.args,
+                  code: error.code, message: error.message, external: error.external });
+              } catch { return { evidence: entry.path, unavailable: true }; }
+            })),
+            rule: '只用于复用调查路线并修正已记录的错误，不能把旧计划当作已全部验证。旧观测不能当本次基线/断言，准备数据后必须重新读取并绑定；原断言未完成不等于已验证。' })));
         model = await (options.agentModel ?? requirementAgentModel)({ cwd: options.workDir, codexBin: options.codexBin,
           instructions: instructions + '\n' + scope.standards + '\n' + (scope.skillRules ?? ''), tools: requirementAgentTools, call,
           progress: scope.progress, onThread: async info => { current.model = info; await saveState(); },
@@ -465,11 +487,7 @@ export function createRequirementAgent(config, options) {
           sourceIndex: Object.entries(state.sources).map(([sourceRef, entry]) => ({ sourceRef, path: entry.path, file: entry.file,
             ref: entry.ref, start: entry.start, end: entry.end, sha256: entry.sha256 })),
           existingOperations: state.operations,
-          priorAttemptReference: Object.entries(state.cases).filter(([prior]) => prior !== key && prior.startsWith(scope.item.caseId + '@')).slice(-1)
-            .map(([prior, item]) => ({ caseKey: prior, historicalOnly: true, plan: item.plan, aliases: item.aliases,
-              observations: item.observations.map(id => ({ observationId: id, channel: state.observations[id]?.channel,
-                at: state.observations[id]?.at, input: state.observations[id]?.input })),
-              rule: '只用于复用调查路线。旧观测不能当本次基线/断言，准备数据后必须重新读取并绑定；原断言未完成不等于已验证。' })),
+          priorAttemptReference,
           projectKnowledge: config.knowledgeFile ? await readJson(config.knowledgeFile) : undefined,
           knowledgePolicy: 'existingOperations 是本Job已审核的操作，可直接复用同一契约；需改变契约才另起名称登记。projectKnowledge 是跨任务线索，须核实当前源码和资源再登记。实时对象和基线必须本次回读，不从历史推断。',
           recovery: current, mutations: scope.mutations });

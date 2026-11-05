@@ -1,7 +1,7 @@
 import { observationAt, evaluateCaseAssertion, evaluateDerivedAssertion } from './requirement-assertions.js';
 import { agentError } from './requirement-agent-resources.js';
 
-export function assertionBinding(check, observation, args, sources) {
+export function assertionBinding(check, observation, args, sources, context = {}) {
   if (args.calculation && (!Array.isArray(args.calculation.terms)
     || args.calculation.terms.some(term => !term || typeof term !== 'object'))) {
     throw agentError('calculation.terms must be an array of {field:[actual value path],sign:1|-1}');
@@ -28,10 +28,15 @@ export function assertionBinding(check, observation, args, sources) {
   const evidence = refs ? refs.map(ref => ({ sourceRef: ref, ...sources[ref] }))
     : check.channel === 'api' ? Object.entries(sources).filter(([, source]) => source.text && tokens.some(token => source.text.includes(token)))
       .map(([sourceRef, source]) => ({ sourceRef, ...source })) : [];
+  const query = observation.measurement ?? (observation.input?.sql ? observation.input : undefined);
+  const databaseSchemas = query?.sql ? Object.values(context.schemas ?? {}).filter(schema => schema.resource === query.resource
+    && schema.database === query.database && /^[A-Za-z0-9_]+$/.test(schema.table)
+    && new RegExp('\\b' + schema.table + '\\b', 'i').test(query.sql)) : undefined;
   return { requirement: check.requirement, channel: check.channel, type: check.type, unit: check.unit,
     subject: check.subject, selected, calculation: args.calculation,
+    verifiedIdentity: context.verifiedIdentity, planContext: context.planContext,
     request: observation.channel === 'api' ? { path: observation.data.path, method: observation.data.method, status: observation.data.status, request: observation.data.request } : undefined,
-    query: observation.measurement ?? (observation.input?.sql ? observation.input : undefined),
+    query, databaseSchemas,
     page: check.channel === 'page' ? { url: observation.data.url, ready: observation.data.ready, dom: observation.data.dom } : undefined,
     sources: evidence };
 }
