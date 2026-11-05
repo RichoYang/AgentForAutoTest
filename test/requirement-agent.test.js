@@ -45,6 +45,11 @@ test('database connector preserves fiscal dates and microseconds from the MySQL 
 test('source search reads the selected repository when child stdin is a pipe', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-source-')); t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, 'service'));
+  await mkdir(path.join(root, '.git'));
+  await writeFile(path.join(root, '.gitignore'), 'service/\n');
+  await mkdir(path.join(root, 'service', 'node_modules'));
+  await writeFile(path.join(root, 'service', 'node_modules', 'noise.js'), 'fiscalBalance=private\n');
+  await writeFile(path.join(root, 'service', 'secrets.ini'), 'fiscalBalance=private\n');
   await writeFile(path.join(root, 'service', 'budget.js'), 'export const fiscalBalance = 100;\n');
   await writeFile(path.join(root, 'secrets.ini'), 'fiscalBalance=private\n');
   const found = await readSource(root, { action: 'search', path: 'service', pattern: 'fiscalBalance' });
@@ -52,6 +57,8 @@ test('source search reads the selected repository when child stdin is a pipe', a
   assert.equal((await readSource(root, { action: 'search', path: 'service/budget.js', pattern: 'fiscalBalance' })).total, 1);
   const all = await readSource(root, { action: 'search', pattern: 'fiscalBalance' });
   assert.equal(all.total, 1); assert.doesNotMatch(all.lines.join('\n'), /private/);
+  const files = await readSource(root, { action: 'files' });
+  assert.ok(files.lines.some(file => /budget.js$/.test(file))); assert.doesNotMatch(files.lines.join('\n'), /secrets.ini|noise.js/);
   assert.equal((await readSource(root, { action: 'search', pattern: 'missingPattern' })).total, 0);
   assert.throws(() => validateRouteTemplate('/page?key={$input:"key"}', '$.spec.path'), /spec.path uses \{parameter\}/);
 });
@@ -119,6 +126,70 @@ test('adapter upgrade advances an interrupted attempt once and leaves untouched 
   assert.equal(journal.executionHistory[0].inFlight, 'C1');
   assert.equal(journal.executionCases.C1.lastAttempt, 3);
   assert.equal(journal.cleanup.verified, true);
+});
+
+test('failed-case retry preserves same Job history and passed results, and refuses unresolved writes', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-failed-retry-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'reports'));
+  const iniPath = path.join(root, 'env.ini');
+  await writeFile(iniPath, '[Demo.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nbase_url=http://127.0.0.1:1');
+  const publication = { url: 'https://fixture.invalid/Original', version: 'unchanged' };
+  const journal = { publication, results: { C1: { status: '失败', actual: 'original failure' }, C2: { status: '通过', actual: 'retained pass' } },
+    mutations: [{ key: 'pending', cleanup: { verified: false } }], caseAttempts: { C1: 1, C2: 1 } };
+  const job = { id: 'JOB-original', projectId: 'demo', requirement: { retryRequest: 'message-1', retryStatuses: ['失败', '未执行'] } };
+  let calls = 0;
+  const run = () => executeCases({ job, journal,
+    settings: { environment: { name: 'UAT', platform: 'Demo', iniPath, lockKey: 'local', resources: { platform: { section: 'Demo.Uat.Platform', scope: 'full_crud' } } },
+      lockDirectory: path.join(root, 'locks'), execution: { mode: 'agent' } }, project: { repoPath: root }, source: {},
+    index: ['C1', 'C2', 'C3'].map((caseId, i) => ({ caseId, row: i + 2, requirementIds: [] })),
+    manifest: { headers: ['前置条件', '预期结果'], rows: Array.from({ length: 3 }, () => ['fixture', '1. 金额100元']) },
+    regression: { files: { 'references/execution-standard.md': '' } }, workDir: root, reportDir: path.join(root, 'reports'),
+    save: async () => {}, progress: async () => {}, agentModel: async ({ call }) => ({ close: async () => {}, async turn() {
+      calls++;
+      await call('test_finish', { args: { actual: 'Module fixture only', blocker: { dependency: 'fixture', required_action: 'native acceptance', attempts: ['module only'] } } }, 'finish');
+      return { text: 'recorded' };
+    } }) });
+  await assert.rejects(run(), { code: 'cleanup_pending' }); assert.equal(calls, 0);
+  journal.mutations[0].cleanup.verified = true;
+  await run();
+  assert.equal(calls, 2); assert.equal(journal.caseAttempts.C1, 2); assert.equal(journal.caseAttempts.C2, 1);
+  assert.equal(journal.caseAttempts.C3, 1); assert.equal(journal.results.C2.status, '通过');
+  assert.equal(journal.executionHistory[0].results.C1.actual, 'original failure');
+  assert.equal(journal.executionHistory[0].reason, 'retry_failed');
+  assert.deepEqual(journal.publication, publication); assert.equal(journal.cleanup.verified, true);
+  await run(); assert.equal(calls, 2); assert.equal(journal.executionHistory.length, 1);
+});
+
+test('measurement query mismatches are recoverable tool errors while matching queries retain real failures', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-measurement-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const query = "SELECT SHA2(JSON_OBJECT('name',name),256) AS hash FROM account WHERE id=?";
+  const badQuery = query.replace("'name',name", "'name',reason");
+  const baseline = { observationId: 'baseline', caseKey: 'C1@1', channel: 'database', at: '2026-01-01T00:00:01Z',
+    input: { resource: 'db', database: 'fixture', sql: query, params: ['A'] }, data: { rows: [{ hash: 'before' }] } };
+  const observations = { baseline, mismatch: { ...baseline, observationId: 'mismatch', at: '2026-01-01T00:00:03Z', input: { ...baseline.input, sql: badQuery }, data: { rows: [{ hash: 'different' }] } },
+    corrected: { ...baseline, observationId: 'corrected', at: '2026-01-01T00:00:04Z' },
+    productFailure: { ...baseline, observationId: 'productFailure', at: '2026-01-01T00:00:05Z', data: { rows: [{ hash: 'changed' }] } } };
+  const plan = { checks: [{ id: 'unchanged', line: 1, requirement: 'existing records unchanged', channel: 'database', expected: 'before', type: 'text', operator: 'equals',
+    basis: { observationId: 'baseline', field: ['rows', 0, 'hash'], explanation: 'invariance' } }] };
+  await writeFile(path.join(root, 'agent-tool-state.json'), JSON.stringify({ operations: {}, sources: {}, schemas: {}, observations,
+    cases: { 'C1@1': { startedAt: '2026-01-01T00:00:00Z', planAt: '2026-01-01T00:00:02Z', plan, assertions: {}, aliases: {}, observations: Object.keys(observations), errors: [] } } }));
+  let reviews = 0;
+  const adapter = createRequirementAgent({}, { workDir: root, review: async prompt => {
+    reviews++; assert.match(prompt, /JSON_OBJECT/); assert.doesNotMatch(prompt, /"hash":"different"|"hash":"changed"/);
+    return { accepted: false, errors: ['actual.query.sql maps name to reason instead of name'] };
+  }, agentModel: async ({ call }) => ({ close: async () => {}, async turn() {
+    const compare = observationId => call('test_assert', { args: { checkId: 'unchanged', observationId, field: ['rows', 0, 'hash'] } }, observationId);
+    await assert.rejects(compare('mismatch'), /maps name to reason/);
+    assert.equal((await compare('corrected')).passed, true);
+    assert.equal((await compare('productFailure')).passed, false);
+    await call('test_finish', { args: { actual: 'Corrected query passed, later genuine data change failed.' } }, 'finish');
+    return { text: 'recorded' };
+  } }) });
+  const result = await adapter.execute({ item: { caseId: 'C1' }, attempt: 1, reports: root, checkOutput: value => value,
+    headers: ['预期结果'], row: ['1. existing records unchanged'], source: {}, resourceNames: [], mutations: [], standards: '' });
+  assert.equal(reviews, 1); assert.equal(result.status, '失败'); assert.equal(result.assertions.length, 2);
+  const saved = JSON.parse(await readFile(path.join(root, 'agent-tool-state.json'), 'utf8'));
+  assert.equal(saved.cases['C1@1'].errors.length, 1);
 });
 
 test('plan errors retain candidates and correct both syntax and field errors without losing requirements', async t => {
@@ -293,10 +364,16 @@ test('tool channel evidence cannot be relabelled and runner migrates an old unex
     const staleBaseline = structuredClone(plan); staleBaseline.checks[0].basis = { observationId: 'old-observation', field: ['body', 'amount'], explanation: 'historical baseline' };
     await assert.rejects(invoke('plan', staleBaseline), /case attempt/);
     await invoke('plan', plan);
+    assert.deepEqual((await invoke('plan', { action: 'inspect' })).plan, plan);
+    const badExplanation = structuredClone(plan); badExplanation.checks[0].basis.explanation = 'rewritten';
+    await assert.rejects(invoke('plan', badExplanation), /checks\[0\]\.basis\.explanation is frozen/);
+    await invoke('plan', { identityCorrections: [{ checkId: 'balance', subject: { accountId: 'A' } }] });
+    await invoke('plan', { identityCorrections: [{ checkId: 'balance', subject: { account: 'A' } }] });
     await assert.rejects(invoke('assert', { checkId: 'balance', observationId: 'old-observation', field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'key'] }] }), /case attempt/);
     const observed = await invoke('observe', { operation: 'budget', input: {}, subject: { account: 'A' } });
     await assert.rejects(invoke('assert', { checkId: 'balance', observationId: observed.observationId, field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'wrong'] }] }));
     captured = await invoke('assert', { checkId: 'balance', observationId: observed.observationId, field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'key'] }] });
+    await assert.rejects(invoke('plan', { identityCorrections: [{ checkId: 'balance', subject: { accountId: 'A' } }] }), /compared check/);
     const changed = structuredClone(plan); changed.checks[0].expected = 0;
     await assert.rejects(invoke('plan', changed), /Frozen expectations/);
     await invoke('finish', { actual: '账户A实测金额0元，低于预期100元。', classification: '产品' });

@@ -63,10 +63,13 @@ const handler = async (req, res) => {
   }
   res.statusCode = 404; res.end('{"error":"not found"}');
 };
-await writeFile(path.join(repo, 'service.mjs'), '// Isolated local service contract and actual handler. Business GET is read-only.\n'
+const serviceDirectory = mode === 'ignored-sources' ? path.join(repo, 'business-service') : repo;
+await mkdir(serviceDirectory, { recursive: true });
+if (mode === 'ignored-sources') await writeFile(path.join(repo, '.gitignore'), 'business-service/\n');
+await writeFile(path.join(serviceDirectory, 'service.mjs'), '// Isolated local service contract and actual handler. Business GET is read-only.\n'
   + 'const objects = new Map(), requests = [];\nconst preferences={key:"fixture-operator",language:"en"};\nconst mode = ' + JSON.stringify(mode) + '; const navigation=' + navigation + '; const cleanupFailures=new Set(), receiptFailures=new Set();\nconst handler = ' + handler.toString()
   + ';\n// The Runner resource catalog binds platform to createServer(handler), listening only on 127.0.0.1. requests is in-memory audit only.\n');
-await writeFile(path.join(repo, 'AGENTS.md'), '# 本地隔离测试服务\n仅本机回环资源。阅读 service.mjs 发现接口。对象必须使用当前任务前缀，不改源码。\n');
+await writeFile(path.join(repo, 'AGENTS.md'), '# 本地隔离测试服务\n仅本机回环资源。搜索项目源码发现接口与实现。对象必须使用当前任务前缀，不改源码。\n');
 try { await lstat(path.join(repo, '.git')); await command('git', ['-C', repo, 'rev-parse', 'HEAD']); }
 catch { await command('git', ['init', '-b', 'main', repo]); await command('git', ['-C', repo, 'add', '.']);
   await command('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Isolated runtime contract']); }

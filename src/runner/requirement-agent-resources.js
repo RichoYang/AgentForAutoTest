@@ -63,7 +63,8 @@ export async function readSource(root, args) {
       text: lines.slice(start - 1, end).map((line, i) => `${start + i}: ${line}`).join('\n') };
   }
   if (args.action === 'search' || args.action === 'files') {
-    const flags = ['--glob', '!node_modules/**', '--glob', '!.git/**', '--glob', '!*.local.*', '--glob', '!settings.xml',
+    // Workspace VCS rules often ignore independently versioned business repos.
+    const flags = ['--no-ignore-vcs', '--glob', '!**/node_modules/**', '--glob', '!**/.git/**', '--glob', '!*.local.*', '--glob', '!settings.xml',
       '--glob', '!*.ini', '--glob', '!*.env*', '--glob', '!.npmrc'];
     // execFile keeps stdin as a pipe. An explicit path makes rg search the source
     // tree instead of waiting forever for input from that still-open pipe.

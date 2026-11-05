@@ -294,7 +294,7 @@ export async function runReportBuilder(skill, input, workDir, reportDir, now) {
     stage = 'layout';
     await fitReportRows(builder, output, previewDir, payload);
     report.sha256 = await hashFile(output);
-    report.layoutVersion = 'autofit-1';
+    report.layoutVersion = 'autofit-2';
     const counts = await verifyWorkbookCounts(builder, output, payload);
     stage = 'previews';
     const previews = (await readdir(previewDir)).filter(file => /^\d{2}-.+\.png$/.test(file)).sort();
@@ -328,6 +328,12 @@ export async function fitReportRows(builder, output, previewDir, payload) {
     const contract = WORKBOOK_CONTRACT[i], sheet = workbook.worksheets.getItem(contract.name);
     const rows = Math.max(3, (payload[sections[i - 2]]?.length ?? 0) + 2);
     sheet.getRange(`A3:${letter(contract.headers.length)}${rows}`).format.autofitRows();
+    // Autofit can leave the last wrapped line on the PNG boundary, especially
+    // for mixed JSON and CJK text. Preserve content and add bottom breathing room.
+    for (let row = 3; row <= rows; row++) {
+      const range = sheet.getRange(`A${row}:${letter(contract.headers.length)}${row}`);
+      range.format.rowHeightPx = Math.ceil(range.format.rowHeightPx) + 16;
+    }
   }
   workbook.recalculate();
   await (await SpreadsheetFile.exportXlsx(workbook)).save(output);

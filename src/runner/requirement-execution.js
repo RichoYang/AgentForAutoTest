@@ -137,6 +137,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
   let lock = await readJson(lockFile);
   const retryRequest = job.requirement.retryRequest;
   const retry = retryRequest && retryRequest !== journal.lastRetryRequest;
+  const retryStatuses = retry && job.requirement.retryStatuses?.includes('失败') ? ['失败', '未执行'] : ['未执行'];
   const advancedAttempts = new Set();
   if ((migrating || retry) && (lock && (lock.jobId !== job.id || lock.binding !== journal.executionBinding))) {
     throw new RequirementWait('environment_busy', '原任务资源锁身份已变化，不能迁移或重试。');
@@ -145,12 +146,13 @@ export async function executeCases({ job, settings, journal, source, index, mani
   if (migrating || retry) {
     journal.executionHistory ??= [];
     journal.executionHistory.push(structuredClone({ binding: journal.executionBinding, at: new Date().toISOString(),
-      reason: migrating ? 'adapter_upgrade_without_pending_effects' : 'retry_unexecuted', results: journal.results,
+      reason: migrating ? 'adapter_upgrade_without_pending_effects' : retryStatuses.includes('失败') ? 'retry_failed' : 'retry_unexecuted',
+      retryStatuses, retryRequest: retry ? retryRequest : undefined, results: journal.results,
       preparations: journal.preparations, executionSteps: journal.executionSteps, cleanup: journal.cleanup, mutations: journal.mutations,
       caseAttempts: journal.caseAttempts, executionCases: journal.executionCases, inFlight: journal.inFlight }));
     journal.caseAttempts ??= {};
     for (const item of index) {
-      if (!journal.results?.[item.caseId] || journal.results[item.caseId].status === '未执行') {
+      if (!journal.results?.[item.caseId] || retryStatuses.includes(journal.results[item.caseId].status)) {
         const checkpoint = journal.executionCases?.[item.caseId];
         const attempted = journal.results?.[item.caseId] || journal.preparations?.[item.caseId]
           || checkpoint && (journal.caseAttempts[item.caseId] === undefined || checkpoint.lastAttempt === journal.caseAttempts[item.caseId]);

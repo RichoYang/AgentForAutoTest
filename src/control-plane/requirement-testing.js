@@ -105,6 +105,7 @@ function requirementCommandText(content, mentions = []) {
 
 function requirementCommand(text) {
   if (/^(?:请)?重试(?:未执行|未执行用例|未执行的用例)$/.test(text)) return 'retry_unexecuted';
+  if (/^(?:请)?重试(?:失败|失败用例|失败的用例)$/.test(text)) return 'retry_failed';
   if (/^(?:请)?(?:继续|恢复)(?:测试|任务|执行|运行)?(?:一下|吧)?$/.test(text)) return 'resume';
   if (/^(?:请)?(?:暂停|取消|停止)(?:测试|任务|执行|运行)?(?:一下|吧)?$/.test(text)) return text.includes('暂停') ? 'pause' : 'cancel';
   if (text === '恢复清理' || text === '继续清理') return 'cleanup';
@@ -119,7 +120,7 @@ function requirementStatus(job, reason, settings) {
   const started = job.events.findLastIndex(event => event.type === 'started');
   const progress = job.events.slice(Math.max(started, 0)).findLast(event => event.type === 'progress' && event.activity)?.activity;
   const instructions = {
-    requirement_unknown_command: '可回复「当前进度」「当前阻塞」「继续测试」「暂停测试」「取消测试」或「恢复清理」。',
+    requirement_unknown_command: '可回复「当前进度」「当前阻塞」「继续测试」「暂停测试」「取消测试」「恢复清理」「重试未执行」或「重试失败」。',
     requirement_confirmation_required: '解除阻塞需先回复「确认项目」。',
     requirement_material_confirmation: '请按上面的待确认项回复「确认图示 问题编号 答复」，或回复「恢复清理」。',
     requirement_invalid_transition: '当前状态不允许此操作。暂停或阻塞解除后可回复「继续测试」。已取消的任务有待清理数据时可回复「恢复清理」。',

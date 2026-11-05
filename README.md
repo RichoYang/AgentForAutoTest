@@ -1,6 +1,6 @@
 # Angel AgentOS
 
-**程序版本：v1.46.5** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
+**程序版本：v1.47.0** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
 
 本项目的源码、后续修改和提交统一维护在此仓库。历史验证覆盖包的合并关系及维护约定见 [源码维护](docs/source-maintenance.md)。
 

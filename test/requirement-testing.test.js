@@ -125,6 +125,16 @@ test('two specialists in one group isolate trusted app, project, duplicate event
   assert.match(card.at(-1).text, /已暂停/);
   assert.equal((await follow('resumeAgain', '继续测试')).jobId, a.jobId);
   assert.deepEqual(await follow('resumeAgain', '继续测试'), { duplicate: true });
+  await ltx.store.transact(state => { state.jobs[0].status = 'completed'; state.jobs[0].requirement.cleanupOnly = true; });
+  await handleRequirementMessage(ltx, input('ltx', 'retryOther', { thread_id: 'omt_a', sender_id: 'ou_other', content: '重试失败', mentions: [] }));
+  assert.equal((await ltx.store.getJob(a.jobId)).status, 'completed');
+  assert.equal((await follow('retryFailed', '重试失败用例')).jobId, a.jobId);
+  assert.deepEqual((await ltx.store.getJob(a.jobId)).requirement.retryStatuses, ['失败', '未执行']);
+  assert.equal((await ltx.store.getJob(a.jobId)).requirement.cleanupOnly, undefined);
+  assert.deepEqual(await follow('retryFailed', '重试失败用例'), { duplicate: true });
+  await ltx.store.transact(state => { state.jobs[0].status = 'completed'; });
+  await follow('retryMissing', '重试未执行');
+  assert.deepEqual((await ltx.store.getJob(a.jobId)).requirement.retryStatuses, ['未执行']);
   assert.equal((await ltx.store.read()).jobs.length, 1);
 });
 
