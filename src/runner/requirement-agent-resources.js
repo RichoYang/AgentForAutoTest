@@ -7,6 +7,7 @@ import { chromium } from 'playwright';
 import { observationAt } from './requirement-assertions.js';
 import { waitBusinessReady } from './requirement-adapter.js';
 import { digest } from './requirement-feishu.js';
+import { buildRecordSnapshot } from './requirement-snapshot.js';
 
 const exec = promisify(execFile);
 export const agentError = message => Object.assign(new Error(message), { safeMessage: message });
@@ -339,6 +340,87 @@ export function createAgentResources(config, scope) {
       if (!actual || digest(actual.identity) !== digest(expected.identity)) throw agentError('Authenticated identity changed; reconcile the original target before writing or restoring');
     },
     performSpec,
+    async snapshot(args) {
+      return scope.useRead(args.resource, async resource => {
+        const connection = await connect(resource, args.database);
+        const startedAt = new Date().toISOString();
+        try {
+          // TIMESTAMP is rendered in the session zone. Fix it before collection
+          // so a server default-zone change cannot look like a business change.
+          await connection.query("SET time_zone = '+00:00'");
+          const table = identifier(args.table);
+          const [columns] = await connection.query('SHOW FULL COLUMNS FROM ' + table);
+          const [indexes] = await connection.query('SHOW INDEX FROM ' + table);
+          const [status] = await connection.execute('SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?', [args.database, args.table]);
+          if (status[0]?.ENGINE !== 'InnoDB') throw agentError('Consistent snapshots require a transactional InnoDB table; use a source with a proven immutable version for other engines');
+          const known = columns.map(column => column.Field);
+          const key = indexes.filter(index => index.Key_name === 'PRIMARY').sort((a, b) => a.Seq_in_index - b.Seq_in_index).map(index => index.Column_name);
+          if (!key.length) throw agentError('Complete snapshot requires the actual primary key');
+          const fields = [...(args.fields ?? known)].sort();
+          const filters = args.scope;
+          if (!filters || !Object.keys(filters).length || [...Object.keys(filters), ...fields, ...key].some(field => !known.includes(field))) throw agentError('Snapshot needs explicit schema-backed scope and covered key fields');
+          if (Object.values(filters).some(value => value === undefined || value !== null && typeof value === 'object')) throw agentError('Snapshot scope values must be exact scalar equalities');
+          if ([...key, ...Object.keys(filters)].some(field => !fields.includes(field))) throw agentError('Snapshot fields must include the primary key and scope fields');
+          const pageSize = args.pageSize ?? 500;
+          if (!Number.isSafeInteger(pageSize) || pageSize < 1) throw agentError('pageSize must be a positive safe integer');
+          const where = Object.keys(filters).map(field => identifier(field) + ' <=> ?').join(' AND ');
+          const parameters = mysqlParameters(Object.values(filters));
+          await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+          await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
+          const [counts] = await connection.execute({ sql: 'SELECT COUNT(*) AS count FROM ' + table + ' WHERE ' + where, timeout: 30000 }, parameters);
+          const expectedCount = Number(counts[0].count);
+          if (!Number.isSafeInteger(expectedCount)) throw agentError('Snapshot count cannot be represented exactly');
+          const rows = [], pageCounts = [];
+          let offset = 0;
+          // A single MVCC snapshot covers the count and every page. A final empty
+          // page proves exhaustion even when the count is an exact page multiple.
+          for (;;) {
+            const [page] = await connection.execute({ sql: 'SELECT ' + fields.map(identifier).join(',') + ' FROM ' + table
+              + ' WHERE ' + where + ' ORDER BY ' + key.map(identifier).join(',') + ` LIMIT ${pageSize} OFFSET ${offset}`, timeout: 30000 }, parameters);
+            rows.push(...page); pageCounts.push(page.length); offset += page.length;
+            if (page.length < pageSize) break;
+          }
+          const [finalColumns] = await connection.query('SHOW FULL COLUMNS FROM ' + table);
+          if (digest(columns) !== digest(finalColumns)) throw agentError('Schema changed during snapshot collection');
+          await connection.rollback();
+          // Normalize only equality values whose database representation is known
+          // from the schema. Do not coerce null or arbitrary strings to zero.
+          const normalizedScope = Object.fromEntries(Object.entries(filters).map(([field, value]) => {
+            const column = columns.find(column => column.Field === field);
+            if (value === null) return [field, null];
+            const decimal = column.Type.match(/^(?:decimal|numeric)\(\d+,(\d+)\)/i);
+            if (decimal) {
+              const match = String(value).match(/^(-?)(\d+)(?:\.(\d+))?$/);
+              if (!match || typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) throw agentError('Decimal scope requires an exact value: ' + field);
+              const scale = Number(decimal[1]), fraction = match[3] ?? '';
+              if (/[^0]/.test(fraction.slice(scale))) throw agentError('Decimal scope would lose precision: ' + field);
+              const integer = BigInt(match[2]).toString(), padded = fraction.slice(0, scale).padEnd(scale, '0');
+              return [field, (match[1] && (integer !== '0' || /[1-9]/.test(padded)) ? '-' : '') + integer + (scale ? '.' + padded : '')];
+            }
+            if (/^bigint/i.test(column.Type)) {
+              if (!/^-?\d+$/.test(String(value)) || typeof value === 'number' && !Number.isSafeInteger(value)) throw agentError('BIGINT scope requires exact integer text: ' + field);
+              return [field, BigInt(value).toString()];
+            }
+            if (/^(?:tinyint|smallint|mediumint|int|year)\b/i.test(column.Type)) {
+              if (!/^-?\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw agentError('Integer scope is not exact: ' + field);
+              return [field, Number(value)];
+            }
+            return [field, /^(?:date|time|char|varchar|text)/i.test(column.Type) ? String(value) : value];
+          }));
+          const snapshot = buildRecordSnapshot({ resource: args.resource, database: args.database, table: args.table,
+            scope: normalizedScope, key, fields, coverage: args.fields ? 'explicit-fields' : 'all-schema-fields',
+            schemaFingerprint: digest([columns, indexes]), timestampTimeZone: '+00:00', dateTimePolicy: 'preserve stored calendar value' }, rows,
+          { complete: true, expectedCount, consistency: 'repeatable-read', isolation: 'REPEATABLE READ', engine: 'InnoDB',
+            pages: pageCounts.length, pageCounts, pageSize, startedAt, finishedAt: new Date().toISOString() });
+          scope.state.schemas ??= {};
+          scope.state.schemas[args.resource + ':' + args.database + ':' + args.table] = { resource: args.resource, database: args.database, table: args.table, columns, indexes };
+          await scope.saveState();
+          // Hashes are calculated before redaction; secrets can affect equality
+          // but their plaintext never leaves this connector.
+          return sanitized(snapshot);
+        } finally { await connection.end(); }
+      });
+    },
     async schema(args) {
       return scope.useRead(args.resource, async resource => {
         const connection = await connect(resource, args.database);
@@ -366,6 +448,7 @@ export function createAgentResources(config, scope) {
       return scope.useRead(args.resource, async resource => {
         const session = await browserSession(args.resource, resource);
         const { page, network } = session;
+        const actionStartedAt = new Date().toISOString();
         if (args.action === 'fault') {
           const operation = operations()[args.operation];
           if (!operation || operation.resource !== args.resource || operation.kind !== 'http' || operation.access !== 'read') throw agentError('Browser fault injection requires a verified read operation on this resource');
@@ -383,7 +466,9 @@ export function createAgentResources(config, scope) {
         else if (args.action === 'wait') await waitBusinessReady(page, args.ready);
         else if (!['inspect', 'observe'].includes(args.action)) throw agentError('Unknown browser action');
         if (args.ready) { await waitBusinessReady(page, args.ready); session.ready = { condition: args.ready, at: new Date().toISOString() }; }
-        const data = { url: page.url(), network: network.splice(0), ...(session.fault ? { activeFault: session.fault, simulatedFault: true } : {}) };
+        const data = { url: page.url(), network: network.splice(0), lifecycle: { actionStartedAt,
+          actionCompletedAt: new Date().toISOString(), observationTimestampMeaning: 'saved after this action and its requested readiness wait' },
+          ...(session.fault ? { activeFault: session.fault, simulatedFault: true } : {}) };
         if (args.action === 'inspect') data.dom = await page.locator('body').ariaSnapshot();
         if (args.action === 'observe') {
           if (!session.ready) throw agentError('Use a business-ready condition before page observation (loading hidden, busy=false, completed revision); not the expected amount');

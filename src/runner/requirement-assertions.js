@@ -162,6 +162,12 @@ function compareDecimal(left, right) {
 }
 
 export function evaluateCaseAssertion(data, rule) {
+  if (rule.type === 'null') {
+    const value = observationAt(data, rule.field);
+    return { assertion: rule.assertion, fragment: rule.fragment, field: rule.field, expected: rule.expected, observed: value,
+      compared: rule.operator === 'equals' && rule.expected === null, passed: rule.operator === 'equals' && rule.expected === null && value === null,
+      ...(value === undefined ? { missing: true } : {}) };
+  }
   const { value, unit, exact, comparable: hasValue } = observedValue(data, rule);
   const inputs = rule.operands?.map(term => ({ id: term.id, sign: term.sign, ...observedValue(data, term.binding) }));
   const operandsValid = !inputs || inputs.every(item => item.comparable && item.unit === rule.unit);
@@ -182,15 +188,34 @@ export function evaluateCaseAssertion(data, rule) {
 
 // Actual business values may be derived from multiple independently observed
 // operands. This never changes the frozen expected value or its provenance.
-export function evaluateDerivedAssertion(data, rule, terms) {
-  if (!Array.isArray(terms) || !terms.length || terms.some(term => !Array.isArray(term.field) || ![1, -1].includes(term.sign))) {
+export function validateDerivedTerms(terms) {
+  if (!Array.isArray(terms) || !terms.length || terms.some(term => !term || !Array.isArray(term.field) || !term.field.length || ![1, -1].includes(term.sign))) {
     throw new Error('calculation.terms needs field paths and sign 1 or -1');
   }
-  const actualInputs = terms.map(term => ({ field: term.field, sign: term.sign,
-    ...observedValue(data, { field: term.field, type: 'number', encoding: 'decimal-text', unit: rule.unit }) }));
+  for (const [index, term] of terms.entries()) {
+    if (!Object.hasOwn(term, 'nullAs')) continue;
+    const value = term.nullAs?.value;
+    if (!term.nullAs || typeof term.nullAs !== 'object' || Array.isArray(term.nullAs)
+      || typeof term.nullAs.reason !== 'string' || !term.nullAs.reason.trim()
+      || !(typeof value === 'number' && Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value))
+        || typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value)))) {
+      throw new Error(`calculation.terms[${index}].nullAs needs an exact numeric value and a source-backed business reason`);
+    }
+  }
+}
+
+export function evaluateDerivedAssertion(data, rule, terms) {
+  validateDerivedTerms(terms);
+  const actualInputs = terms.map(term => {
+    const rawValue = observationAt(data, term.field), normalize = rawValue === null && term.nullAs;
+    const value = observedValue(normalize ? { value: term.nullAs.value } : data,
+      { field: normalize ? ['value'] : term.field, type: 'number', encoding: 'decimal-text', unit: rule.unit });
+    return { field: term.field, sign: term.sign, ...value,
+      ...(normalize ? { rawValue, normalization: { kind: 'nullAs', ...term.nullAs } } : {}) };
+  });
   if (actualInputs.some(input => !input.comparable)) return { assertion: rule.assertion, fragment: rule.fragment,
     expected: rule.expected, expectedUnit: rule.unit, actualInputs, compared: false, passed: false,
-    reason: 'Every calculation operand must be an observed numeric value; missing, empty or array values are not zero' };
+    reason: 'Every calculation operand must be numeric or explicitly normalized from null; missing, empty or array values are not zero' };
   const actual = compareDecimal('0', actualInputs).exact;
   const result = evaluateCaseAssertion({ actual }, { ...rule, field: ['actual'], encoding: 'decimal-text' });
   return { ...result, field: undefined, calculation: { terms }, actualInputs };

@@ -1,7 +1,7 @@
 // Explicit local-only acceptance: real planning/review models, real Chromium/HTTP,
 // normal requirement Runner; Feishu transport and supplied source material are fixtures.
 import { createServer } from 'node:http';
-import { mkdir, readFile, writeFile, realpath, lstat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, realpath, lstat, cp } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -12,11 +12,25 @@ import { generatorReferences, regressionReferences, command, writeJson } from '.
 
 const base = fileURLToPath(new URL('../', import.meta.url));
 const root = path.resolve(process.argv[2] ?? path.join(base, '.local/requirement-agent-acceptance'));
+const resumeReport = process.argv.includes('--resume-report');
+const previous = resumeReport ? JSON.parse(await readFile(path.join(root, 'acceptance-input.json'))) : null;
+if (previous) {
+  const journal = JSON.parse(await readFile(path.join(root, 'data/requirement-tests', previous.job.id, 'journal.json')));
+  if (journal.mutations?.some(m => m.cleanup?.verified !== true)
+    || !Object.values(journal.results ?? {}).length
+    || Object.values(journal.results).some(r => !['通过', '失败', '不适用'].includes(r.status))) throw new Error('Report-only fixture resume requires finished cases and verified cleanup');
+  const archive = path.join(root, 'before-report-resume-' + Date.now()); await mkdir(archive);
+  for (const name of ['data', 'reports', 'result.json', 'report-source.json']) {
+    const exists = await lstat(path.join(root, name)).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+    if (exists) await cp(path.join(root, name), path.join(archive, name), { recursive: true });
+  }
+}
 await mkdir(root, { recursive: true });
 const repo = path.join(root, 'source'); await mkdir(repo, { recursive: true });
 const objects = new Map(), requests = [];
 const preferences = { key: 'fixture-operator', language: 'en' };
 const mode = process.env.AGENTOS_ACCEPTANCE_MODE ?? 'positive';
+if (previous && (previous.mode !== mode || mode === 'mysql-parameters')) throw new Error('Resume the same in-memory fixture only after cleanup');
 const mysqlFixture = mode === 'mysql-parameters' ? { port: Number(process.env.AGENTOS_TEST_MYSQL_PORT),
   database: 'aos_native_' + Date.now() } : null;
 if (mysqlFixture) {
@@ -87,6 +101,23 @@ const handler = async (req, res) => {
       { key: 'comparison-' + object.key, period: '2026-10', allocatedAmount: 900, appliedAmount: 900, invalidAmount: 0, remainingAmount: 0 },
       { key: object.key, period: object.period, allocatedAmount: object.amount, appliedAmount: object.appliedAmount,
         invalidAmount: object.invalidAmount, remainingAmount: object.amount - object.appliedAmount }];
+    // Empty effective-occupancy collections are returned as a null aggregate,
+    // representing no occupancy (zero), not unavailable data. The wrong mode
+    // deliberately adds an erroneous effective occupancy despite an empty
+    // prepared account; a nonnull amount must never be replaced by nullAs.
+    if (object && ['nullable-api', 'nullable-wrong'].includes(mode)) {
+      const effectiveOccupancies = mode === 'nullable-wrong' ? [5] : [];
+      accounting.allocatedAmount = object.amount;
+      accounting.appliedAmount = effectiveOccupancies.length ? effectiveOccupancies.reduce((sum, amount) => sum + amount, 0) : null;
+    }
+    if (object && mode === 'runtime-proof') {
+      // The hash is valid only when the actual sampled text is complete.
+      // A request limit by itself cannot prove runtime completeness.
+      const completeText = JSON.stringify(object), sampled = completeText.slice(0, Number(url.searchParams.get('limit') ?? 10));
+      accounting.recordHash = createHash('sha256').update(sampled).digest('hex');
+      accounting.totalLength = completeText.length; accounting.inputLength = sampled.length;
+      accounting.complete = sampled.length === completeText.length;
+    }
     return res.end(JSON.stringify(object ? { exists: true, ...object, ...accounting } : { exists: false }));
   }
   if (url.pathname === '/page') {
@@ -102,13 +133,14 @@ const serviceDirectory = mode === 'ignored-sources' ? path.join(repo, 'business-
 await mkdir(serviceDirectory, { recursive: true });
 if (mode === 'ignored-sources') await writeFile(path.join(repo, '.gitignore'), 'business-service/\n');
 await writeFile(path.join(serviceDirectory, 'service.mjs'), '// Isolated local service contract and actual handler. Business GET is read-only.\n'
+  + 'import { createHash } from "node:crypto";\n'
   + 'const objects = new Map(), requests = [];\nconst preferences={key:"fixture-operator",language:"en"};\nconst mode = ' + JSON.stringify(mode) + '; const navigation=' + navigation + '; const cleanupFailures=new Set(), receiptFailures=new Set();\nconst handler = ' + handler.toString()
   + ';\n// The Runner resource catalog binds platform to createServer(handler), listening only on 127.0.0.1. requests is in-memory audit only.\n');
 await writeFile(path.join(repo, 'AGENTS.md'), '# 本地隔离测试服务\n仅本机回环资源。搜索项目源码发现接口与实现。对象必须使用当前任务前缀，不改源码。\n');
 try { await lstat(path.join(repo, '.git')); await command('git', ['-C', repo, 'rev-parse', 'HEAD']); }
 catch { await command('git', ['init', '-b', 'main', repo]); await command('git', ['-C', repo, 'add', '.']);
   await command('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Isolated runtime contract']); }
-const server = createServer(handler); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+const server = createServer(handler); await new Promise(resolve => server.listen(previous ? Number(new URL(previous.url).port) : 0, '127.0.0.1', resolve));
 const url = 'http://127.0.0.1:' + server.address().port;
 const iniPath = path.join(root, 'resources.ini');
 await writeFile(iniPath, '[Demo.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nresource_type=website\nbase_url=' + url + '\nusername=fixture\npassword=fixture-local-only\n'
@@ -121,7 +153,9 @@ async function skill(name, refs) {
   return { path: folder, sha256: hash.digest('hex') };
 }
 const headers = ['系统', '页面', '用例类型', '前置条件', '模块', '测试场景', '操作步骤', '预期结果', '测试数据', '测试结果', '备注说明', '测试截图', '用户问题', '对接BP', '测试用户', '测试截至日期'];
-let expected = mode === 'array-identity'
+let expected = ['nullable-api', 'nullable-wrong'].includes(mode)
+  ? '1. 专属账户A没有有效占用，API按已核实的空占用集合null代表0的业务规则计算分配减有效占用，派生剩余为100元；保留原始null及转换依据，已有数值不得被转换替代。\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。'
+  : mode === 'array-identity'
   ? '1. API的allocations数组中，账户A在2026-11的分配为100元、有效已用为20元、无效占用777元不扣减，剩余80元；按账户和期间定位，不能用其他行替代。\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。'
   : ['derived-api', 'misleading-api'].includes(mode)
   ? (mode === 'derived-api' ? '1. API返回已分配100元、已用20元，按已分配减已用核算剩余80元。'
@@ -131,10 +165,12 @@ let expected = mode === 'array-identity'
   ? '1. 账户A在2026-11的接口金额为100元，账户B在2026-12的接口金额为250元。\n2. 页面在A、B、A之间切换，每次完成加载后账户编号正确、金额分别为100元、250元、100元，两个账户保持独立。'
   : '1. 账户A的接口金额为100元。\n2. 页面账户编号与A一致，业务加载完成后页面金额为100元。';
 if (mysqlFixture) expected += '\n3. 数据库专属预算行的大整数ID保持准确；将初始100元改为40元后，回读可用预算为40元，业务键仍属于本轮账户A；清理后该行不存在。';
+if (mode === 'runtime-proof') expected += '\n3. 页面查询前后，账户A完整记录的recordHash保持不变；摘要断言须同时保留前后实际观测的totalLength、inputLength与complete作为辅助完整性证据。只有输入长度等于总长度且complete为true的摘要才有效，不能仅凭请求limit假定完整，截断摘要不能作为预期或产品变化。';
 const row = ['隔离系统', '/page', 'S1--主流程', '1. 在本机隔离环境创建本轮专属账户A，金额100元，期间2026-11；账户业务键必须使用本轮runPrefix。',
   '金额展示', '自主创建并核对接口和页面', '1. 读取源码并创建专属账户A。\n2. 从接口读取A。\n3. 打开A的页面并等待业务加载完成。\n4. 核对页面与接口金额和对象。', expected, ...Array(8).fill('')];
 if (['derived-api', 'misleading-api', 'array-identity'].includes(mode)) row[3] += '\n2. 专属账户已分配100元、已用20元；独立期望剩余80元。';
 if (mode === 'array-identity') row[3] += '\n3. 专属账户无效占用为777元，不参与有效已用和剩余计算。';
+if (['nullable-api', 'nullable-wrong'].includes(mode)) row[3] += '\n2. 新建账户没有任何有效占用，初始分配100元，独立期望剩余100元。';
 if (mysqlFixture) {
   row[3] += '\n2. 在mysql资源的budget表创建本轮专属行，id为2000000000000000001（必须按字符串保留），business_key使用本轮runPrefix，amount=100，enabled=1。';
   row[6] += '\n5. 冻结独立预期后，将该数据库行的amount更新为40并回读核验身份与金额；结束时恢复并删除专属行，核验无残留。';
@@ -146,6 +182,13 @@ if (mode === 'multi-object') {
 const sourceBase = { id: 'LocalRequirement', url: 'https://fixture.invalid/docx/LocalRequirement', revision: 1, title: '隔离测试智能体', embedded: [],
   xml: '<h1 id="module">金额展示</h1><p id="rules">' + expected + '测试结束删除专属账户并回查不存在。</p>' };
 const copies = new Map(), folders = [];
+if (previous) {
+  const dir = path.join(root, 'data/requirement-tests', previous.job.id);
+  const cases = JSON.parse(await readFile(path.join(dir, 'cases.json')));
+  const { publication } = JSON.parse(await readFile(path.join(dir, 'journal.json')));
+  folders.push({ token: publication.folderToken, type: 'folder', name: publication.folderName });
+  copies.set('Published', { token: 'Published', type: 'sheet', name: publication.title, url: publication.url, matrix: [cases.headers, ...cases.rows], revision: 1 });
+}
 const client = { verify: async () => {}, readRequirement: async () => ({ ...sourceBase, hash: digest(sourceBase) }),
   listFolder: async token => token === 'Root' ? folders : [...copies.values()],
   createFolder: async (_parent, name) => { folders.push({ token: 'Month', type: 'folder', name }); return 'Month'; },
@@ -165,13 +208,13 @@ const settings = { bot: { profile: 'local-qa' }, allowedChatIds: ['oc_local'], r
 if (mysqlFixture) settings.environment.resources.mysql = { section: 'Demo.Uat.Mysql', scope: 'full_crud' };
 if (mode === 'authenticated-navigation') settings.execution.login = { resource: 'platform', path: '/login',
   tokenField: ['token'], header: 'token', identityFields: { userId: ['userId'] }, accountSelector: '#account', passwordSelector: '#password', submitSelector: '#login' };
-const job = { id: 'JOB-isolated-agent-' + Date.now(), projectId: 'demo', agentProfile: 'local-qa', chatId: 'oc_local', senderId: 'ou_local',
+const job = previous?.job ?? { id: 'JOB-isolated-agent-' + Date.now(), projectId: 'demo', agentProfile: 'local-qa', chatId: 'oc_local', senderId: 'ou_local',
   requirement: { url: sourceBase.url } };
 const config = { projects: { demo: { displayName: '隔离系统', repoPath: repo, baseBranch: 'main', requirementTest: settings } }, dataDir: path.join(root, 'data') };
-await writeJson(path.join(root, 'acceptance-input.json'), { job, mode, url });
+if (!previous) await writeJson(path.join(root, 'acceptance-input.json'), { job, mode, url });
 try {
   const dependencies = { client,
-    generate: async () => ({ projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'rules', rule: ['derived-api', 'misleading-api', 'mysql-parameters', 'array-identity'].includes(mode) ? expected : '接口与页面均显示100元并对应正确账户。' }],
+    generate: async () => ({ projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'rules', rule: ['derived-api', 'misleading-api', 'mysql-parameters', 'array-identity', 'nullable-api', 'nullable-wrong', 'runtime-proof'].includes(mode) ? expected : '接口与页面均显示100元并对应正确账户。' }],
       caseRequirements: [['R1']], manifest: { headers, module_order: ['金额展示'], required_texts: [], rows: [row] } }) };
   const emit = async event => console.log(JSON.stringify(event));
   if (mode === 'retry-native') {
@@ -185,7 +228,7 @@ try {
   const remainingDatabaseRows = mysqlFixture ? (await mysqlFixture.connection.query('SELECT id,business_key,amount FROM `' + mysqlFixture.database + '`.budget'))[0] : [];
   await writeJson(path.join(root, 'result.json'), { result, remaining: [...objects.values()], remainingDatabaseRows, preferences, requests });
   console.log(JSON.stringify({ result, remaining: objects.size }));
-  const wanted = ['wrong-page', 'misleading-api'].includes(mode) ? result.requirementSummary?.fail === 1 : result.requirementSummary?.pass === 1;
+  const wanted = ['wrong-page', 'misleading-api', 'nullable-wrong'].includes(mode) ? result.requirementSummary?.fail === 1 : result.requirementSummary?.pass === 1;
   if (result.outcome !== 'ready' || !wanted || objects.size || remainingDatabaseRows.length || preferences.language !== 'en') process.exitCode = 1;
 } finally {
   await new Promise(resolve => server.close(resolve));

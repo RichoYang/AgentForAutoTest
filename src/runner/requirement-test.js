@@ -7,8 +7,10 @@ import { publishCases } from './requirement-publication.js';
 import { executeCases } from './requirement-execution.js';
 import { buildRequirementReport } from './requirement-report.js';
 import { resolveRequirementOptions } from '../shared/requirement-options.js';
+import { verifiedMutationCleanup } from './requirement-mutation-measurement.js';
 
 export async function runRequirementTest(job, config, emit, dependencies = {}) {
+  if (job.status === 'cancelled' && !job.requirement?.cleanupOnly) return { outcome: 'blocked', requirementWait: 'requirement_cancelled', finalMessage: '任务已取消；未读取或修改执行检查点，未恢复业务执行。' };
   const project = config.projects[job.projectId];
   const configured = project?.requirementTest;
   if (!configured || configured.bot.profile !== job.agentProfile || !configured.allowedChatIds.includes(job.chatId)
@@ -16,8 +18,10 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     throw new Error('需求测试 Runner 项目绑定不符');
   }
   const settings = resolveRequirementOptions(configured, job.requirement.options);
-  const progress = (current, completed = 0, total = 0) => emit({
-    type: 'progress', phase: 'tool_activity', activity: { current, completed, total, recent: [] },
+  let lastSummary;
+  const progress = (current, completed = 0, total = 0, summary) => emit({
+    type: 'progress', phase: 'tool_activity', activity: { current, completed, total, recent: [],
+      ...((summary ?? lastSummary) ? { requirement: (lastSummary = summary ?? lastSummary) } : {}) },
   });
   const workDir = await privateDirectory(path.join(config.dataDir, 'requirement-tests', job.id));
   const journalFile = path.join(workDir, 'journal.json');
@@ -207,7 +211,8 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       job, journal, source, index, manifest, regression, workDir, reportDir, dataDir: config.dataDir, save,
       codexBin: config.codexBin, timeZone: settings.timeZone, visualModel: dependencies.visualModel,
     });
-    journal.phase = '完成';
+    journal.phase = job.requirement.cleanupOnly ? '清理与报告完成'
+      : summary.notExecuted || summary.blocked ? '报告生成；业务验收未完成' : '业务测试及报告完成';
     journal.artifact = artifact;
     await save();
     const cleanup = journal.cleanup?.verified === true ? '已核验恢复' : '待恢复';
@@ -226,7 +231,11 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     journal.phase = stage;
     journal.waitCode = known ? error.code : 'runner_error';
     await save();
-    const cleanup = journal.cleanup?.verified ? '已核验恢复' : journal.mutations?.length ? '待核对清理台账' : '尚未记录业务变更';
+    const restored = journal.mutations?.length && journal.mutations.every(verifiedMutationCleanup);
+    const cleanup = restored || journal.cleanup?.verified ? '已核验恢复' : journal.mutations?.length ? '待核对清理台账' : '尚未记录业务变更';
+    if (lastSummary) await progress(stage + '暂挂；清理' + cleanup, undefined, undefined, { ...lastSummary,
+      phase: 'execution_interrupted', pendingMutations: (journal.mutations ?? []).filter(item => !verifiedMutationCleanup(item)).length,
+      cleanupVerified: Boolean(restored || journal.cleanup?.verified), interruption: journal.waitCode });
     const finalMessage = [stage + '暂挂。' + (known ? error.message : '后台执行中断，请管理员检查本轮检查点。'),
       journal.publication?.verified ? '已发布并回读用例：' + journal.publication.url : '',
       '已记录 ' + Object.keys(journal.results ?? {}).length + ' 条用例结果。清理状态：' + cleanup + '。'].filter(Boolean).join('\n');

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { copyFile, lstat, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { hashFile } from '../shared/file-digest.js';
 import { command, privateDirectory, readJson, writeJson } from './requirement-files.js';
 import { RequirementWait, digest } from './requirement-feishu.js';
@@ -292,10 +292,15 @@ export async function runReportBuilder(skill, input, workDir, reportDir, now) {
     if (report.sheetCount !== 15 || await hashFile(output) !== report.sha256) throw new Error('Report hash or topology mismatch');
     report.builderSha256 = report.sha256;
     stage = 'layout';
-    await fitReportRows(builder, output, previewDir, payload);
+    const worker = fileURLToPath(new URL('./requirement-report-worker.js', import.meta.url));
+    const layout = builderOutput(await command(process.execPath, [worker, 'layout', builder, output, input, previewDir]));
+    if (layout.layoutCompleted !== true) throw new Error('Report layout worker did not finish');
     report.sha256 = await hashFile(output);
     report.layoutVersion = 'autofit-2';
+    stage = 'counts';
     const counts = await verifyWorkbookCounts(builder, output, payload);
+    if (counts.workbookReadbackSha256 !== report.sha256) throw new Error('Report changed during independent count verification');
+    await writeJson(path.join(workDir, 'report-count-verification.json'), { ...counts, layoutWorkerPid: layout.workerPid });
     stage = 'previews';
     const previews = (await readdir(previewDir)).filter(file => /^\d{2}-.+\.png$/.test(file)).sort();
     if (previews.length !== 15) throw new Error('Missing report previews');
@@ -346,41 +351,13 @@ export async function fitReportRows(builder, output, previewDir, payload) {
 }
 
 async function verifyWorkbookCounts(builder, output, payload) {
-  const library = createRequire(builder).resolve('@oai/artifact-tool');
-  const { FileBlob, SpreadsheetFile } = await import(pathToFileURL(library).href);
-  const workbook = await SpreadsheetFile.importXlsx(await FileBlob.load(output));
-  const summary = workbook.worksheets.getItem('测试汇总');
-  const detail = workbook.worksheets.getItem('验证明细');
-  const { cases } = payload;
-  const statuses = ['通过', '失败', '阻断', '未执行', '不适用'];
-  const expected = new Map(cases.map(item => [item.case_id, item.status]));
-  const totals = Object.fromEntries(statuses.map(status => [status, cases.filter(item => item.status === status).length]));
-  const actual = summary.getRange('A4:B8').values;
-  if (expected.size !== cases.length || actual.some(([status, count], index) => status !== statuses[index] || count !== totals[status])) {
-    throw new Error('Report summary counts differ from the execution records');
-  }
-  if (cases.length) {
-    const rows = detail.getRange('A3:M' + (cases.length + 2)).values;
-    for (const row of rows) {
-      if (!expected.has(row[0]) || expected.get(row[0]) !== row[12]) throw new Error('Report case ID or status differs from the execution record');
-      expected.delete(row[0]);
-    }
-  }
-  const workbookDataCounts = {};
-  for (const [name, section, key] of [
-    ['前置数据构造矩阵', 'prerequisites', 'prerequisite_id'],
-    ['前置数据构造与清理清单', 'mutation_ledger', 'mutation_id'],
-    ['清理记录', 'cleanup_records', 'cleanup_id'],
-  ]) {
-    const expected = payload[section].map(row => row[key]).sort();
-    const sheet = workbook.worksheets.getItem(name);
-    if (expected.length) {
-      const actual = sheet.getRange('A3:A' + (expected.length + 2)).values.flat().sort();
-      if (digest(actual) !== digest(expected)) throw new Error('Report data ledger differs from the execution records');
-    } else if (!String(sheet.getRange('A3').values[0][0]).startsWith('本次无数据/不适用')) {
-      throw new Error('Unexpected report data ledger rows');
-    }
-    workbookDataCounts[section] = expected.length;
-  }
-  return { workbookCounts: totals, workbookDataCounts };
+  // A second native import after fitting/rendering can spin in the retained
+  // Mono/WASM context. Read the actual final file in a fresh process instead.
+  // The count/ID/ledger checks are unchanged, and no task timeout is introduced.
+  const input = path.join(path.dirname(output), 'report-count-verification-input.json');
+  await writeJson(input, { cases: payload.cases, prerequisites: payload.prerequisites,
+    mutation_ledger: payload.mutation_ledger, cleanup_records: payload.cleanup_records });
+  const verifier = fileURLToPath(new URL('./requirement-report-worker.js', import.meta.url));
+  const result = await command(process.execPath, [verifier, 'verify', builder, output, input]);
+  return JSON.parse(result);
 }

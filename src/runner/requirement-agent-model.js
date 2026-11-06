@@ -6,6 +6,7 @@ import { resolveCodexBinary, codexEnvironment, loadCodexRuntimeSettings } from '
 export async function requirementAgentModel({ cwd, codexBin, instructions, tools, call, progress = async () => {}, onThread = async () => {}, onDiagnostic = async () => {} }) {
   const runtime = await loadCodexRuntimeSettings({ file: process.env.AGENTOS_CODEX_RUNTIME_FILE });
   let threadId;
+  let turnAbort, fatalError;
   let calls = Promise.resolve();
   let diagnostics = Promise.resolve();
   const appOptions = { codexBin: await resolveCodexBinary(codexBin), cwd, env: await codexEnvironment(),
@@ -17,14 +18,16 @@ export async function requirementAgentModel({ cwd, codexBin, instructions, tools
       '-c', 'web_search="disabled"'],
     onToolCall(params) {
       const run = async () => {
+        if (fatalError) return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: fatalError.code, message: fatalError.safeMessage }) }] };
         if (params.threadId !== threadId || !tools.some(tool => tool.name === params.tool)) throw new Error('Tool identity mismatch');
         await progress('工具：' + params.tool);
         try {
           const value = await call(params.tool, params.arguments, params.callId);
           return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(value) }] };
         } catch (error) {
+          if (error.code === 'agent_no_progress') { fatalError = error; turnAbort?.abort(); }
           return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: error.code ?? error.name,
-            message: error.safeMessage ?? '工具调用未完成，查看已保存的诊断并核对副作用后修正参数。' }) }] };
+            message: error.safeMessage ?? '工具调用未完成，查看已保存的诊断并核对副作用后修正参数。', gap: error.gap }) }] };
         }
       };
       // A native tool can expose an intentional concurrent operation as one ledgered batch.
@@ -59,14 +62,16 @@ export async function requirementAgentModel({ cwd, codexBin, instructions, tools
     await onThread({ threadId, model: runtime.model, reasoningEffort: runtime.reasoningEffort });
     return {
       async turn(text) {
+        turnAbort = new AbortController();
         const result = await app.turn({ threadId, effort: runtime.reasoningEffort ?? 'high', input: [{ type: 'text', text }] }, {
+          signal: turnAbort.signal,
           onEvent: (method, details) => {
             if (method === 'item/started') progress('模型正在调查或执行');
             if (['item/started', 'item/completed', 'error', 'turn/completed'].includes(method)) {
               diagnostics = diagnostics.then(() => onDiagnostic({ method, ...details }));
             }
           },
-        });
+        }).catch(error => { throw fatalError ?? error; });
         await calls;
         await diagnostics;
         return result;

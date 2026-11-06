@@ -180,6 +180,7 @@ test('measurement query mismatches are recoverable tool errors while matching qu
     return { accepted: false, errors: ['actual.query.sql maps name to reason instead of name'] };
   }, agentModel: async ({ call }) => ({ close: async () => {}, async turn() {
     const compare = observationId => call('test_assert', { args: { checkId: 'unchanged', observationId, field: ['rows', 0, 'hash'] } }, observationId);
+    await call('test_measure', { args: { checkId: 'unchanged', observationId: 'baseline', field: ['rows', 0, 'hash'] } }, 'preflight');
     await assert.rejects(compare('mismatch'), /maps name to reason/);
     assert.equal((await compare('corrected')).passed, true);
     assert.equal((await compare('productFailure')).passed, false);
@@ -353,7 +354,7 @@ test('tool channel evidence cannot be relabelled and runner migrates an old unex
     const history = await invoke('evidence', { observationId: 'old-observation' });
     assert.equal(history.historical, true); assert.equal(history.usableForCurrentAssertion, false);
     assert.equal(history.at, priorObservation.at); assert.equal(history.data.body.amount, 100);
-    await assert.rejects(invoke('alias', { alias: 'A', value: 'A', observationId: 'old-observation', field: ['body', 'key'] }), /case attempt/);
+    await assert.rejects(invoke('alias', { alias: 'A', value: 'A', observationId: 'old-observation', field: ['body', 'key'], purpose: 'historical identity must not bind' }), /case attempt/);
     const source = await invoke('source', { action: 'read', path: 'source.js' });
     await invoke('register', { name: 'budget', sourceRefs: [source.sourceRef], reason: 'read', spec: { kind: 'http', resource: 'platform', access: 'read', path: '/budget', method: 'GET', authenticated: false } });
     await invoke('register', { name: 'update_budget', sourceRefs: [source.sourceRef], reason: 'module permission fixture', spec: { kind: 'http', resource: 'platform', access: 'update', path: '/budget', method: 'PUT', authenticated: false } });
@@ -369,7 +370,7 @@ test('tool channel evidence cannot be relabelled and runner migrates an old unex
     const invalid = structuredClone(plan); invalid.checks[0].subject.phase = 'after-create';
     await assert.rejects(invoke('plan', invalid), /subject.phase/);
     const stringLine = structuredClone(plan); stringLine.checks[0].line = '1';
-    await assert.rejects(invoke('plan', stringLine), /checks\[0\]\.line must be a 1-based integer/);
+    await assert.rejects(invoke('plan', stringLine), /checks\[0\]\.line must be (?:a 1-based )?integer/);
     const staleBaseline = structuredClone(plan); staleBaseline.checks[0].basis = { observationId: 'old-observation', field: ['body', 'amount'], explanation: 'historical baseline' };
     await assert.rejects(invoke('plan', staleBaseline), /case attempt/);
     await invoke('plan', plan);
@@ -380,6 +381,9 @@ test('tool channel evidence cannot be relabelled and runner migrates an old unex
     await invoke('plan', { identityCorrections: [{ checkId: 'balance', subject: { account: 'A' } }] });
     await assert.rejects(invoke('assert', { checkId: 'balance', observationId: 'old-observation', field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'key'] }] }), /case attempt/);
     const observed = await invoke('observe', { operation: 'budget', input: {}, subject: { account: 'A' } });
+    await assert.rejects(invoke('assert', { checkId: 'balance', observationId: observed.observationId, field: ['body', 'amount'],
+      identity: [{ dimension: 'account', field: ['body', 'key'] }],
+      evidenceRefs: [{ observationId: 'old-observation', fields: [['body', 'key']] }] }), /case attempt/);
     await assert.rejects(invoke('assert', { checkId: 'balance', observationId: observed.observationId, field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'wrong'] }] }));
     captured = await invoke('assert', { checkId: 'balance', observationId: observed.observationId, field: ['body', 'amount'], identity: [{ dimension: 'account', field: ['body', 'key'] }] });
     await assert.rejects(invoke('plan', { identityCorrections: [{ checkId: 'balance', subject: { accountId: 'A' } }] }), /compared check/);

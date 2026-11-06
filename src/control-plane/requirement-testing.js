@@ -131,6 +131,11 @@ function requirementStatus(job, reason, settings) {
     : wait === 'execution_adapter' && (settings.execution || settings.adapter) ? '执行入口现已配置，可回复「继续测试」。' : '';
   return [job.id + ' · ' + (labels[job.status] ?? job.status),
     progress?.current ? '最近阶段 ' + progress.current + (progress.total ? '（' + progress.completed + '/' + progress.total + '）' : '') : '',
+    progress?.requirement?.cases ? (() => { const c = progress.requirement.cases;
+      return `用例完成 ${c.completed}/${c.total}；通过 ${c.passed}，失败 ${c.failed}，阻断 ${c.blocked}，未执行 ${c.notExecuted}，不适用 ${c.notApplicable}`; })() : '',
+    progress?.requirement?.coverage ? (() => { const r = progress.requirement, c = r.coverage;
+      return `当前用例 ${r.caseId}：独立业务检查 ${c.compared}/${c.total}，当前通过 ${c.passed}、失败 ${c.failed}；过程要求 ${c.processProven ?? 0}/${c.processTotal ?? 0}；历史断言尝试 ${c.historicalAttempts}。执行器错误 ${r.executorErrors}，未决变更 ${r.pendingMutations}，清理${r.cleanupVerified ? '已核验' : '未完成'}；运行 ${Math.floor(r.elapsedMs / 1000)} 秒。`
+        + (r.gaps?.length ? '\n具体缺口：' + r.gaps.map(gap => JSON.stringify(gap.missing)).join('；') + '\n下一步：' + r.gaps.at(-1).next : ''); })() : '',
     resumeNote, job.result?.finalMessage && (resumeNote ? '上次任务回执\n' : '') + job.result.finalMessage,
     instructions[reason]].filter(Boolean).join('\n');
 }

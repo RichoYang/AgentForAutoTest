@@ -8,6 +8,34 @@ import { createRequirementAgent } from '../src/runner/requirement-agent.js';
 import { evaluateDerivedAssertion } from '../src/runner/requirement-assertions.js';
 import { assertionBinding, compareAgentObservation } from '../src/runner/requirement-agent-assertion-binding.js';
 
+test('a wrong display retains its frozen source provenance and fails the independent comparison', () => {
+  const check = { id: 'display-state', requirement: '当前对象的页面状态显示APPROVED', channel: 'page',
+    type: 'text', operator: 'equals', expected: 'APPROVED', measurement: { sourceRefs: ['page-source'] } };
+  const observation = { channel: 'page', data: { values: { state: ['PENDING'] },
+    measurements: { state: { selector: '#state', read: 'text', matches: 1 } },
+    dom: '<section data-key="A"><span id="state">PENDING</span></section>', ready: { condition: { selector: '#busy', state: 'hidden' } } } };
+  const args = { field: ['values', 'state', 0] };
+  const sources = { 'page-source': { path: 'page.js', text: "stateElement.textContent = 'PENDING';" } };
+  const binding = assertionBinding(check, observation, args, sources);
+  assert.equal(binding.sources[0].sourceRef, 'page-source');
+  assert.equal(binding.selected[0].measurement.selector, '#state');
+  const result = compareAgentObservation(check, observation, args);
+  assert.equal(result.compared, true); assert.equal(result.passed, false);
+  assert.equal(result.expected, 'APPROVED'); assert.equal(result.observed, 'PENDING');
+  assert.throws(() => assertionBinding(check, observation, { ...args, sourceRefs: ['unknown'] }, sources), /concrete source/);
+});
+
+test('explicit null expectations distinguish a real null from missing, zero and failed responses', () => {
+  const check = { id: 'nullable', type: 'null', channel: 'api', expected: null, operator: 'equals' }, args = { field: ['body', 'note'] };
+  for (const [note, passed] of [[null, true], [0, false], ['', false], [undefined, false]]) {
+    const result = compareAgentObservation(check, { channel: 'api', data: { status: 200, body: { note } } }, args);
+    assert.equal(result.compared, true); assert.equal(result.passed, passed);
+  }
+  for (const data of [{ status: 503, body: { note: null } }, { status: 200, body: { success: false, note: null } }]) {
+    assert.equal(compareAgentObservation(check, { channel: 'api', data }, args).compared, false);
+  }
+});
+
 test('derived actual values preserve decimal arithmetic and never turn absent operands into zero', () => {
   const rule = { assertion: 'remaining', type: 'number', operator: 'equals', expected: '0.1', unit: '元' };
   const terms = [{ field: ['allocated'], sign: 1 }, { field: ['applied'], sign: -1 }];
@@ -25,6 +53,38 @@ test('derived actual values preserve decimal arithmetic and never turn absent op
   assert.equal(compareAgentObservation(check, { data: { status: 200, body: { balance: null } } }, { field: ['body', 'balance'] }).missing, true);
   const unavailable = compareAgentObservation(check, { data: { status: 503, body: { error: 'Unavailable' } } }, { field: ['body', 'balance'] });
   assert.equal(unavailable.compared, false); assert.equal(unavailable.missing, undefined);
+});
+
+test('explicit reviewed null normalization preserves raw evidence and never replaces missing or nonnull values', () => {
+  const rule = { assertion: 'remaining', type: 'number', operator: 'equals', expected: 100, unit: '元' };
+  const terms = [{ field: ['allocated'], sign: 1 }, { field: ['applied'], sign: -1,
+    nullAs: { value: 0, reason: 'The verified empty occupancy aggregate is represented by null' } }];
+  const result = evaluateDerivedAssertion({ allocated: 100, applied: null }, rule, terms);
+  assert.equal(result.passed, true); assert.equal(result.expected, 100);
+  assert.equal(result.actualInputs[1].rawValue, null); assert.equal(result.actualInputs[1].value, 0);
+  assert.equal(result.actualInputs[1].normalization.kind, 'nullAs');
+  for (const applied of [undefined, '', [], 'unknown']) {
+    const observed = evaluateDerivedAssertion({ allocated: 100, applied }, rule, terms);
+    assert.equal(observed.compared, false); assert.equal(observed.actualInputs[1].normalization, undefined);
+  }
+  const actual = evaluateDerivedAssertion({ allocated: 100, applied: 5 }, rule, terms);
+  assert.equal(actual.observed, 95); assert.equal(actual.passed, false);
+  assert.equal(actual.actualInputs[1].normalization, undefined);
+  for (const nullAs of [{ value: 0 }, { value: '', reason: 'invalid' }, { value: Infinity, reason: 'invalid' },
+    { value: 9007199254740992, reason: 'unsafe' }]) {
+    assert.throws(() => evaluateDerivedAssertion({ allocated: 100, applied: null }, rule, [terms[0], { ...terms[1], nullAs }]), /nullAs/);
+  }
+  const check = { ...rule, id: 'remaining', channel: 'api' }, observation = { data: { allocated: 100, applied: null } };
+  assert.throws(() => assertionBinding(check, observation, { calculation: { terms } }, {}), /sourceRefs/);
+  const binding = assertionBinding(check, observation, { calculation: { terms }, sourceRefs: ['S1'] },
+    { S1: { text: 'Empty occupancy aggregate is null and means zero effective occupancy' } });
+  assert.equal(binding.selected[1].valueType, 'null'); assert.equal(binding.calculation.terms[1].nullAs.value, 0);
+  assert.throws(() => assertionBinding(check, { channel: 'api', data: { ...observation.data, status: 503 } },
+    { calculation: { terms }, sourceRefs: ['S1'] }, { S1: { text: 'null means zero' } }), /failed HTTP response/);
+  for (const failure of [{ success: false }, { ok: false }, { error: 'upstream unavailable' }]) {
+    assert.throws(() => assertionBinding(check, { channel: 'api', data: { status: 200, body: { ...failure, applied: null } } },
+      { calculation: { terms }, sourceRefs: ['S1'] }, { S1: { text: 'null means zero for successful empty aggregation only' } }), /failed HTTP response/);
+  }
 });
 
 test('SQL binding includes inspected schema proof only from the measured resource and database', () => {
@@ -60,6 +120,16 @@ test('binding receives verified array identity and sibling checks without trusti
     assert.equal(payload.actual, undefined);
     assert.deepEqual(payload.verifiedIdentity.map(item => item.value), ['A', '2026-11']);
     assert.ok(payload.verifiedIdentity.every(item => item.field[2] === 1));
+    if (payload.supportingEvidence?.length) {
+      assert.equal(payload.supportingEvidence[0].fields[0].value, 'A');
+      assert.deepEqual(payload.supportingEvidence[0].fields[0].field, ['body', 'rows', 1, 'key']);
+      if (payload.planContext.currentCheckId === 'remaining') {
+        const measured = payload.planContext.checks.flatMap(check => check.measured);
+        assert.deepEqual(measured.map(item => item.observed), [100, 777]);
+        assert.ok(measured.every(item => item.sameObservation && item.observationId === payload.observation.observationId));
+        assert.ok(measured.every(item => item.field[2] === 1 && item.at));
+      }
+    }
     if (payload.selected.some(item => item.field[2] !== 1)) return { accepted: false, errors: ['Identity belongs to a different row'] };
     return { accepted: true, errors: [] };
   }, agentModel: async ({ call }) => ({ close: async () => {}, async turn() {
@@ -75,13 +145,19 @@ test('binding receives verified array identity and sibling checks without trusti
     const observed = await invoke('observe', { operation: 'budget', input: {} });
     const identity = row => ['key', 'period'].map(dimension => ({ dimension, field: ['body', 'rows', row, dimension] }));
     await assert.rejects(invoke('assert', { checkId: 'remaining', observationId: observed.observationId,
-      field: ['body', 'rows', 0, 'remaining'], identity: identity(0), verifiedIdentity: identity(1) }), /identity differs/);
+      field: ['body', 'rows', 1, 'remaining'], identity: identity(1),
+      evidenceRefs: [{ observationId: observed.observationId, fields: [['body', 'missing']] }] }), /field is absent/);
+    await assert.rejects(invoke('assert', { checkId: 'remaining', observationId: observed.observationId,
+      field: ['body', 'rows', 0, 'remaining'], identity: identity(0), verifiedIdentity: identity(1) }), /verifiedIdentity is not supported/);
+    await assert.rejects(invoke('assert', { checkId: 'remaining', observationId: observed.observationId,
+      field: ['body', 'rows', 0, 'remaining'], identity: identity(0) }), /identity differs/);
     assert.equal(bindingReviews, 0);
     await assert.rejects(invoke('assert', { checkId: 'remaining', observationId: observed.observationId,
       field: ['body', 'rows', 0, 'remaining'], identity: identity(1) }), /different row/);
     for (const id of ['allocated', 'invalid', 'remaining']) {
       const result = await invoke('assert', { checkId: id, observationId: observed.observationId,
-        field: ['body', 'rows', 1, id], identity: identity(1), sourceRefs: [source.sourceRef] });
+        field: ['body', 'rows', 1, id], identity: identity(1), sourceRefs: [source.sourceRef],
+        evidenceRefs: [{ observationId: observed.observationId, fields: [['body', 'rows', 1, 'key']] }] });
       assert.equal(result.passed, id !== 'remaining');
       if (id === 'remaining') { assert.equal(result.expected, 80); assert.equal(result.observed, 75); }
     }
@@ -110,6 +186,13 @@ test('assertion binding rejects wrong indicators and count-as-money, then record
     if (payload.kind !== 'assertion_binding') return { accepted: true, errors: [] };
     bindingReviews++;
     assert.ok(payload.selected.length); assert.equal(payload.actual, undefined);
+    if (payload.channel === 'page') {
+      assert.equal(payload.pageTimeline.at(-1).observationId, payload.observation.observationId);
+      assert.equal(payload.pageTimeline.at(-1).action, 'observe');
+      assert.ok(payload.pageTimeline.some(item => item.action === 'goto'));
+      assert.ok(payload.pageTimeline.every(item => item.lifecycle.actionStartedAt <= item.lifecycle.actionCompletedAt
+        && item.lifecycle.actionCompletedAt <= item.at));
+    }
     if (payload.selected.some(item => item.field.at(-1) === 'applied' || item.field.at(-1) === 'diagnostic') && !payload.calculation) {
       return { accepted: false, errors: ['Selected field is not remaining budget; use verified allocated minus applied'] };
     }
