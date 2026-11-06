@@ -13,7 +13,13 @@ function selected(value, field) {
 }
 
 export function mutationReadbackHash(value, fields) {
-  return digest(fields?.length ? fields.map(field => selected(value, field)) : value);
+  // Type metadata is evidence, not business state. Legacy snapshots without
+  // it stay comparable; explicit stateFields still select their exact values.
+  let business=value;
+  if(Array.isArray(value?.rows)&&Array.isArray(value.columns)&&value.columns.every(column=>column&&typeof column.name==='string'&&Number.isInteger(column.columnType))){
+    const {columns,...rest}=value;business=rest;
+  }
+  return digest(fields?.length ? fields.map(field => selected(value, field)) : business);
 }
 
 export function validateMutationReadback(intent) {
@@ -25,6 +31,12 @@ export function validateMutationReadback(intent) {
   }
   for (const [label, rules] of [['before', intent.before], ['after', intent.after]]) for (const [i, rule] of rules.entries()) {
     if (!Object.hasOwn(intent.snapshot, rule.field[0])) throw agentError(label + '[' + i + '].field has no response root: ' + JSON.stringify(rule.field));
+    if(intent.verifySpec.kind==='database'&&rule.field[0]==='rows'&&rule.field.length>=3&&Number.isInteger(rule.field[1])&&Array.isArray(intent.snapshot.columns)){
+      const column=intent.snapshot.columns.find(column=>column.name===rule.field[2]);
+      if(!column)throw agentError(label+'['+i+'].field is absent from the verified query columns: '+JSON.stringify(rule.field));
+      if(rule.field.length===3&&rule.operator==='equals'&&rule.expected!==null&&column.representation&&typeof rule.expected!==column.representation)
+        throw agentError(label+'['+i+'].field '+JSON.stringify(rule.field)+' requires '+column.representation+' under the verified connector serialization; preserve the original type, do not coerce the readback');
+    }
   }
   mutationReadbackHash(intent.snapshot, intent.stateFields);
 }

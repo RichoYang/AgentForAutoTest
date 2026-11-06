@@ -8,10 +8,10 @@ import { digest, RequirementWait } from './requirement-feishu.js';
 import { askNoTools } from './requirement-generation.js';
 import { createRequirementAdapter } from './requirement-adapter.js';
 import { observationAt, evaluateCaseAssertion } from './requirement-assertions.js';
-import { assertionBinding, compareAgentObservation } from './requirement-agent-assertion-binding.js';
+import { assertionBinding, compareAgentObservation,verifyObservationIdentity,verifyPageStage,pageStageContext } from './requirement-agent-assertion-binding.js';
 import { requirementAgentModel } from './requirement-agent-model.js';
 import { agentError, createAgentResources, readSource, resolveInput, sanitized, validateRouteTemplate } from './requirement-agent-resources.js';
-import { requirementToolSchemas, validateToolArguments,operationNameSchema } from './requirement-agent-contracts.js';
+import { requirementToolSchemas, validateToolArguments,operationNameSchema,planCoverageMatrix,duplicatePlanChecks,pageStageErrors } from './requirement-agent-contracts.js';
 import { compareRecordSnapshots } from './requirement-snapshot.js';
 import { checkCoverage, recordGap, resolveGaps } from './requirement-agent-progress.js';
 import { mutationReadbackHash, validateMutationReadback, repairHttpEnvelope } from './requirement-mutation-measurement.js';
@@ -57,6 +57,9 @@ descriptions.evidence += ' 清理/审核/变更返回的evidence.path是审计�
 descriptions.plan += ' 检查可附measurement:{observationId,field,identity,sourceRefs,evidenceRefs,constraints,snapshot}预检取值方式。这是动作前的测量样本，不是动作后的actual；基线检查预检原基线自身，真正assert仍须动作后新取证。相同取值方法的多个未来时点可复用预检样本，实际A/B/A切换仍分别重新取证。type:"null"配expected:null、operator:"equals"可直接检查真实空值，缺失路径不等于null。原预期明确要求清理零残留时，可冻结scope明确的计数检查，在test_cleanup后重新观测assert；不存在的对象无需身份。';
 descriptions.plan += ' 原预期中的源码调查、原值保留、丢回执对账、就绪过程及恢复报告要求用processChecks:[{id,line,requirement,kind:"execution_evidence"|"receipt_reconciliation"|"readiness"|"cleanup",relatedCheckIds?:[业务检查id]}]映射；不能编造业务boolean字段。业务金额/状态/数量仍须checks独立比较，processChecks不能替代它们。';
 descriptions.process = '核验冻结的执行过程检查。args:{checkId,evidenceRefs:[{observationId,fields:[实际路径]}],sourceRefs?}。Runner提供真实操作/对账/恢复台账、已比较检查、测量预检和证据来源，由独立审查核对原要求；cleanup必须先test_cleanup完成回查，范围零残留等要求需提供实际查询证据。仅调用过工具不等于满足过程要求，不伪造业务布尔值。';
+descriptions.plan += ' 同对象不同页面阶段用pageStages:[{id,step:steps从1编号,resource,action:"goto"|"click"|"select",path:goto实际相对路径或selector:实际选择器,value?:select实际值,subject:真实DOM身份}]按场景顺序固定；checks用pageStage:阶段id及measurement.identity绑定。首次A/切换B/切回A分别不同id，不把预检导航计入场景；中间阶段也要实际就绪观察。主机以真实页面动作关联，不接受事后改标签。inspect可回读各阶段原始候选observationId、缺失阶段和关联检查，已有正确观测用evidence读取后复用，不能再次导航冒充历史首次。';
+descriptions.browser += ' lifecycle.pageAction由主机在真实页面动作时生成并关联后续观测。页面阶段按冻结pageStages的实际action/path/selector、当前epoch场景开始时间及DOM身份匹配；不要自行填写或修改动作ID。每个所需阶段在下一次切换前保存ready后的observe，预检和场景分别执行。';
+descriptions.plan += ' 内嵌measurement在计划发布前核验，失败候选尚未冻结，可直接修正再提交；业务预期必须仍来自独立原文/基线。原计划已经冻结时原冻结限制不变。完整空快照可从contract.scope核实范围，不能从rows[0]读取不存在的身份。';
 export const requirementAgentTools = Object.entries(descriptions).map(([name, description]) => ({ name: 'test_' + name, description,
   inputSchema: { type: 'object', properties: { args: requirementToolSchemas[name] }, required: ['args'], additionalProperties: false } }));
 
@@ -76,6 +79,11 @@ const containsValue = (data, expected) => sameValue(data, expected) || (data && 
   && Object.values(data).some(value => containsValue(value, expected)));
 const snapshotHash = mutationReadbackHash;
 const evidenceChannel = spec => spec.kind === 'database' ? 'database' : spec.kind === 'browser' ? 'page' : spec.channel ?? 'api';
+function missingObservationField(record,field,label){
+  const parent=field.length>1?observationAt(record.data,field.slice(0,-1)):record.data;
+  return agentError(label+' field is absent: '+JSON.stringify(field)+'; actual root fields: '+Object.keys(record.data??{}).join(', ')
+    +'; actual parent fields: '+(parent&&typeof parent==='object'?Object.keys(parent).join(', '):'(not an object)')+'. Read the saved observation; do not invent or relabel metadata.');
+}
 
 function changedFields(before, after, prefix = '$') {
   if (isDeepStrictEqual(before, after)) return [];
@@ -178,13 +186,19 @@ export function createRequirementAgent(config, options) {
       kind === 'assertion_binding' ? 'baseline是Runner从冻结basis提取的原始观测与预检；lifecycle时间和先后关系由实际准备/场景台账记录，不是模型自报。已证明collectedAfterPreparation及collectedBeforeScenario时，不再要求用额外业务查询证明这两个时点；仍须核对基线范围、口径及完整性，不得接受操作后重查代替原基线。' : '',
       kind === 'assertion_binding' ? 'calculation.terms[].nullAs是明确请求的空值转换，Runner只对实际null应用并保留原值。必须由实际业务构造逻辑及规则证明null代表该数值，例如已证实空占用集合汇总为null且业务上无占用；DTO默认值、字段名、模型自述、冻结预期或碰巧可算出预期均不足。未知、查询失败或缺失数据不得视为0。转换不能替代页面实际展示，也不能掩盖原始API字段断言的失败。' : '',
       ['assertion_binding', 'measurement'].includes(kind) ? 'supportingEvidence是Runner按observationId及字段路径从本次尝试实际观测提取的辅助证据，非模型自报。可核验摘要未截断、字段完整、状态或业务映射等采集前提；需核对其查询、资源、时点与待证明观测相符，不能用别的观测或时点代证。不要用辅助业务金额决定是否应通过，也不能替代所选取值、冻结预期或页面证据。已有可信完整性数值时，按实际约束核验，不要因来源SQL仍有聚合函数而忽略完整性证据。' : '',
-      kind === 'plan' ? 'measurement/measurementSamples仅是场景动作前的取值方法预检，不是未来实际断言，也不主张预期已满足。不得要求前置样本的值已经等于动作后预期；基线预检读原基线自身是正确步骤，不是业务自证。相同方法的未来时点可共享预检样本，steps须要求各实际时点重新观测。这里只审计划是否完整可执行，不要求尚未执行动作的回执。原用例把清理写入预期时，允许清理后对明确范围count=0作独立检查，不强设不存在对象身份；准备、丢回执对账等执行过程可由真实台账证据证明，不必伪造成布尔业务字段。' : '',
+      kind === 'plan' ? 'measurement/measurementSamples是动作前的方法样本，不是未来实际结果；不要求样本值等于动作后预期，合法空集合不必先创建未来子记录。按coverageMatrix逐条核对业务/过程角色、重复覆盖及冲突，源需求中明确的测试收尾/恢复/零残留要求不能因被抄进预期就变成业务检查；产品删除后不可检索可以是业务目标。不能按删除/恢复等关键词机械分类。同句混合要求须可追溯拆分；合法同一预期的字段/渠道拆分保留。拒绝须指出原条款、checkId、当前角色、应有角色和修正方向，例如role_conflict。这里是冻结前审核，不将错误留到process阶段。' : '',
       kind === 'plan' ? 'processChecks是执行过程要求的独立映射，Runner后续用真实台账/证据另行核验，不是自报通过。允许它们覆盖源码调查、原值保留、回执对账、就绪、清理与报告要求；不能替代业务指标的checks，复合原句须结合relatedCheckIds及其他业务检查审查完整性。' : '',
       kind === 'process' ? '本次仅审执行过程要求：证据来自Runner真实台账和当前观测。确认源码/入口、原始类型/精度、先冻结后动作/取证、回执丢失后先对账、就绪条件、恢复范围与回查是否满足该条原要求。业务金额/状态/数量必须有相关程序比较，不能因过程材料存在而判业务通过。没有触发的丢回执分支如实标注未发生，不凭空要求该正常分支制造故障；若本用例明确要求制造丢回执，则需真实丢失与对账证据。report由Runner在所有清理后按已固定15表契约生成并另行验证，当前只审作为报告输入的恢复台账，不能宣称报告已生成。' : '',
       kind === 'operation' && payload.spec?.kind === 'database' ? '这是授权数据库上的直接核对或准备操作，不要求业务仓存在完全相同的SQL入口。以所给实际schemas、实体/业务规则和SQL本身核实表、字段、只读语义或结构化CRUD；不要要求为临时快照查询先在产品源码新增接口。' : '',
       kind === 'process' ? 'related.compared及assertionEvidence是程序已完成独立业务比较的证明；业务是否通过由该比较单独判定，本次accepted仅代表check指定的过程被证明。产品失败与正确取证/等待/清理可以同时成立，不得因产品实际值不符合预期而拒绝已满足的过程要求。时间顺序区分purpose=prepare与purpose=scenario：准备动作及其原始回读发生在plan前是正常步骤；只有场景动作必须在plan和测量预检后。' : '',
       kind === 'assertion_binding' ? 'planContext.checks[].measured包含本次实际已比较字段的原始观测ID、路径和值。sameObservation=true的同一数组行身份或集合计数可以证明当前行关联及唯一性；别的观测或别行不能代证。只用这些值核验身份/范围，不借兄弟业务结果推断当前应通过。pageTimeline是Runner保存的实际页面动作、URL、就绪与身份字段及时间；可核验A→B→A时序，不能凭steps文字认定切换已发生。' : '',
       kind === 'assertion_binding' ? 'executionContext是本次尝试及测量时期的真实准备/场景/对账/恢复台账，可结合源码证明对象新建、从未执行过的后续操作及当前取证阶段；prepared或未确认回执不能当已生效。页面观测的at是动作及等待结束后保存证据的时间，不是导航开始时间；导航开始看lifecycle.actionStartedAt，结束看actionCompletedAt，因此同次goto等待的ready.at早于观测保存at是正常顺序。' : '',
+      kind === 'assertion_binding' ? 'selected.representation是程序对原始值的编码核验。number按decimal-text精确比较，已证实的十进制数字字符串不必改成JS number或另造计算；编码不转换null/missing/错误响应。空行不能提供行内身份，完整快照contract.scope是程序实际采集的范围，可结合源码/schema及完整性证明空集合范围；任意请求参数或模型声明不能代证。' : '',
+      kind === 'mutation' ? 'snapshot.columns是实际MySQL列元数据及连接器representation，固定编码与after.expected必须一致；BIGINT/DECIMAL精确文本不能当JS number。API当前类型也须结合实际构造源码核对未来after契约；动态null/空集合不要求动作前已有未来结果，但未知路径/类型须有源码/schema依据。不能默认转换字符串、null或缺失。' : '',
+      kind==='plan'?'pageStages为结构化时序契约：核实step/action/path/selector/subject及checks.pageStage是否对应原文要求的首次、切换、切回等职责。源需求要求多阶段却没有阶段映射，或把首次检查关联到切回阶段，须冻结前明确拒绝并定位相关检查；普通无时序要求的单次页面检查不强加阶段。':'',
+      kind==='assertion_binding'?'pageStageProof是主机按冻结阶段、真实动作、DOM身份、业务就绪、epoch及场景边界核验的关联证明。可复用同阶段保存的正确历史观测，不必为每个字段再次导航；不能使用另一阶段或预检观测。仍须核验选择器的业务职责及独立预期，不由阶段证明推断产品值应正确。':'',
+      kind==='plan'?'measurementSamples.fields与字段审查共用取值描述。representation.encoding=decimal-text且exact=true证明原始数值字符串可精确比较，不要求转成JS number；availability=empty_collection/null_ancestor只表示未来路径尚无实值，结合真实queryColumn/完整快照及源码/schema预检，不要求提前造出业务结果。':'',
+      kind==='process'?'pageStages/pageTimeline是主机保存的当前尝试/epoch真实动作和就绪观测关联，related.comparedObservations给已比较观测ID与实际时点。可直接核验这些原始metadata，不要求模型在业务data里构造at字段。仍须结合mutations核对业务动作与各页面阶段的因果先后，页面顺序证明不代表所有业务步骤已经正确执行。':'',
       JSON.stringify({ kind, ...payload, environmentProof: scope.resourceCatalog }),
     ].join('\n\n'), { cwd: options.workDir, codexBin: options.codexBin,
       onOutput: raw => evidence(scope, kind + '-review-raw', { raw }) });
@@ -273,7 +287,7 @@ export function createRequirementAgent(config, options) {
           if ((scope.resourceIdentity?.(name) ?? digest(scope.resourceCatalog?.[name] ?? name)) !== identity) throw agentError('Measurement resource changed: ' + check.id);
         }
       };
-      let finished;
+      let finished, candidatePlan, candidatePreflights;
       const observe = async (channel, data, input, subject, measurement) => {
         const entry = await evidence(scope, channel + '运行观测', { channel, data, input, subject, measurement });
         const observationId = entry.path.replace('.json', '');
@@ -453,7 +467,8 @@ export function createRequirementAgent(config, options) {
           return pageData(await observe(evidenceChannel(verifySpec), receipt.observed, intent.verifyInput, args.subject ?? {}), args);
         }
         if (name === 'plan') {
-          if (args.action === 'inspect') return { plan: current.plan ?? null, assertions: current.assertions, revisions: current.planRevisions ?? [] };
+          if (args.action === 'inspect') return { plan: current.plan ?? null, assertions: current.assertions, revisions: current.planRevisions ?? [],
+            pageStages:(current.plan?.pageStages??[]).map(stage=>{const check=current.plan.checks.find(check=>check.pageStage===stage.id);return check?pageStageContext(current.plan,check,current,state.observations):{stageId:stage.id};}) };
           if (args.identityCorrections) {
             if (!current.plan || !Array.isArray(args.identityCorrections) || !args.identityCorrections.length
               || Object.keys(args).some(field => field !== 'identityCorrections')) throw agentError('identityCorrections requires an existing plan and only {checkId,subject} patches');
@@ -476,7 +491,9 @@ export function createRequirementAgent(config, options) {
             if (isDeepStrictEqual(current.plan, args)) return { accepted: true, reused: true };
             const core = plan => plan.checks.map(({ subject, ...check }) => check);
             const frozenChanges = [...changedFields(core(current.plan), core(args), '$.checks'),
-              ...changedFields(current.plan.processChecks ?? [], args.processChecks ?? [], '$.processChecks')];
+              ...changedFields(current.plan.processChecks ?? [], args.processChecks ?? [], '$.processChecks'),
+              ...changedFields(current.plan.pageStages??[],args.pageStages??[],'$.pageStages'),
+              ...(current.plan.pageStages?.length?changedFields(current.plan.steps,args.steps,'$.steps'):[])];
             if (frozenChanges.length) {
               const errors = frozenChanges.map(field => field + ' is frozen; use action:"inspect" and identityCorrections to fix subject only');
               await evidence(scope, '结构化计划候选', { candidate: args, errors });
@@ -528,30 +545,42 @@ export function createRequirementAgent(config, options) {
             if (check.relatedCheckIds?.some(id => !args.checks.some(check => check.id === id))) errors.push(`$.processChecks[${index}].relatedCheckIds has an unknown business check`);
           }
           lines.forEach((_, i) => { if (![...(args.checks ?? []), ...(args.processChecks ?? [])].some(check => check?.line === i + 1)) errors.push(`Original expectation ${i + 1} is uncovered`); });
+          errors.push(...duplicatePlanChecks(args));
+          errors.push(...pageStageErrors(args,scope.resourceNames));
           await evidence(scope, '结构化计划候选', { candidate: args, errors });
           if (errors.length) throw agentError(errors.join('; '));
-          await review(scope, 'plan', { headers: scope.headers, row: scope.row, source: scope.source, plan: args, aliases: current.aliases,
+          for(const check of args.checks)if(check.measurement){const sample=knownObservation(check.measurement.observationId);
+            if(sample.channel!==check.channel)throw agentError('Measurement channel differs before freezing '+check.id);
+            verifyObservationIdentity(check,sample,check.measurement);
+          }
+          const planReview=await review(scope, 'plan', { headers: scope.headers, row: scope.row, source: scope.source, plan: args, aliases: current.aliases,
+            coverageMatrix: planCoverageMatrix(lines,args),
             sourceEvidence: Object.values(state.sources).filter(item => item.text),
             measurementSamples: args.checks.filter(check => check.measurement).map(check => {
               const sample = knownObservation(check.measurement.observationId);
               return { checkId: check.id, role: 'pre-action method sample, not scenario result', observationId: sample.observationId,
                 at: sample.at, channel: sample.channel, query: measurement(sample), request: sample.input,
                 snapshot: sample.data.contract ? { contract: sample.data.contract, proof: sample.data.proof } : undefined,
-                fields: [check.measurement.field, ...(check.measurement.calculation?.terms.map(term => term.field) ?? [])].filter(Boolean)
-                  .map(field => ({ field, valueType: observationAt(sample.data, field) === null ? 'null' : typeof observationAt(sample.data, field) })),
+                fields: assertionBinding(check,sample,check.measurement.snapshot?{...check.measurement,field:['hash']}:check.measurement,state.sources,{schemas:state.schemas}).selected,
                 page: sample.channel === 'page' ? { measurements: sample.data.measurements, ready: sample.data.ready, dom: sample.data.dom } : undefined };
             }),
             baselines: args.checks.filter(check => check.basis.observationId).map(check => knownObservation(check.basis.observationId)) });
+          // Validate supplied methods against a candidate, before publishing any
+          // frozen plan. A rejected candidate leaves the prior plan untouched.
+          candidatePlan=args;candidatePreflights={};let validated;
+          try { for(const check of args.checks)if(check.measurement)await dispatch('measure',{checkId:check.id,...check.measurement});validated=candidatePreflights; }
+          finally {candidatePlan=undefined;candidatePreflights=undefined;}
           if (correcting) {
             current.planRevisions ??= []; current.planRevisions.push({ plan: current.plan, at: new Date().toISOString(), reason: 'identity_contract_correction_without_changing_expectations' });
             for (const check of args.checks) if (!isDeepStrictEqual(check.subject, current.plan.checks.find(item => item.id === check.id).subject)) delete current.preflights?.[check.id];
           }
           current.plan = scope.checkOutput(args); current.planAt ??= new Date().toISOString();
+          current.planReview=planReview;
+          current.preflights={...current.preflights,...validated};
           await scope.savePreparation?.({ agent: true, plan: args, prerequisites: args.prerequisites.map((item, i) => ({
             ...item, prerequisite_id: 'PRE-' + digest([key, i]).slice(0, 16), case_ids: [scope.item.caseId], requirement_ref: scope.item.requirementIds,
           })) });
           await saveState();
-          for (const check of args.checks) if (check.measurement) await dispatch('measure', { checkId: check.id, ...check.measurement });
           return { accepted: true, checks: args.checks.length, measurementPending: args.checks.filter(check => !current.preflights?.[check.id]).map(check => check.id) };
         }
         if (name === 'measure' && args.action === 'restart') {
@@ -559,17 +588,18 @@ export function createRequirementAgent(config, options) {
           if (!cleanup.verified) throw new RequirementWait('cleanup_pending', '原测量范围未恢复回查，不能重建基线。');
           current.restarts ??= [];
           current.restarts.push({ reason: args.reason, at: new Date().toISOString(), epoch: current.epoch ?? 0,
-            plan: current.plan, assertions: current.assertions, processProofs: current.processProofs, observations: current.observations, aliases: current.aliases, preflights: current.preflights, cleanup });
+            plan: current.plan, planReview:current.planReview, assertions: current.assertions, processProofs: current.processProofs, observations: current.observations, aliases: current.aliases, preflights: current.preflights, cleanup });
           current.epoch = (current.epoch ?? 0) + 1;
           for (const gap of Object.values(current.gaps ?? {})) if (!gap.resolved) { gap.resolved = true; gap.supersededByEpoch = current.epoch; }
           current.startedAt = new Date().toISOString(); current.assertions = {}; current.observations = []; current.aliases = {};
-          for (const field of ['plan', 'planAt', 'preflights', 'processProofs', 'measurementBindings', 'scenarioStartedAt', 'lastPreparationAt', 'cleanup']) delete current[field];
+          for (const field of ['plan', 'planReview', 'planAt', 'preflights', 'processProofs', 'measurementBindings', 'scenarioStartedAt', 'lastPreparationAt', 'cleanup']) delete current[field];
           const entry = await evidence(scope, '测量恢复重执行', { reason: args.reason, epoch: current.epoch, cleanup });
           await saveState(); return { restarted: true, epoch: current.epoch, evidence: entry, next: '重新准备数据及场景基线；旧观测仅作历史，不可绑定新检查。使用新的变更id。' };
         }
         if (name === 'assert' || name === 'measure') {
           const preflight = name === 'measure';
-          const check = current.plan?.checks.find(check => check.id === args.checkId);
+          const plan=candidatePlan??current.plan;
+          const check = plan?.checks.find(check => check.id === args.checkId);
           if (!check) throw agentError('Check is not in the frozen plan');
           const observation = knownObservation(args.observationId);
           if (observation.data.proof?.complete && observation.data.contract && isDeepStrictEqual(args.field, ['hash'])) args = { ...args, snapshot: true };
@@ -577,13 +607,8 @@ export function createRequirementAgent(config, options) {
           if (!preflight && observation.at < current.planAt) throw agentError('Read a fresh scenario observation after freezing expectations');
           if (preflight && current.scenarioStartedAt && observation.at >= current.scenarioStartedAt) throw agentError('Post-action evidence cannot certify a pre-action measurement; supplement original evidence or restore and restart');
           if (preflight && check.basis?.observationId && args.observationId !== check.basis.observationId) throw agentError('Certify the original baseline observation; a later query cannot replace it');
-          const verifiedIdentity = [];
-          for (const [dimension, value] of Object.entries(check.subject ?? {})) {
-            const identity = args.identity?.find(item => item.dimension === dimension);
-            if (!identity || !sameValue(observationAt(observation.data, identity.field), value)) throw agentError('Observation identity differs for ' + dimension);
-            verifiedIdentity.push({ dimension, field: identity.field, value: observationAt(observation.data, identity.field),
-              ...(check.channel === 'page' ? { measurement: observation.data.measurements?.[identity.field?.[1]] } : {}) });
-          }
+          const verifiedIdentity = verifyObservationIdentity(check,observation,args);
+          const stageProof=!preflight&&check.pageStage?verifyPageStage(plan,check,current,state.observations,args):null;
           if (args.evidenceRefs && !Array.isArray(args.evidenceRefs)) throw agentError('evidenceRefs must be an array of {observationId,fields:[field paths]}');
           const supportingEvidence = (args.evidenceRefs ?? []).map((ref, index) => {
             if (!ref || !Array.isArray(ref.fields) || !ref.fields.length
@@ -596,7 +621,7 @@ export function createRequirementAgent(config, options) {
                 method: evidence.data.method, status: evidence.data.status, request: evidence.data.request } : undefined,
               fields: ref.fields.map(field => {
                 const value = observationAt(evidence.data, field);
-                if (value === undefined) throw agentError(`evidenceRefs[${index}] field is absent: ${JSON.stringify(field)}`);
+                if (value === undefined) throw missingObservationField(evidence,field,`evidenceRefs[${index}]`);
                 return { field, value, ...(evidence.channel === 'page' ? { measurement: evidence.data.measurements?.[field[1]] } : {}) };
               }) };
           });
@@ -614,12 +639,13 @@ export function createRequirementAgent(config, options) {
           const binding = assertionBinding(check, observation, args.snapshot ? { ...args, field: ['hash'] } : args, state.sources, { verifiedIdentity, schemas: state.schemas, supportingEvidence,
             planContext: { currentCheckId: check.id,
               originalExpectation: scope.row[scope.headers.indexOf('预期结果')].split(/\r?\n/).filter(line => line.trim())[check.line - 1],
-              checks: current.plan.checks.filter(item => item.line === check.line).map(item => ({ id: item.id,
+              checks: plan.checks.filter(item => item.line === check.line).map(item => ({ id: item.id,
                 requirement: item.requirement, channel: item.channel, type: item.type, unit: item.unit, subject: item.subject,
                 measured: (current.assertions[item.id] ?? []).filter(result => result.compared).map(result => ({
                   observationId: result.observationId, sameObservation: result.observationId === observation.observationId,
                   at: state.observations[result.observationId]?.at, field: result.field, observed: result.observed, evidence: result.evidence })) })) } });
           binding.observation = { observationId: observation.observationId, at: observation.at };
+          if(stageProof)binding.pageStageProof=stageProof;
           const mutationPrefix = `${scope.attempt ?? 1}:${current.epoch ? 'epoch' + current.epoch + ':' : ''}`;
           binding.executionContext = { planAt: current.planAt, preparationCompletedAt: current.lastPreparationAt,
             scenarioStartedAt: current.scenarioStartedAt,
@@ -669,14 +695,14 @@ export function createRequirementAgent(config, options) {
             await saveState();
           }
           if (preflight) {
-            current.preflights ??= {};
-            current.preflights[check.id] = { observationId: observation.observationId, at: new Date().toISOString(), bindingKey,
+            const preflights=candidatePreflights??(current.preflights??={});
+            preflights[check.id] = { observationId: observation.observationId, at: new Date().toISOString(), bindingKey,
               baseline: check.basis, completeness, subjectHash: digest(check.subject ?? {}), sources: binding.sources,
               resources: binding.boundary.resources,
               schemas: Object.values(state.schemas).filter(schema => schema.resource === (observation.input?.resource ?? observation.measurement?.resource ?? observation.measurement?.snapshot?.resource))
                 .map(schema => ({ resource: schema.resource, database: schema.database, table: schema.table, hash: digest([schema.columns, schema.indexes]) })),
               evidence: await evidence(scope, '测量预检', { checkId: check.id, binding, baseline: check.basis }) };
-            await saveState(); return { proven: true, checkId: check.id, evidence: current.preflights[check.id].evidence };
+            if(!candidatePlan)await saveState(); return { proven: true, checkId: check.id, evidence: preflights[check.id].evidence };
           }
           if (check.basis?.observationId && !current.preflights?.[check.id]) throw agentError('Baseline completeness has not been validated; use test_measure with original evidence');
           const difference = args.snapshot ? compareRecordSnapshots(knownObservation(check.basis?.observationId).data, observation.data) : undefined;
@@ -698,9 +724,9 @@ export function createRequirementAgent(config, options) {
             return { observationId: record.observationId, at: record.at, channel: record.channel, query: measurement(record), input: record.input,
               fields: ref.fields.map(field => {
                 const value = observationAt(record.data, field);
-                if (value === undefined) throw agentError('Process evidence field is absent: ' + JSON.stringify(field));
+                if (value === undefined) throw missingObservationField(record,field,'Process evidence');
                 return { field, value };
-              }), page: record.channel === 'page' ? { ready: record.data.ready, measurements: record.data.measurements, screenshot: record.data.screenshot } : undefined };
+              }), page: record.channel === 'page' ? { ready: record.data.ready,lifecycle:record.data.lifecycle, measurements: record.data.measurements, screenshot: record.data.screenshot } : undefined };
           });
           const sources = (args.sourceRefs ?? []).map(ref => state.sources[ref]);
           if (sources.some(source => !source?.text)) throw agentError('Process sourceRefs require actual source evidence');
@@ -709,8 +735,12 @@ export function createRequirementAgent(config, options) {
           const payload = { check,
             originalExpectation: scope.row[scope.headers.indexOf('预期结果')].split(/\r?\n/).filter(line => line.trim())[check.line - 1],
             related: related.map(item => ({ checkId: item.check.id, requirement: item.check.requirement,
-              compared: true, assertionEvidence: item.attempts.filter(attempt => attempt.compared).map(attempt => attempt.evidence) })),
-            observed, sources,
+              compared: true,pageStage:item.check.pageStage,
+              comparedObservations:item.attempts.filter(attempt=>attempt.compared).map(attempt=>({observationId:attempt.observationId,at:state.observations[attempt.observationId]?.at})),
+              assertionEvidence: item.attempts.filter(attempt => attempt.compared).map(attempt => attempt.evidence) })),
+            pageStages:(current.plan.pageStages??[]).map(stage=>{const check=current.plan.checks.find(item=>item.pageStage===stage.id);return check?pageStageContext(current.plan,check,current,state.observations):{stageId:stage.id};}),
+            pageTimeline:current.observations.map(id=>state.observations[id]).filter(record=>record.channel==='page').map(record=>({observationId:record.observationId,at:record.at,epoch:record.epoch??0,resource:record.input?.resource,action:record.input?.action,lifecycle:record.data.lifecycle,ready:record.data.ready,url:record.data.url})),
+            observed, sources, planReview:current.planReview,
             planAt: current.planAt, scenarioStartedAt: current.scenarioStartedAt, preflights: current.preflights,
             mutations, cleanup: current.cleanup, coverage: checkCoverage(current), reportContract: 'Runner fixed 15 sheets; generated and verified after case cleanup, not yet claimed complete' };
           const reviewed = await review(scope, 'process', payload);

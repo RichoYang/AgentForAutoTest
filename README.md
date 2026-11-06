@@ -2,7 +2,9 @@
 
 新增需求执行链路说明见 [测量、证据与恢复](docs/execution-chain-repair.md)；问题清单见 [修复范围](docs/execution-chain-repair.spec.md)，实际结果与边界见 [验证记录](docs/execution-chain-repair.verification.md)。
 
-**程序版本：v1.51.0** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
+**程序版本：v1.52.0** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
+
+执行前业务/过程分类、测量契约与页面阶段绑定见[使用说明](docs/execution-preflight.md)、[问题表](docs/execution-preflight.spec.md)及[验证记录](docs/execution-preflight.verification.md)。
 
 Windows 源码缓存锁、私有 ACL 和本机 worker 恢复见[使用说明](docs/windows-reliability.md)、[问题表](docs/windows-reliability.spec.md)及[验证记录](docs/windows-reliability.verification.md)。
 

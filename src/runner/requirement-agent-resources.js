@@ -2,6 +2,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import {randomUUID} from 'node:crypto';
 import mysql from 'mysql2/promise';
 import { chromium } from 'playwright';
 import { observationAt } from './requirement-assertions.js';
@@ -11,6 +12,14 @@ import { buildRecordSnapshot } from './requirement-snapshot.js';
 
 const exec = promisify(execFile);
 export const agentError = message => Object.assign(new Error(message), { safeMessage: message });
+// mysql2 decoding under connect()'s exact-number/date settings; JSON/binary and
+// unknown wire types deliberately have no inferred scalar representation.
+export function mysqlResultColumns(fields=[]) {
+  return fields.map(field => ({name:field.name,columnType:field.columnType,flags:field.flags,characterSet:field.characterSet,
+    representation:[0,8,246,7,10,11,12,14].includes(field.columnType)?'string'
+      :[1,2,3,4,5,9,13].includes(field.columnType)?'number'
+      :[15,253,254].includes(field.columnType)&&Number.isInteger(field.characterSet)&&field.characterSet!==63?'string':null}));
+}
 // mysql2 sends JavaScript numbers as DOUBLE. Older MySQL 8.0 servers can
 // reprepare the entire statement and lose a neighbouring BIGINT string bind.
 // Decimal text lets the server apply the type derived from each SQL expression.
@@ -146,9 +155,9 @@ export function createAgentResources(config, scope) {
         }
         await connection.query('SET TRANSACTION READ ONLY');
         await connection.beginTransaction();
-        const [rows] = await connection.execute({ sql: spec.sql, timeout: 30000 }, mysqlParameters(resolveInput(spec.params ?? [], input)));
+        const [rows, fields] = await connection.execute({ sql: spec.sql, timeout: 30000 }, mysqlParameters(resolveInput(spec.params ?? [], input)));
         await connection.rollback();
-        return { rows: sanitized(rows), count: rows.length };
+        return { rows: sanitized(rows), count: rows.length, columns:mysqlResultColumns(fields) };
       }
       const schema = schemas.get(spec.resource + ':' + spec.database + ':' + spec.table)
         ?? scope.state.schemas?.[spec.resource + ':' + spec.database + ':' + spec.table];
@@ -311,6 +320,8 @@ export function createAgentResources(config, scope) {
     if (spec.kind === 'http') return http(spec, input, resource);
     if (spec.kind === 'browser') {
       const session = await browserSession(spec.resource, resource);
+      session.pageAction={id:randomUUID(),startedAt:new Date().toISOString(),action:spec.action,
+        ...(spec.action==='goto'?{path:resolveRoute(spec.path,input)}:{selector:spec.selector})};
       const effectPath = resolveRoute(spec.effect.path, input);
       session.effect = { ...spec.effect, path: effectPath, body: resolveInput(spec.effect.body, input) };
       try {
@@ -457,7 +468,10 @@ export function createAgentResources(config, scope) {
           return { fault: session.fault, simulated: true, restore: 'clear_fault or browser session close' };
         }
         if (args.action === 'clear_fault') { session.fault = null; return { restored: true }; }
-        if (['goto', 'fill', 'click', 'select', 'check'].includes(args.action)) session.ready = null;
+        if (['goto', 'fill', 'click', 'select', 'check'].includes(args.action)) {
+          session.ready = null;session.pageAction={id:randomUUID(),startedAt:actionStartedAt,action:args.action,
+            ...(args.path?{path:args.path}:{}),...(args.selector?{selector:args.selector}:{}),...(Object.hasOwn(args,'value')?{value:args.value}:{})};
+        }
         if (args.action === 'goto') await page.goto(resourceURL(resource, args.path).href, { waitUntil: 'domcontentloaded' });
         else if (args.action === 'fill') await page.locator(args.selector).fill(String(args.value));
         else if (args.action === 'click') await page.locator(args.selector).click();
@@ -466,7 +480,7 @@ export function createAgentResources(config, scope) {
         else if (args.action === 'wait') await waitBusinessReady(page, args.ready);
         else if (!['inspect', 'observe'].includes(args.action)) throw agentError('Unknown browser action');
         if (args.ready) { await waitBusinessReady(page, args.ready); session.ready = { condition: args.ready, at: new Date().toISOString() }; }
-        const data = { url: page.url(), network: network.splice(0), lifecycle: { actionStartedAt,
+        const data = { url: page.url(), network: network.splice(0), lifecycle: { actionStartedAt,pageAction:session.pageAction,
           actionCompletedAt: new Date().toISOString(), observationTimestampMeaning: 'saved after this action and its requested readiness wait' },
           ...(session.fault ? { activeFault: session.fault, simulatedFault: true } : {}) };
         if (args.action === 'inspect') data.dom = await page.locator('body').ariaSnapshot();

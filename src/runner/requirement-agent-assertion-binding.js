@@ -1,5 +1,68 @@
 import { observationAt, evaluateCaseAssertion, evaluateDerivedAssertion, validateDerivedTerms } from './requirement-assertions.js';
 import { agentError } from './requirement-agent-resources.js';
+import {isDeepStrictEqual} from 'node:util';
+
+export function verifyObservationIdentity(check,observation,args){
+  return Object.entries(check.subject??{}).map(([dimension,value])=>{
+    const identity=args.identity?.find(item=>item.dimension===dimension);
+    if(!identity||!isDeepStrictEqual(observationAt(observation.data,identity.field),value))throw agentError('Observation identity differs for '+dimension+'; an empty row cannot prove row identity; use verified snapshot scope or actual parent evidence for preflight');
+    return {dimension,field:identity.field,value:observationAt(observation.data,identity.field),...(check.channel==='page'?{measurement:observation.data.measurements?.[identity.field?.[1]]}:{})};
+  });
+}
+
+// Stages bind actual saved page actions, never labels added to an observation.
+export function pageStageContext(plan,check,current,observations,args={}){
+  const stage=plan.pageStages?.find(stage=>stage.id===check.pageStage);if(!stage)return null;
+  const stages=plan.pageStages.filter(item=>item.resource===stage.resource),groups=[],byAction=new Map(),boundary=current.scenarioStartedAt??current.planAt;
+  const matches=(action,wanted)=>action.action===wanted.action&&(wanted.action==='goto'?action.path===wanted.path:action.selector===wanted.selector)
+    &&(!Object.hasOwn(wanted,'value')||isDeepStrictEqual(action.value,wanted.value));
+  let legacyAction;
+  for(const id of current.observations){const record=observations[id];if(!record||record.channel!=='page'||(record.epoch??0)!==(current.epoch??0)||record.input?.resource!==stage.resource)continue;
+    if(['goto','click','select','fill','check'].includes(record.input.action))legacyAction={...record.input,id:record.observationId,startedAt:record.data.lifecycle?.actionStartedAt??record.at};
+    const action=record.data.lifecycle?.pageAction??legacyAction;
+    if(!action||!boundary||action.startedAt<boundary||!stages.some(stage=>matches(action,stage)))continue;
+    let group=byAction.get(action.id);if(!group){group={action,records:[]};byAction.set(action.id,group);groups.push(group);}group.records.push(record);
+  }
+  const assigned=new Map(),timeline=[];let cursor=0;
+  for(const group of groups){let index=stages.findIndex((stage,i)=>i>=cursor&&matches(group.action,stage));
+    if(index<0){timeline.push({action:group.action,stageId:null,reason:'additional_visit',observationIds:group.records.map(record=>record.observationId)});continue;}
+    const matched=stages[index];assigned.set(matched.id,group);cursor=index+1;timeline.push({action:group.action,stageId:matched.id,observationIds:group.records.map(record=>record.observationId)});
+  }
+  function actualField(record,identity,sample){
+    const descriptor=sample?.data.measurements?.[identity.field?.[1]]??sample?.input?.fields?.[identity.field?.[1]];
+    if(!descriptor||identity.field[0]!=='values')return identity.field;
+    const same=candidate=>candidate&&['selector','read','attribute'].every(key=>candidate[key]===descriptor[key]);
+    if(same(record.data.measurements?.[identity.field[1]]))return identity.field;
+    const alias=Object.entries(record.data.measurements??{}).find(([,candidate])=>same(candidate))?.[0];
+    return alias?['values',alias,...identity.field.slice(2)]:null;
+  }
+  const stageEvidence=stages.map(wanted=>{
+    const group=assigned.get(wanted.id),related=plan.checks.find(item=>item.pageStage===wanted.id)??check;
+    const identities=related.measurement?.identity??[];
+    const sample=observations[related.measurement?.observationId];
+    const candidates=(group?.records??[]).filter(record=>record.data.screenshot&&record.data.ready?.at>=group.action.startedAt&&record.data.values
+      &&Object.entries(wanted.subject).every(([dimension,value])=>{const identity=identities.find(item=>item.dimension===dimension),field=identity&&actualField(record,identity,sample);return field&&isDeepStrictEqual(observationAt(record.data,field),value);}));
+    return {stageId:wanted.id,action:group?.action,candidateObservationIds:candidates.map(record=>record.observationId),
+      observations:candidates.map(record=>({observationId:record.observationId,at:record.at,readyAt:record.data.ready.at})),proven:candidates.length>0};
+  });
+  const own=stageEvidence.find(item=>item.stageId===stage.id),missingStageIds=stageEvidence.slice(0,stages.indexOf(stage)+1).filter(item=>!item.proven).map(item=>item.stageId);
+  const selected=timeline.find(item=>item.observationIds.includes(args.observationId));
+  return {stageId:stage.id,step:stage.step,resource:stage.resource,subject:stage.subject,boundary,epoch:current.epoch??0,
+    scope:'saved page-action order, identity and readiness; interleaved business-step causality still requires ledger/source review',
+    action:own.action,selectedAction:selected?.action,selectedStage:selected?.stageId??(selected?'additional_visit':null),selectedObservationId:args.observationId,
+    candidateObservationIds:own.candidateObservationIds,missingStageIds,stages:stageEvidence,relatedCheckIds:plan.checks.filter(item=>item.pageStage===stage.id).map(item=>item.id),timeline,
+    valid:!missingStageIds.length&&own.candidateObservationIds.includes(args.observationId)};
+}
+
+export function verifyPageStage(plan,check,current,observations,args){
+  const proof=pageStageContext(plan,check,current,observations,args);if(!proof||proof.valid)return proof;
+  const next=proof.missingStageIds.length?'Missing business-ready identity evidence for historical stages '+proof.missingStageIds.join(', ')+'. Inspect saved page actions/evidence for all affected stages; if it cannot be proved, restore and restart the affected scope. New navigation cannot replace a missing historical stage.'
+    :proof.candidateObservationIds.length?'Read the saved current-epoch observations '+proof.candidateObservationIds.join(', ')+' with test_evidence; do not navigate again to recreate a historical stage.'
+    :'No business-ready identity-proven observation exists for this historical stage. Inspect saved page actions/evidence; if it cannot be proved, restore and restart the affected scope. New navigation cannot replace the missing first stage.';
+  const reason=`Required page stage ${proof.stageId} (step ${proof.step}), selected stage ${proof.selectedStage??'unbound'} (action ${proof.selectedAction?.id??'none'}); missing stages: ${proof.missingStageIds.join(', ')||'none'}; affected checks: ${proof.relatedCheckIds.join(', ')}. ${next}`;
+  throw Object.assign(agentError(reason),{code:'page_stage',gapTarget:'page_stage:'+proof.stageId,stageEvidence:proof,
+    review:{kind:'assertion_binding',disposition:proof.candidateObservationIds.length?'contradictory_evidence':'missing_evidence',findings:[{field:'plan.pageStages.'+proof.stageId,code:'page_stage',reason,next}]}});
+}
 
 export function assertionBinding(check, observation, args, sources, context = {}) {
   const refs = args.sourceRefs ?? check.measurement?.sourceRefs;
@@ -30,10 +93,18 @@ export function assertionBinding(check, observation, args, sources, context = {}
     || args.identity?.some(identity => identity.field?.[0] !== 'values'))) {
     throw agentError('Page assertions and subject identities must use observed DOM values; captured API traffic is diagnostic evidence only');
   }
-  const selected = fields.map(field => ({ field,
+  for(const field of fields)if(observation.channel==='database'&&field[0]==='rows'&&Number.isInteger(field[1])&&field.length>=3){
+    const names=Array.isArray(observation.data.columns)?observation.data.columns.map(column=>column.name):observation.data.contract?.fields;
+    if(names&&!names.includes(field[2]))throw agentError('Measurement field is absent from the verified query/snapshot columns: '+JSON.stringify(field));
+  }
+  const availability=field=>{let value=observation.data;for(const segment of field){if(value===null)return 'null_ancestor';if(Array.isArray(value)&&!value.length&&typeof segment==='number')return 'empty_collection';if(value===undefined||!Object.hasOwn(Object(value),segment))return 'missing';value=value[segment];}return value===null?'null':'present';};
+  const selected = fields.map(field => ({ field,availability:availability(field),
+    ...(field[0]==='rows'&&field.length>=3&&observation.data.columns?{queryColumn:observation.data.columns.find(column=>column.name===field[2])}:{}),
     ...(check.channel === 'page' ? { measurement: observation.data.measurements?.[field[1]] ?? observation.input?.fields?.[field[1]] } : {}),
     valueType: observationAt(observation.data, field) === null ? 'null' : Array.isArray(observationAt(observation.data, field)) ? 'array'
-      : typeof observationAt(observation.data, field) }));
+      : typeof observationAt(observation.data, field),
+    ...(check.type==='number'&&!args.calculation&&/^-?\d+(?:\.\d+)?$/.test(String(observationAt(observation.data,field)))
+      ?{representation:{encoding:'decimal-text',exact:typeof observationAt(observation.data,field)==='string'||Number.isFinite(observationAt(observation.data,field))&&(!Number.isInteger(observationAt(observation.data,field))||Number.isSafeInteger(observationAt(observation.data,field)))}}:{}) }));
   if (refs && (!Array.isArray(refs) || refs.some(ref => !sources[ref]?.text))) throw agentError('sourceRefs must reference concrete source already read by this Job');
   const tokens = fields.flat().filter(part => typeof part === 'string' && !['body', 'data', 'rows', 'values'].includes(part));
   const evidence = refs ? refs.map(ref => ({ sourceRef: ref, ...sources[ref] }))

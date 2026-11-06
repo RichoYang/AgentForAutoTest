@@ -1,5 +1,6 @@
 // The advertised schema and host validation share one definition. Business
 // payloads remain open maps; executable tool structure is explicit and checked.
+import {isDeepStrictEqual} from 'node:util';
 const string = { type: 'string', minLength: 1 }, integer = { type: 'integer', minimum: 0 };
 export const operationNameSchema={type:'string',pattern:'^[A-Za-z][A-Za-z0-9_-]+$'};
 const object = (properties, required = [], extra = false) => ({ type: 'object', properties, required, additionalProperties: extra });
@@ -22,13 +23,14 @@ const spec = object({ resource: string, kind: enumeration('http', 'database', 'b
   database: string, sql: string, params: array({}), table: string, values: map, where: map, expectedRows: { type: 'integer', minimum: 1 },
   action: enumeration('click', 'goto'), selector: string, effect: object({ path: pathTemplate, method: string, body: {} }, ['path', 'method']) }, ['resource', 'kind', 'access']);
 const measurement = object(selection, ['observationId']);
-const check = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string,
+const check = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string, pageStage:string,
   channel: enumeration('page', 'api', 'database', 'message', 'job'), subject: map, expected: {},
   operator: enumeration('equals', 'contains', 'gt', 'gte', 'lt', 'lte'), type: enumeration('number', 'text', 'boolean', 'null'), unit: { type: 'string' },
   basis: object({ quote: string, observationId: string, field, explanation: string }), measurement },
 ['id', 'line', 'requirement', 'channel', 'expected', 'operator', 'type', 'basis']);
 const processCheck = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string,
   kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup'), relatedCheckIds: array(string) }, ['id', 'line', 'requirement', 'kind']);
+const pageStage=object({id:string,step:{type:'integer',minimum:1},resource:string,action:enumeration('goto','click','select'),path:string,selector:string,value:{},subject:map},['id','step','resource','action','subject']);
 const invocation = { operation: string, input: map, subject: map, ...page };
 const readiness = object({ field, operator: enumeration('equals', 'not_equals'), value: {},
   timeoutMs: { type: 'integer', minimum: 1 } }, ['field', 'operator', 'value']);
@@ -54,7 +56,7 @@ export const requirementToolSchemas = {
     operation: string, delayMs: { type: 'number', minimum: 0 }, abort: { type: 'boolean' }, status: { type: 'integer' }, body: {} }, ['resource', 'action']),
   plan: { anyOf: [object({ action: { const: 'inspect' } }, ['action']),
     object({ identityCorrections: array(object({ checkId: string, subject: map }, ['checkId', 'subject']), 1) }, ['identityCorrections']),
-    object({ version: { const: 1 }, steps: array(string, 1), prerequisites: array(object({ objects: string, target_state: string, construction_entry: string,
+    object({ version: { const: 1 }, steps: array(string, 1), pageStages:array(pageStage), prerequisites: array(object({ objects: string, target_state: string, construction_entry: string,
       unique_identifier: string, verification_method: string, cleanup_method: string }, ['objects', 'target_state', 'construction_entry', 'unique_identifier', 'verification_method', 'cleanup_method'])), checks: array(check, 1), processChecks: array(processCheck) }, ['version', 'steps', 'prerequisites', 'checks'])] },
   measure: { anyOf: [object({ action: { const: 'restart' }, reason: string }, ['action', 'reason']),
     object({ checkId: string, ...selection }, ['checkId', 'observationId'])] },
@@ -100,4 +102,32 @@ export function schemaErrors(schema, value, at = '$.args') {
 export function validateToolArguments(name, args) {
   const errors = requirementToolSchemas[name] ? schemaErrors(requirementToolSchemas[name], args) : ['Unknown test tool: ' + name];
   if (errors.length) throw Object.assign(new Error(errors.join('; ')), { code: 'tool_contract', safeMessage: errors.join('; '), fields: errors });
+}
+
+export function planCoverageMatrix(lines, plan) {
+  return lines.map((originalExpectation,index)=>({line:index+1,originalExpectation,
+    business:plan.checks.filter(check=>check.line===index+1).map(check=>({id:check.id,requirement:check.requirement,channel:check.channel})),
+    process:(plan.processChecks??[]).filter(check=>check.line===index+1).map(check=>({id:check.id,requirement:check.requirement,kind:check.kind,relatedCheckIds:check.relatedCheckIds??[]}))}));
+}
+export function duplicatePlanChecks(plan) {
+  const errors=[],canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
+  for(const role of ['checks','processChecks']){
+    const seen=new Map();for(const check of plan[role]??[]){const {id,...contract}=check;
+      const fingerprint=JSON.stringify(canonical(contract));if(seen.has(fingerprint))errors.push(`$.${role}.${id} duplicates ${seen.get(fingerprint)} exactly; independent coverage cannot count the same contract twice`);else seen.set(fingerprint,id);
+    }
+  }return errors;
+}
+
+export function pageStageErrors(plan,resources){
+  const errors=[],ids=new Set();
+  for(const stage of plan.pageStages??[]){
+    if(ids.has(stage.id))errors.push('$.pageStages.'+stage.id+' has a duplicate stage id');ids.add(stage.id);
+    if(!resources.includes(stage.resource)||!plan.steps[stage.step-1])errors.push('$.pageStages.'+stage.id+' needs a known resource and existing 1-based plan step');
+    if(stage.action==='goto'?!stage.path?.startsWith('/')||stage.path.startsWith('//'):!stage.selector)errors.push('$.pageStages.'+stage.id+' needs the actual relative path or selector of the page action');
+    if(!Object.keys(stage.subject).length)errors.push('$.pageStages.'+stage.id+' needs actual business identity dimensions');
+  }
+  for(const check of plan.checks){if(!check.pageStage)continue;const stage=plan.pageStages?.find(stage=>stage.id===check.pageStage);
+    if(!stage||check.channel!=='page'){errors.push('$.checks.'+check.id+'.pageStage must reference a declared page stage for a page check');continue;}
+    for(const [dimension,value]of Object.entries(stage.subject))if(!isDeepStrictEqual(check.subject?.[dimension],value)||!check.measurement?.identity?.some(item=>item.dimension===dimension))errors.push('$.checks.'+check.id+' needs matching stage subject and preflight identity path for '+dimension);
+  }return errors;
 }
