@@ -67,12 +67,13 @@ export async function resolveCodexBinary(explicit, options = {}) {
     try { if ((await stat(local.codexBin)).isFile()) return local.codexBin; }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
-  return await discoverWindowsCodexBinary(options.discoveryRoot)
-    || await discoverMacCodexBinary(options.macDiscoveryRoot)
+  const platform=options.platform??process.platform;
+  return (platform==='win32'?await discoverWindowsCodexBinary(options.discoveryRoot):null)
+    || (platform==='darwin'?await discoverMacCodexBinary(options.macDiscoveryRoot,options):null)
     || 'codex';
 }
 
-export async function discoverMacCodexBinary(root = null) {
+export async function discoverMacCodexBinary(root = null,{accessFile=access}={}) {
   if (!root && process.platform !== 'darwin') return null;
   const resources = root || '/Applications/ChatGPT.app/Contents/Resources';
   const candidates = [
@@ -82,7 +83,7 @@ export async function discoverMacCodexBinary(root = null) {
   for (const candidate of candidates) {
     try {
       if ((await stat(candidate)).isFile()) {
-        await access(candidate, constants.X_OK);
+        await accessFile(candidate, constants.X_OK);
         return candidate;
       }
     } catch (error) {

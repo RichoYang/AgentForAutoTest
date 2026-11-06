@@ -1,0 +1,10 @@
+// Freeze the bytes actually under validation. Never overwrite a different prior freeze.
+import {readFile,readdir,writeFile,mkdir} from 'node:fs/promises';import {createHash} from 'node:crypto';import path from 'node:path';import {fileURLToPath} from 'node:url';
+if(!process.argv[2]||process.argv.length>4||process.argv[3]&&process.argv[3]!=='--verify')throw Error('Usage: node scripts/freeze-verification-source.mjs <manifest.json> [--verify]');
+const root=fileURLToPath(new URL('../',import.meta.url)),target=path.resolve(process.argv[2]),hash=v=>createHash('sha256').update(v).digest('hex'),files=[];
+async function scan(directory,prefix){for(const entry of await readdir(directory,{withFileTypes:true})){const file=path.join(directory,entry.name),relative=prefix+'/'+entry.name;if(entry.isSymbolicLink())throw Error('Source freeze cannot follow a symlink: '+relative);if(entry.isDirectory())await scan(file,relative);else if(entry.isFile())files.push({path:relative,sha256:hash(await readFile(file))});else throw Error('Unsupported source entry: '+relative);}}
+await scan(path.join(root,'src'),'src');files.sort((a,b)=>a.path.localeCompare(b.path));const manifest={at:new Date().toISOString(),version:JSON.parse(await readFile(path.join(root,'package.json'),'utf8')).version,files,sha256:hash(JSON.stringify(files))};
+let prior;try{prior=JSON.parse(await readFile(target,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+if(prior){if(prior.version!==manifest.version||JSON.stringify(prior.files)!==JSON.stringify(files)||prior.sha256!==manifest.sha256)throw Error('Source differs from the frozen evidence; use a new validation directory and rerun affected checks');}
+else {if(process.argv[3]==='--verify')throw Error('Source freeze is missing');await mkdir(path.dirname(target),{recursive:true});await writeFile(target,JSON.stringify(manifest,null,2)+'\n',{flag:'wx'});}
+console.log(JSON.stringify({verified:!!prior,version:manifest.version,files:files.length,sha256:manifest.sha256}));

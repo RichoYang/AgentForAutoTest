@@ -11,7 +11,7 @@ import { observationAt, evaluateCaseAssertion } from './requirement-assertions.j
 import { assertionBinding, compareAgentObservation } from './requirement-agent-assertion-binding.js';
 import { requirementAgentModel } from './requirement-agent-model.js';
 import { agentError, createAgentResources, readSource, resolveInput, sanitized, validateRouteTemplate } from './requirement-agent-resources.js';
-import { requirementToolSchemas, validateToolArguments } from './requirement-agent-contracts.js';
+import { requirementToolSchemas, validateToolArguments,operationNameSchema } from './requirement-agent-contracts.js';
 import { compareRecordSnapshots } from './requirement-snapshot.js';
 import { checkCoverage, recordGap, resolveGaps } from './requirement-agent-progress.js';
 import { mutationReadbackHash, validateMutationReadback, repairHttpEnvelope } from './requirement-mutation-measurement.js';
@@ -336,7 +336,7 @@ export function createRequirementAgent(config, options) {
         }
         if (name === 'register') {
           const spec = args.spec;
-          if (!/^[A-Za-z][A-Za-z0-9_-]+$/.test(args.name ?? '') || !['http', 'database', 'browser'].includes(spec?.kind)
+          if (!new RegExp(operationNameSchema.pattern).test(args.name ?? '') || !['http', 'database', 'browser'].includes(spec?.kind)
             || !['read', 'create', 'update', 'delete', 'trigger'].includes(spec.access) || !scope.resourceNames.includes(spec.resource)) throw agentError('Invalid operation name, kind, access or resource');
           if (state.operations[args.name]) {
             if (digest(state.operations[args.name]) !== digest(spec)) throw agentError('Use a new name for a different operation contract');

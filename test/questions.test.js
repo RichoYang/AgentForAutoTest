@@ -157,7 +157,7 @@ test('persistent session resumes across engine restart, caches decisions, and ke
   assert.equal(calls.filter((c) => c.name === 'thread/resume').length, 1);
   assert.equal(calls.find((c) => c.name === 'thread/start').args.ephemeral, false);
   assert.match(calls.filter((c) => c.name === 'turn')[1].args.input[0].text, /"history":\[\]/);
-  assert.equal((await stat(path.join(directory, 'codex-conversations.json'))).mode & 0o777, 0o600);
+  assert.equal((await (await import('../src/shared/private-files.js')).privatePathProof(path.join(directory,'codex-conversations.json'))).private,true);
 });
 test('changing the console model starts a new conversation thread without reusing the old model', async (t) => {
   const { directory } = await setup(t); const file = path.join(directory, 'codex-runtime.json'); const calls = [];

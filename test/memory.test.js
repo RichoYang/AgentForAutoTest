@@ -19,7 +19,7 @@ test('Chinese historical query retrieves first of 50 turns after restart without
   assert.equal(a.summary.kind, 'extractive-digest-v1');
   const b = await new MemoryService({ dataDir }).retrieve(state, turn, 'p');
   assert.deepEqual(a, b); assert.equal(JSON.stringify(state), before);
-  assert.equal((await stat(path.join(dataDir, 'memory.json'))).mode & 0o777, 0o600);
+  assert.equal((await (await import('../src/shared/private-files.js')).privatePathProof(path.join(dataDir,'memory.json'))).private,true);
 });
 
 test('scope filtering precedes ranking, including administrator requests and identical queries', async (t) => {

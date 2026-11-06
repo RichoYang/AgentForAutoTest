@@ -16,7 +16,8 @@ async function main() {
     feishu: { transport: 'lark-cli' },
   });
   const localExecutionRegistry=path.join(config.dataDir,'local-executions');
-  await recoverLocalExecutions(store,localExecutionRegistry);
+  const localRecovery=await recoverLocalExecutions(store,localExecutionRegistry);
+  if(localRecovery.blocked?.length)console.warn('[local-execution] process identity remains unverified; task leases stay fenced',JSON.stringify(localRecovery.blocked));
   await new Promise((resolve) => server.listen(config.port, config.host, resolve));
   console.log(`[control-plane] listening on http://${config.host}:${config.port}`);
   const eventSources = await startLarkEventSources({

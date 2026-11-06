@@ -1,22 +1,23 @@
 import {QueryInputError} from './environment-tools.js';
-import {mkdir,readFile,writeFile,rename,lstat,realpath} from 'node:fs/promises';
+import {mkdir,readFile,rename,lstat,realpath} from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {withSnapshotLock} from '../shared/snapshot-lock.js';
+import {privateDirectory,writePrivateFile} from '../shared/private-files.js';
 const digest=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 export async function withInvestigationSession({dataDir,job,environment},run){
  if(!dataDir||!job)return run(null);
  if(!/^JOB-[A-Za-z0-9-]+$/.test(job.id))throw new Error('调查会话任务编号无效');
  let root=await realpath(dataDir);
  for(const name of ['exports',job.id,'.investigation-session']){
-  const next=path.join(root,name);try{await mkdir(next,{mode:0o700});}catch(e){if(e.code!=='EEXIST')throw e;}
+  const next=path.join(root,name);if(name==='.investigation-session')await privateDirectory(next);else try{await mkdir(next,{mode:0o700});}catch(e){if(e.code!=='EEXIST')throw e;}
   if((await lstat(next)).isSymbolicLink()||path.dirname(await realpath(next))!==root)throw new Error('调查会话目录边界校验失败');root=next;
  }
  const binding=digest({policy:1,job:job.id,question:job.questionId,actor:job.senderId,profile:job.originProfile??job.agentProfile,chat:job.chatId,project:job.projectId,environment,source:job.analysisSourceSnapshot?.cacheKey??job.sourceEnvironment});
  return withSnapshotLock(root,async check=>{
   const file=path.join(root,'state.json');let state={binding,records:[],planner:null,schema:null,epoch:0};
   try{const info=await lstat(file);if(!info.isFile()||info.isSymbolicLink())throw new Error('调查会话文件边界校验失败');const saved=JSON.parse(await readFile(file,'utf8'));if(saved.digest!==digest(saved.state))throw new Error('调查会话摘要校验失败');if(saved.state.binding===binding)state=saved.state;}catch(e){if(e.code!=='ENOENT')throw e;}
-  const save=async()=>{check();const temp=file+'.'+process.pid+'.tmp';await writeFile(temp,JSON.stringify({state,digest:digest(state)}),{mode:0o600});await rename(temp,file);};
+  const save=async()=>{check();const temp=file+'.'+process.pid+'.tmp';await writePrivateFile(temp,JSON.stringify({state,digest:digest(state)}));check();await rename(temp,file);};
   return run({root,state,save});
  });
 }

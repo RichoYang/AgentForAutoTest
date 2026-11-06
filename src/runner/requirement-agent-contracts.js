@@ -1,6 +1,7 @@
 // The advertised schema and host validation share one definition. Business
 // payloads remain open maps; executable tool structure is explicit and checked.
 const string = { type: 'string', minLength: 1 }, integer = { type: 'integer', minimum: 0 };
+export const operationNameSchema={type:'string',pattern:'^[A-Za-z][A-Za-z0-9_-]+$'};
 const object = (properties, required = [], extra = false) => ({ type: 'object', properties, required, additionalProperties: extra });
 const array = (items, minItems = 0) => ({ type: 'array', items, minItems });
 const map = { type: 'object', additionalProperties: true };
@@ -41,7 +42,7 @@ export const requirementToolSchemas = {
   schema: object({ resource: string, database: string, table: string }, ['resource']),
   read_sql: object({ resource: string, database: string, sql: string, params: array({}), subject: map, ...page }, ['resource', 'database', 'sql']),
   snapshot: object({ resource: string, database: string, table: string, scope: map, fields: array(string, 1), pageSize: { type: 'integer', minimum: 1 }, ...page }, ['resource', 'database', 'table', 'scope']),
-  register: object({ name: string, sourceRefs: array(string, 1), reason: string, spec }, ['name', 'sourceRefs', 'reason', 'spec']),
+  register: object({ name: operationNameSchema, sourceRefs: array(string, 1), reason: string, spec }, ['name', 'sourceRefs', 'reason', 'spec']),
   observe: object(invocation, ['operation']),
   evidence: { anyOf: [object({ observationId: string, field, ...page }, ['observationId']),
     object({ evidenceRef: string, field, ...page }, ['evidenceRef'])] },
@@ -79,6 +80,7 @@ export function schemaErrors(schema, value, at = '$.args') {
     : type === 'array' ? Array.isArray(value) : type === 'integer' ? Number.isSafeInteger(value) : typeof value === type && (type !== 'number' || Number.isFinite(value));
   if (!valid) return [...errors, at + ' must be ' + type];
   if (typeof value === 'string' && value.length < (schema.minLength ?? 0)) errors.push(at + ' must be nonempty');
+  if (typeof value === 'string' && schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(at+' must match '+schema.pattern+' (use letters, digits, _ or -; no dots)');
   if (typeof value === 'number' && value < (schema.minimum ?? -Infinity)) errors.push(at + ' must be >= ' + schema.minimum);
   if (type === 'array') {
     if (value.length < (schema.minItems ?? 0)) errors.push(at + ' has too few items');

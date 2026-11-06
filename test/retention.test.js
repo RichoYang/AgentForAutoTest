@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile,rm,utimes,symlink,stat} from 'node:fs/promises';
 import path from 'node:path';import os from 'node:os';import {randomUUID} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 import {DAY,pruneState,retentionSettings,validateRetainedRequest,expiredMessage} from '../src/shared/retention.js';
 import {JsonStore} from '../src/shared/store.js';
 import {cleanupRetentionFiles,RetentionService} from '../src/control-plane/retention.js';
@@ -30,7 +31,7 @@ test('managed file cleanup rejects links, retains referenced/new artifacts and n
  const result=await cleanupRetentionFiles(store,r,cutoff);assert.equal(result.deleted,1);await assert.rejects(stat(path.join(r,'exports','JOB-old')),e=>e.code==='ENOENT');for(const id of ['JOB-live','JOB-new','JOB-link'])assert.ok(await stat(path.join(r,'exports',id)));assert.equal(await readFile(path.join(outside,'secret'),'utf8'),'preserved');assert.ok(await stat(picture));assert.ok(await stat(path.join(r,'worktrees','JOB-old','source')));
 });
 test('actual SQLite, personal digests and persistent thread registry delete expired data, keep fresh and pending live work',async t=>{
- const r=await root(t),k=await new KnowledgeStore(r).open();t.after(()=>k.close());const entry=(id,date)=>({id,team:'team',environment:'prd',topic:id,version:1,verifiedAt:date,title:id,aliases:[]});k.put(entry('old',now-31*DAY));k.put(entry('new',now-DAY));k.search('team','old');assert.equal(k.prune(now,cutoff),1);assert.equal(k.get('old'),null);assert.ok(k.get('new'));assert.equal(k.hot.size,0);
+ const r=await mkdtemp(path.join(os.tmpdir(),'aos-retention-sqlite-')),k=await new KnowledgeStore(r).open();t.after(async()=>{k.close();await rm(r,{recursive:true,force:true});});const entry=(id,date)=>({id,team:'team',environment:'prd',topic:id,version:1,verifiedAt:date,title:id,aliases:[]});k.put(entry('old',now-31*DAY));k.put(entry('new',now-DAY));k.search('team','old');assert.equal(k.prune(now,cutoff),1);assert.equal(k.get('old'),null);assert.ok(k.get('new'));assert.equal(k.hot.size,0);
  const index=new ContactIndex(r);await index.put('old','scope',[]);await index.put('new','scope',[]);await index.run(db=>{db.prepare('UPDATE directory SET checked_at=? WHERE profile=?').run(now-31*DAY,'old');db.prepare('UPDATE directory SET checked_at=? WHERE profile=?').run(now-DAY,'new');});assert.equal(await index.prune(cutoff),1);assert.equal(await index.get('old','scope',Number.MAX_SAFE_INTEGER),null);
  const m=new MemoryService({dataDir:r});await m.write({version:1,scopes:{old:{updatedAt:old,items:[]},new:{updatedAt:fresh,items:[{ref:'job:keep',recordedAt:fresh}]}},tombstones:{old:['job:gone'],live:['job:keep']}});assert.equal(await m.prune(cutoff,new Set(['job:keep'])),1);const memory=await m.read();assert.deepEqual(Object.keys(memory.scopes),['new']);assert.deepEqual(memory.tombstones,{live:['job:keep']});
  const registry=new SessionRegistry(r);await registry.set('old',{updatedAt:old});await registry.set('pending',{updatedAt:old,pending:'active-turn'});await registry.set('new',{updatedAt:fresh});assert.equal(await registry.prune(cutoff,new Set(['active-turn'])),1);assert.equal(await registry.get('old'),undefined);assert.ok(await registry.get('pending'));
@@ -49,5 +50,5 @@ test('HTTP unknown expired control requests cannot re-execute after receipt expi
 });
 test('operator preview is read-only and emits counts without question text or task IDs',async t=>{
  const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),r=await root(t),file=path.join(r,'agentos.json'),body=JSON.stringify({jobs:[job('private-id',{instruction:'private question'})]});await writeFile(file,body);
- const script=new URL('../scripts/retention-preview.mjs',import.meta.url),{stdout}=await promisify(execFile)(process.execPath,[script.pathname,'--data-dir',r]);const result=JSON.parse(stdout);assert.equal(result.dryRun,true);assert.equal(result.counts.jobs,1);assert.equal(await readFile(file,'utf8'),body);assert.ok(!stdout.includes('private question'));assert.ok(!stdout.includes('private-id'));
+ const script=new URL('../scripts/retention-preview.mjs',import.meta.url),{stdout}=await promisify(execFile)(process.execPath,[fileURLToPath(script),'--data-dir',r]);const result=JSON.parse(stdout);assert.equal(result.dryRun,true);assert.equal(result.counts.jobs,1);assert.equal(await readFile(file,'utf8'),body);assert.ok(!stdout.includes('private question'));assert.ok(!stdout.includes('private-id'));
 });

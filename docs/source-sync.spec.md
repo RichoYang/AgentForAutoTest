@@ -43,7 +43,7 @@
 
 默认预演（不删除）：`node scripts/prune-source-snapshots.mjs --projects ./config/projects.local.json --state ./data/agentos.json`。在线清理由控制面统一执行，维护者使用现有AGENTOS_ADMIN_TOKEN，或在未设置固定令牌的本机部署中建立原控制台会话（同源与x-agentos-admin校验保留）：`node scripts/prune-source-snapshots.mjs --apply --server http://127.0.0.1:8787`；不能建立本机管理员会话且没有有效令牌，或目标不是本机服务时不执行。接口POST /api/v1/admin/source-snapshots/prune的apply=false可取得在线预演，apply=true实际删除时仍重验。不要对运行中的状态文件副本直接离线删除。
 
-凭据、登录态、个人源码、开发worktree、配置和待投递内容不属于源码垃圾。调查前在同一缓存锁内为各仓补齐固定提交祖先历史（git fetch --unshallow origin <固定提交>），不切换工作树、不改清单。已完整的历史离线复用；旧浅缓存和恢复的历史缓存自动补齐。逐仓记录sourceHistory的complete/unavailable、范围与恢复方式，失败不冒充完整历史，也不丢弃其它仓和当前源码证据。历史对象随原缓存回收，不创建额外完整源码副本。补取使用原Git单请求超时，不新增任务总时长/次数限制；首次补齐大型仓库可能耗时且增加Git对象占用。恢复原提交及补齐历史仍依赖来源Git服务器可提供对象；来源不可用如实报错。Mac/Linux需Python3与POSIX flock；Windows新缓存锁分支尚未实机验收，不支持时明确拒绝，不能绕过锁。源文件同步不证明UAT/PRD已经部署该版本。
+凭据、登录态、个人源码、开发worktree、配置和待投递内容不属于源码垃圾。调查前在同一缓存锁内为各仓补齐固定提交祖先历史（git fetch --unshallow origin <固定提交>），不切换工作树、不改清单。已完整的历史离线复用；旧浅缓存和恢复的历史缓存自动补齐。逐仓记录sourceHistory的complete/unavailable、范围与恢复方式，失败不冒充完整历史，也不丢弃其它仓和当前源码证据。历史对象随原缓存回收，不创建额外完整源码副本。补取使用原Git单请求超时，不新增任务总时长/次数限制；首次补齐大型仓库可能耗时且增加Git对象占用。恢复原提交及补齐历史仍依赖来源Git服务器可提供对象；来源不可用如实报错。Mac/Linux需Python3与POSIX flock；1.51.0 Windows使用内核独占句柄，拒绝reparse目标、丢锁即停止，实际进程/Git/模型验证及限制见[Windows记录](windows-reliability.verification.md)。源文件同步不证明UAT/PRD已经部署该版本。
 
 ![按环境隔离源码分析](images/agentos-environment-sources.svg)
 
@@ -80,7 +80,7 @@
 - 它保证所记录时间的 origin 提交，不保证远端之后没有新提交，也不证明部署环境就是该版本。
 - Runner 池可并发执行不同 Job；isolated 模式为每次调查准备独立快照。兼容的共享目录模式仍可能受外部编辑器/Git影响，前后检查只能发现持续变化，不能完全检测“修改后又还原”。任务期间避免其它进程修改同一共享目录。
 - 子模块、其它任务的 worktree 和依赖不自动初始化/更新；需要的独立 Git 仓库须明确配置。
-- Windows 保留现有进程树取消机制；此新增同步在 macOS 用本地 Git 夹具验证，Windows 尚需平台实测。
+- Windows 1.51.0新增内核Job进程树归属及恢复证明，并在真实Windows Git/文件系统与正常Runner验证；旧macOS验证保留历史边界，不能代验未运行的平台。详见[Windows使用说明](windows-reliability.md)。
 - 群内“以后记住”仅进入历史对话，不会自动改持久规范；本规则由代码、配置与固定角色文件落实。
 
 ## 验证

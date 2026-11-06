@@ -31,7 +31,7 @@ test('A verified guide becomes B paraphrase candidate; canonical reply is consis
   const reply=await x.service.reuse(actor,'p',decision(x.id),x.input);assert.ok(reply.reply.startsWith(proposal.answer));assert.equal(reply.knowledgeReceipt.version,1);
   const A=await x.service.reuse({...actor,senderId:'A',content:'搭赠在哪建'},'p',decision(x.id),x.input);assert.equal(reply.reply,A.reply);
   const store=new KnowledgeStore(x.context.config.dataDir);await store.open();assert.equal(store.get(x.id).answer,proposal.answer);store.close();
-  assert.equal((await stat(path.join(x.context.config.dataDir,'knowledge','knowledge.sqlite'))).mode&0o777,0o600);
+  assert.equal((await (await import('../src/shared/private-files.js')).privatePathProof(path.join(x.context.config.dataDir,'knowledge','knowledge.sqlite'))).private,true);
   await x.service.ingest(x.job);assert.equal(x.calls(),1);
 });
 test('scope filters before retrieval: other user, group, profile or project cannot see answer',async t=>{

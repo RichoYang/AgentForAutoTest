@@ -9,6 +9,10 @@ import { executeCases } from '../src/runner/requirement-execution.js';
 test('native tool schemas expose actual fields, preserve dynamic inputs and locate malformed nested fields', () => {
   for (const tool of requirementAgentTools) assert.ok(tool.inputSchema.properties.args.properties || tool.inputSchema.properties.args.anyOf);
   validateToolArguments('observe', { operation: 'discovered_business_entry', input: { newlyDiscoveredField: { value: 1 } } });
+  const discovered={sourceRefs:['S'],reason:'source-backed',spec:{kind:'http',resource:'dynamic-resource',access:'read'}};
+  validateToolArguments('register',{...discovered,name:'inventory_get-stock2'});
+  assert.throws(()=>validateToolArguments('register',{...discovered,name:'inventory.getStock'}),error=>error.code==='tool_contract'&&error.fields.some(field=>field.startsWith('$.args.name must match')));
+  assert.throws(()=>validateToolArguments('register',{...discovered,name:'a'}),/args.name/);
   assert.throws(() => validateToolArguments('assert', { checkId: 'c', observationId: 'o', field: 'body.amount' }), /args.field/);
   assert.throws(() => validateToolArguments('register', { name: 'entry', sourceRefs: ['S'], reason: 'source-backed',
     spec: { kind: 'http', resource: 'r', access: 'read', unknownExecutionCode: 'exec' } }), /spec.unknownExecutionCode/);

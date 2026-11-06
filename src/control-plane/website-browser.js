@@ -1,7 +1,7 @@
 import { chromePage } from './chrome-page.js';
 import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
-import { mkdir, chmod } from 'node:fs/promises';
+import {privateDirectory} from '../shared/private-files.js';
 import path from 'node:path';
 import { websiteSessionKey, websiteRequestAllowed, cleanWebsiteText } from '../shared/website-policy.js';
 // One private profile per project/environment/origin. Pages and refs remain per question/job.
@@ -12,7 +12,7 @@ export class WebsiteBrowser {
   if(this.contexts.has(key))return this.contexts.get(key);
   if(this.opening.has(key))return this.opening.get(key);
   const p=(async()=>{
-   const dir=path.join(this.root,key);await mkdir(dir,{recursive:true,mode:0o700});await chmod(this.root,0o700);await chmod(dir,0o700);
+   const dir=path.join(this.root,key);await privateDirectory(this.root);await privateDirectory(dir);
    const context=await this.driver.launchPersistentContext(dir,{headless:false,acceptDownloads:false,serviceWorkers:'block',locale:'zh-CN',args:['--disable-background-networking','--force-webrtc-ip-handling-policy=disable_non_proxied_udp']});
    const session={context,e};this.contexts.set(key,session);
    await context.routeWebSocket('**/*',s=>s.close());

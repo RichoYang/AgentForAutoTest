@@ -47,10 +47,10 @@ test('typed file inspection creates readonly task, preserves mixed source scope 
  const parsed=parseFeishuMessage({message_type:'file',content:JSON.stringify({file_key:'key',file_name:'清单.pdf'})});assert.equal(parsed.resources[0].name,'清单.pdf');
 });
 
-test('file-only worker reads actual full CSV through real task preparation without a source repository',{skip:process.platform==='win32'?'Synthetic executable fixture requires a Windows native test harness':false},async t=>{
+test('file-only worker reads actual full CSV through real task preparation without a source repository',async t=>{
  const dir=await temp(t);const http=await import('node:http');const data='客户,金额\nA,10\nB,20\n';const source=path.join(dir,'明细.csv');await writeFile(source,data);const attachment=await inputFileMetadata(source,{id:'csv-one'});
  const server=http.createServer((req,res)=>{res.setHeader('content-type','text/csv');res.end(data);});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));
- const bin=path.join(dir,'synthetic-codex');const program=`#!${process.execPath}
+ const fixtureBin=path.join(dir,'synthetic-codex');const program=`
 const fs=require('node:fs');
 if(process.argv.includes('--version')){console.log('codex-cli synthetic-test');process.exit(0);}
 let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',b=>prompt+=b);process.stdin.on('end',()=>{
@@ -61,7 +61,7 @@ let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',b=>promp
  const summary='全量'+rows.length+'行合计'+sum;
  const result={outcome:'ready',summary,finalMessage:summary,investigation:{status:'complete',goals:[{id:'original-question',required:true,status:'verified',evidence:summary}],attempts:['读取完整上传CSV'],nextStep:'',causalAssessment:null,blocker:null},handoff:{artifacts:[],checks:[{id:'original-question',required:true,status:'passed',evidence:summary}],risks:[],returnTo:'none'}};
  console.log(JSON.stringify({type:'thread.started',thread_id:'synthetic-file-thread'}));console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify(result)}}));});`;
- await writeFile(bin,program,{mode:0o700});const events=[];
+ const {nodeExecutableFixture}=await import('../test-support/node-executable-fixture.js');const bin=await nodeExecutableFixture(fixtureBin,program);const events=[];
  const result=await executeJob({id:'JOB-file-integration',projectId:'p',projectName:'demo',taskIntent:'analysis',analysisScope:'attachments',stage:'developer',workflow:'continuous_analysis',questionScopePolicy:'original-question-v1',instruction:'统计文件完整金额合计',originalQuestion:'统计文件完整金额合计',attachments:[attachment]}, {executor:'codex',codexBin:bin,dataDir:path.join(dir,'data'),worktreeRoot:path.join(dir,'data','worktrees'),serverUrl:`http://127.0.0.1:${server.address().port}`,runnerToken:'synthetic',projects:{p:{}}},async e=>events.push(e));
  assert.equal(result.outcome,'ready');assert.match(result.summary,/全量2行合计30/);assert.equal(result.sourceSync,undefined);assert.equal(result.sourcePreparation,null);assert.equal(result.handoffGate.passed,true);assert.ok(result.workspace.includes(path.join('attachments','JOB-file-integration')));
 });

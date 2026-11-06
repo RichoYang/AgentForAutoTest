@@ -95,9 +95,9 @@ async function verifySnapshotUnlocked(project, report) {
     if (cwd !== workspace && !within(workspace, cwd)) throw new Error('源码快照路径越界');
     if(!(await lstat(path.join(cwd,'.git'))).isDirectory()||(await lstat(path.join(cwd,'.git'))).isSymbolicLink())throw new Error('源码缓存不是独立克隆');
     const proof = report.repositories.find(x => x.path === repo.path && x.branch === repo.branch);
-    if (!proof || await git(cwd, ['rev-parse', '--show-toplevel']) !== cwd || await git(cwd, ['rev-parse', 'HEAD']) !== proof.commit) throw new Error('源码已不同于本次分析快照');
+    if (!proof || await realpath(await git(cwd, ['rev-parse', '--show-toplevel'])) !== cwd || await git(cwd, ['rev-parse', 'HEAD']) !== proof.commit) throw new Error('源码已不同于本次分析快照');
     // Independently cloned child repositories are verified below, not untracked dirt in their parent.
-    const children = repos.filter(x => x.path !== repo.path && within(cwd, path.resolve(workspace, x.path))).map(x => `:(exclude)${path.relative(cwd, path.resolve(workspace, x.path))}`);
+    const children = repos.filter(x => x.path !== repo.path && within(cwd, path.resolve(workspace, x.path))).map(x => `:(exclude)${path.relative(cwd, path.resolve(workspace, x.path)).split(path.sep).join('/')}`);
     if (await git(cwd, ['status', '--porcelain', '--untracked-files=all', '--', '.', ...children])) throw new Error('源码快照存在本地修改，请重新分析');
   }
   return report;

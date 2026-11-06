@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import os from 'node:os';
+import {fileURLToPath} from 'node:url';
 import { syncAnalysisSources, verifyAnalysisSources, prepareAnalysisSources } from '../src/runner/source-sync.js';
 import { executeJob, buildPrompt, buildCodexArgs } from '../src/runner/codex-executor.js';
 const exec = promisify(execFile);
@@ -251,7 +252,7 @@ test('live maintenance requires admin authentication and protects waiting refere
  let r=await fetch(url,{method:'POST',headers,body:'{"apply":true}'});let x=await r.json();assert.equal(x.results[0].removed.length,0);await access(a.workspace);
  await app.store.transact(s=>{s.jobs[0].status='completed';});r=await fetch(url,{method:'POST',headers,body:'{"apply":false}'});x=await r.json();assert.equal(x.results[0].removed.length,1);await access(a.workspace);
  r=await fetch(url,{method:'POST',headers,body:'{"apply":true}'});x=await r.json();assert.equal(x.results[0].removed.length,1);await assert.rejects(access(a.workspace));
- const cli=new URL('../scripts/prune-source-snapshots.mjs',import.meta.url).pathname;const run=await exec(process.execPath,[cli,'--apply','--server',new URL(url).origin],{env:{...process.env,AGENTOS_ADMIN_TOKEN:''}});assert.equal(JSON.parse(run.stdout).ok,true);
+ const cli=fileURLToPath(new URL('../scripts/prune-source-snapshots.mjs',import.meta.url));const run=await exec(process.execPath,[cli,'--apply','--server',new URL(url).origin],{env:{...process.env,AGENTOS_ADMIN_TOKEN:''}});assert.equal(JSON.parse(run.stdout).ok,true);
 });
 
 test('registered worktrees and anomalous manifests are retained instead of reclaimed',async t=>{

@@ -250,21 +250,25 @@ test('outbox retry does not re-run AI or create another job', async (t) => {
   assert.equal(inputs.length, 1);
 });
 
-test('different sessions run concurrently; same session preserves context and order', async (t) => {
+test('different sessions run concurrently; same session preserves context and order', {timeout:30000}, async (t) => {
   let release;
   const blocked = new Promise((resolve) => { release = resolve; });
   let started;
   const firstStarted = new Promise((resolve) => { started = resolve; });
+  // Release before setup's stop hook, including assertion/timeout failures.
+  t.after(() => release());
+  let otherSent;const otherDelivered=new Promise(resolve=>{otherSent=resolve;});
   const { app, inputs, replies } = await setup(t, async (input) => {
     if (input.message === 'slow') { started(); await blocked; }
     return decision({ reply: input.message });
   });
-  t.after(() => release());
+  const feishu=app.conversations.context.feishu,reply=feishu.reply.bind(feishu);
+  feishu.reply=async(...args)=>{const receipt=await reply(...args);if(args[1]==='other')otherSent();return receipt;};
   await app.conversations.enqueue(message('slow', 'slow'));
   await firstStarted;
   await app.conversations.enqueue(message('next', 'next'));
   await app.conversations.enqueue(message('other', 'other', { sender_id: 'another-user' }));
-  for (let i = 0; i < 100 && !replies.some((r) => r.text === 'other'); i++) await new Promise((r) => setTimeout(r, 5));
+  await otherDelivered;
   assert.ok(replies.some((r) => r.text === 'other'));
   assert.equal(inputs.some((input) => input.message === 'next'), false);
   release();

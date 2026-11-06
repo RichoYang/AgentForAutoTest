@@ -150,8 +150,9 @@ test('macOS ChatGPT Codex discovery follows the current nested app bundle', asyn
   await mkdir(path.dirname(binary), { recursive: true });
   await writeFile(binary, '#!/bin/sh\n');
   await chmod(binary, 0o755);
-  assert.equal(await discoverMacCodexBinary(root), binary);
-  assert.equal(await resolveCodexBinary(undefined, { macDiscoveryRoot: root }), binary);
+  const accessFile=process.platform==='win32'?async(file,mode)=>{assert.equal(file,binary);assert.equal(mode,1);}:undefined;
+  assert.equal(await discoverMacCodexBinary(root,{accessFile}), binary);
+  assert.equal(await resolveCodexBinary(undefined, { macDiscoveryRoot: root,platform:'darwin',accessFile }), binary);
 });
 
 test('macOS ChatGPT Codex discovery ignores a non-executable bundle file', async (t) => {
@@ -161,7 +162,8 @@ test('macOS ChatGPT Codex discovery ignores a non-executable bundle file', async
   await mkdir(path.dirname(binary), { recursive: true });
   await writeFile(binary, 'not executable');
   await chmod(binary, 0o644);
-  assert.equal(await discoverMacCodexBinary(root), null);
+  const accessFile=process.platform==='win32'?async()=>{throw Object.assign(new Error('synthetic POSIX execute denied'),{code:'EACCES'});}:undefined;
+  assert.equal(await discoverMacCodexBinary(root,{accessFile}), null);
 });
 
 test('the codex sentinel in CODEX_BIN still enables desktop discovery', async (t) => {

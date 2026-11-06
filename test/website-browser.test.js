@@ -39,7 +39,7 @@ test('real browser waits for login, reuses persistent session, isolates pages an
  assert.equal(await browser.loginReady(job,e),true);const result=await browser.run(job,e,'connection');assert.match(result.pageText,/任务列表/);assert.doesNotMatch(result.pageText,/synthetic-hidden/);assert.equal(result.controls.some(c=>c.label==='保存'),false);
  await browser.run(job,e,'browser_click',{ref:result.controls.find(c=>c.label==='查询').ref});await page.evaluate(()=>fetch('/save',{method:'POST'}).catch(()=>{}));assert.equal(writes,0);assert.equal(queries,1);
  await browser.run({id:'two'},e,'connection');assert.notEqual(browser.pages.get('one').page,browser.pages.get('two').page);
- assert.equal((await stat(path.join(dir,'website-sessions'))).mode&0o777,0o700);
+ assert.equal((await (await import('../src/shared/private-files.js')).privatePathProof(path.join(dir,'website-sessions'),true)).private,true);
  await browser.close();browser=new WebsiteBrowser(dir,driver);assert.equal((await browser.run({id:'three'},e,'connection')).loginRequired,undefined);
 });
 test('query-discovered websites produce scoped configs and PRD stays read-only without manual approval',async t=>{

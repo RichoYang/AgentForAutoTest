@@ -5,11 +5,11 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {stat} from 'node:fs/promises';
 
-export function resolveLarkCliEntry(explicit = '', executable = process.execPath) {
+export function resolveLarkCliEntry(explicit = '', executable = process.execPath, platform = process.platform) {
   if (explicit) return path.resolve(explicit);
   const relative = path.join('@larksuite', 'cli', 'scripts', 'run.js');
   const directory = path.dirname(executable);
-  const candidates = process.platform === 'win32'
+  const candidates = platform === 'win32'
     ? [path.join(directory, 'node_modules', relative)]
     : [path.join(path.dirname(directory), 'lib', 'node_modules', relative), path.join(directory, 'node_modules', relative)];
   return path.resolve(candidates.find(existsSync) ?? candidates[0]);

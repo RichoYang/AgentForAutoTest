@@ -16,7 +16,8 @@ export function executeTaskProcess(job, config, emit, signal, worker = workerFil
     let terminationFailure;
     let outgoing = Promise.resolve();
     let termination = Promise.resolve();
-    const abort = () => { termination = terminateTree(child).catch((error) => {
+    let registered;
+    const abort = () => { termination = (async()=>{const guard=await registered;if(guard)await guard.close();else await terminateTree(child);})().catch((error) => {
       terminationFailure = error;
       const uncertain = new Error(`停止无法确认：${error.message}`);
       uncertain.processesExited = false;
@@ -33,6 +34,7 @@ export function executeTaskProcess(job, config, emit, signal, worker = workerFil
     child.once('close', async (code) => {
       signal.removeEventListener('abort', abort);
       await termination;
+      const guard=await registered?.catch(()=>null);await guard?.close();
       await outgoing;
       if (signal.aborted) {
         const error = new Error(terminationFailure ? `停止无法确认：${terminationFailure.message}` : 'Task process tree stopped');
@@ -42,7 +44,8 @@ export function executeTaskProcess(job, config, emit, signal, worker = workerFil
       if (failure || code !== 0 || !result) return reject(failure ?? new Error(`Task worker exited ${code} without result`));
       resolve(result);
     });
-    registerLocalExecution(config.localExecutionRegistry,job,child.pid).then(()=>{if(!signal.aborted&&child.connected)child.send({job,config});}).catch(error=>{failure=error;abort();});
+    registered=registerLocalExecution(config.localExecutionRegistry,job,child.pid);
+    registered.then(()=>{if(!signal.aborted&&child.connected)child.send({job,config});}).catch(error=>{failure=error;child.kill();});
     if (signal.aborted) abort();
   });
 }

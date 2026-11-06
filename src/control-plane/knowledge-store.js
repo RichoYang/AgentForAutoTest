@@ -1,4 +1,5 @@
-import { mkdir, chmod, lstat, realpath } from 'node:fs/promises';
+import { lstat, realpath } from 'node:fs/promises';
+import {privateDirectory,protectPrivatePath} from '../shared/private-files.js';
 import path from 'node:path';
 import { terms } from './memory.js';
 
@@ -11,9 +12,8 @@ export class KnowledgeStore {
     return this.opening;
   }
   async initialize() {
-    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await privateDirectory(this.directory);
     if((await lstat(this.directory)).isSymbolicLink()||path.dirname(await realpath(this.directory))!==await realpath(path.dirname(this.directory)))throw new Error('Invalid knowledge directory');
-    await chmod(this.directory, 0o700);
     const { DatabaseSync } = await import('node:sqlite');
     const file = path.join(this.directory, 'knowledge.sqlite');
     try{if((await lstat(file)).isSymbolicLink())throw new Error('Invalid knowledge file');}catch(e){if(e.code!=='ENOENT')throw e;}
@@ -27,7 +27,7 @@ export class KnowledgeStore {
         CREATE TABLE IF NOT EXISTS tokens (token TEXT NOT NULL, entry_id TEXT NOT NULL, PRIMARY KEY(token,entry_id));
         CREATE TABLE IF NOT EXISTS captures (job_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS metrics (reason TEXT PRIMARY KEY, total INTEGER NOT NULL);`);
-      await chmod(file, 0o600); this.db = db; return this;
+      await protectPrivatePath(file); this.db = db; return this;
     } catch (error) { db.close(); throw error; }
   }
   get(id) { const r = this.db.prepare('SELECT * FROM entries WHERE id=?').get(id); return r ? { ...JSON.parse(r.payload), status: r.status } : null; }

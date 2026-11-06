@@ -1,4 +1,5 @@
-import { readFile, writeFile, rename, mkdir, chmod } from 'node:fs/promises';
+import { readFile, rename, mkdir } from 'node:fs/promises';
+import {writePrivateFile} from '../shared/private-files.js';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -97,8 +98,7 @@ export class MemoryService {
   async write(value) {
     await mkdir(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    await writeFile(tmp, JSON.stringify(value), { mode: 0o600 });
-    await chmod(tmp, 0o600);
+    await writePrivateFile(tmp, JSON.stringify(value));
     await rename(tmp, this.file);
   }
   serial(operation) {

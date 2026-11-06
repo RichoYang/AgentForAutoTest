@@ -39,11 +39,11 @@ async function inspect(folder,manifest){
  const sources=[];
  const inspectRepo=async r=>{
   const cwd=path.resolve(ws,r.path);await directory(cwd);await directory(path.join(cwd,'.git'));
-  if(await g(cwd,['rev-parse','--show-toplevel'])!==cwd||await g(cwd,['rev-parse','HEAD'])!==r.commit)throw new Error('changed-commit');
+  if(await realpath(await g(cwd,['rev-parse','--show-toplevel']))!==cwd||await g(cwd,['rev-parse','HEAD'])!==r.commit)throw new Error('changed-commit');
   if(path.resolve(cwd,await g(cwd,['rev-parse','--git-common-dir']))!==path.join(cwd,'.git'))throw new Error('external-git-directory');
   if((await g(cwd,['worktree','list','--porcelain'])).split('\n').filter(n=>n.startsWith('worktree ')).length!==1)throw new Error('registered-worktree');
   if(await lstat(path.join(cwd,'.git','objects','info','alternates')).catch(()=>null))throw new Error('shared-object-store');
-  const children=roots.filter(x=>x!==cwd&&inside(cwd,x)).map(x=>':(exclude)'+path.relative(cwd,x));
+  const children=roots.filter(x=>x!==cwd&&inside(cwd,x)).map(x=>':(exclude)'+path.relative(cwd,x).split(path.sep).join('/'));
   if(await g(cwd,['status','--porcelain','--untracked-files=all','--','.',...children]))throw new Error('local-changes');
   const ignored=await g(cwd,['ls-files','--others','--ignored','--exclude-standard','--','.',...children]);
   // Git can still list an ignored child repository as a directory even when the
@@ -59,7 +59,11 @@ function valid(m,folder,source,project){
  if(m.policy!=='isolated-environment-source-v1'||m.sourceRoot!==source||m.workspace!==path.join(folder,'workspace')||!['uat','prd'].includes(m.environment)||!Array.isArray(m.repositories)||!m.repositories.length||!Number.isFinite(Date.parse(m.checkedAt))||m.projectId&&m.projectId!==project.id)return false;
  const seen=new Set();return m.repositories.every(r=>{if(typeof r.path!=='string'||path.isAbsolute(r.path)||r.path!=='.'&&r.path.split('/').some(x=>!x||x==='.'||x==='..')||seen.has(r.path)||!/^[a-f0-9]{40,64}$/.test(r.commit??'')||typeof r.branch!=='string'||!r.branch)return false;seen.add(r.path);return inside(m.workspace,path.resolve(m.workspace,r.path));});
 }
-async function bytes(folder){return Number((await execute('du',['-sk',folder])).stdout.trim().split(/\s/)[0])*1024;}
+async function bytes(folder){
+ if(process.platform!=='win32')return Number((await execute('du',['-sk',folder])).stdout.trim().split(/\s/)[0])*1024;
+ // Logical file bytes on Windows; lstat never traverses a reparse point.
+ let total=0;for(const ent of await readdir(folder)){const file=path.join(folder,ent),info=await lstat(file);total+=info.isDirectory()&&!info.isSymbolicLink()?await bytes(file):info.size;}return total;
+}
 export async function pruneSourceSnapshots(project,{getState,withState,apply=false,onProgress=async()=>{},protectIds=[]}={}){
  if(project.analysisSourceMode!=='isolated'||!project.analysisSnapshotRoot)return {removed:[],kept:[],unknown:[],skipped:'not-configured'};
  let root=path.resolve(project.analysisSnapshotRoot),source;

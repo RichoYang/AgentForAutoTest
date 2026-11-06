@@ -101,7 +101,7 @@ git check-ignore .env config\projects.local.json config\agents.local.json config
 
 报表可选组合行键由完整分组字段（含null区别）计算，属于任务数据集，不进入共享知识。`jobs[].investigationProgress.toolCorrections`保存定向修复类别的去重摘要，随状态备份；不手工清空以规避无进展保护。部署无需新权限、依赖或数据库迁移。见[报表粒度与修复接续](report-grain-recovery.md)。
 
-data/local-executions保存本机实际fork的父/工作进程和租约身份，随状态/回执/exports成套备份；不入Git或共享知识。进程存在、外机、旧无登记、Windows或无法证明整个进程组已退出时，不自动解除执行隔离。见[空值与本机异常退出恢复](local-executor-recovery.md)。
+data/local-executions保存本机实际fork的父/工作进程和租约身份，随状态/回执/exports成套备份；不入Git或共享知识。1.51.0的Windows v2登记另含创建时点和内核Job身份；须证明原整树退出才记录中断，仍不自动重放业务。外机、旧无证明或探测不明时保持隔离。记忆/会话文件、知识库和浏览器状态在Windows使用私有DACL，POSIX保留0600/0700。见[Windows边界](windows-reliability.md)及[空值与本机恢复](local-executor-recovery.md)。
 
 报表分卷临时副本位于`exports/<JOB>/.delivery-*`，正常完成/异常退出投递函数时清理；进程崩溃可能保留，确认无投递后可清理，不删除主报表或核验记录。`reportDeliveries.parts`保存每卷名称、字节、SHA-256与消息回执，不保存正文。详见[报表导出](report-exports.md)。
 

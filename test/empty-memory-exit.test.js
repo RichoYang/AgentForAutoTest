@@ -36,23 +36,23 @@ test('projected reads are detached, cold loads coalesce, and card retries do not
 });
 test('startup recovers only matching dead local owners and absent entire worker groups, with preserved evidence',async t=>{
  const root=await fixture(t),store=new JsonStore(path.join(root,'state.json')),directory=path.join(root,'registry');
- const job={id:'j',status:'running',taskIntent:'analysis',lease:{id:'lease',runnerId:'runner'},events:[],context:[{result:{summary:'kept evidence'}}]};await store.transact(s=>s.jobs.push(job));await registerLocalExecution(directory,job,999999);
- let probes=[];const result=await recoverLocalExecutions(store,directory,{absent:pid=>{probes.push(pid);return true;}});assert.equal(result.recovered,1);assert.ok(probes.includes(-999999));const j=await store.getJob('j');assert.equal(j.status,'blocked');assert.equal(j.result.investigationStopped.code,'EXECUTOR_EXITED');assert.equal(j.context[0].result.summary,'kept evidence');assert.equal(j.lease,null);assert.equal((await readdir(directory)).length,0);
+ const job={id:'j',status:'running',taskIntent:'analysis',lease:{id:'lease',runnerId:'runner'},events:[],context:[{result:{summary:'kept evidence'}}]};await store.transact(s=>s.jobs.push(job));await registerLocalExecution(directory,job,999999,{platform:'linux'});
+ let probes=[];const result=await recoverLocalExecutions(store,directory,{platform:'linux',absent:pid=>{probes.push(pid);return true;}});assert.equal(result.recovered,1);assert.ok(probes.includes(-999999));const j=await store.getJob('j');assert.equal(j.status,'blocked');assert.equal(j.result.investigationStopped.code,'EXECUTOR_EXITED');assert.equal(j.context[0].result.summary,'kept evidence');assert.equal(j.lease,null);assert.equal((await readdir(directory)).length,0);
 });
 test('live/reused process IDs, remaining descendants, foreign hosts, wrong leases and Windows never authorize replay',async t=>{
  for(const scenario of ['owner-live','child-live','foreign','stale','windows']){
-  const root=await fixture(t),store=new JsonStore(path.join(root,'state.json')),dir=path.join(root,'registry'),job={id:'j',status:'cancelling',lease:{id:'l',runnerId:'r'},events:[]};await store.transact(s=>s.jobs.push(job));await registerLocalExecution(dir,job,999998);
+  const root=await fixture(t),store=new JsonStore(path.join(root,'state.json')),dir=path.join(root,'registry'),job={id:'j',status:'cancelling',lease:{id:'l',runnerId:'r'},events:[]};await store.transact(s=>s.jobs.push(job));await registerLocalExecution(dir,job,999998,{platform:'linux'});
   if(scenario==='stale')await store.transact(s=>s.jobs[0].lease.id='new');
-  const result=await recoverLocalExecutions(store,dir,{...(scenario==='foreign'?{host:'different-host'}:{}),...(scenario==='windows'?{platform:'win32'}:{}),absent:pid=>scenario==='owner-live'?pid<0:scenario==='child-live'?pid>0:true});assert.equal(result.recovered,0);assert.equal((await store.getJob('j')).status,'cancelling');
+  const result=await recoverLocalExecutions(store,dir,{platform:scenario==='windows'?'win32':'linux',...(scenario==='foreign'?{host:'different-host'}:{}),absent:pid=>scenario==='owner-live'?pid<0:scenario==='child-live'?pid>0:true});assert.equal(result.recovered,0);assert.equal((await store.getJob('j')).status,'cancelling');
  }
 });
 
-test('losing the IPC parent exits the detached worker group; normal completion remains successful',{skip:process.platform==='win32'},async t=>{
+test('losing the IPC parent exits the worker; normal completion remains successful',async t=>{
  const root=await fixture(t),module=pathToFileURL(path.resolve('src/runner/parent-exit.js')).href;
  for(const normal of [false,true]){
   const file=path.join(root,normal?'normal.mjs':'lost.mjs');await writeFile(file,`import {fenceParentExit} from ${JSON.stringify(module)};const finish=fenceParentExit();process.send('ready');process.on('message',()=>{${normal?"finish();process.disconnect();":"setInterval(()=>{},1000);"}});`);
-  const worker=fork(file,[],{detached:true,execArgv:[],stdio:['ignore','ignore','ignore','ipc']});t.after(()=>{try{process.kill(-worker.pid,'SIGKILL');}catch{}});
-  await once(worker,'message');const exited=once(worker,'exit');if(normal)worker.send('finish');else worker.disconnect();const [code,signal]=await exited;assert.equal(normal?code===0:signal==='SIGKILL',true);
+  const worker=fork(file,[],{detached:process.platform!=='win32',execArgv:[],stdio:['ignore','ignore','ignore','ipc']});t.after(()=>{try{process.platform==='win32'?worker.kill():process.kill(-worker.pid,'SIGKILL');}catch{}});
+  await once(worker,'message');const exited=once(worker,'exit');if(normal)worker.send('finish');else worker.disconnect();const [code,signal]=await exited;assert.equal(normal?code===0:process.platform==='win32'?code===1:signal==='SIGKILL',true);
  }
 });
 test('an unknown independent total cannot certify a known zero',async t=>{
