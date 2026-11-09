@@ -24,12 +24,13 @@ const spec = object({ resource: string, kind: enumeration('http', 'database', 'b
   action: enumeration('click', 'goto'), selector: string, effect: object({ path: pathTemplate, method: string, body: {} }, ['path', 'method']) }, ['resource', 'kind', 'access']);
 const measurement = object(selection, ['observationId']);
 const check = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string, pageStage:string,
+  beforeAction: object({ operation: operationNameSchema, input: map }, ['operation']),
   channel: enumeration('page', 'api', 'database', 'message', 'job'), subject: map, expected: {},
   operator: enumeration('equals', 'contains', 'gt', 'gte', 'lt', 'lte'), type: enumeration('number', 'text', 'boolean', 'null'), unit: { type: 'string' },
   basis: object({ quote: string, observationId: string, field, explanation: string }), measurement },
 ['id', 'line', 'requirement', 'channel', 'expected', 'operator', 'type', 'basis']);
 const processCheck = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string,
-  kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup'), relatedCheckIds: array(string) }, ['id', 'line', 'requirement', 'kind']);
+  kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup', 'report'), relatedCheckIds: array(string) }, ['id', 'line', 'requirement', 'kind']);
 const pageStage=object({id:string,step:{type:'integer',minimum:1},resource:string,action:enumeration('goto','click','select'),path:string,selector:string,value:{},subject:map},['id','step','resource','action','subject']);
 const invocation = { operation: string, input: map, subject: map, ...page };
 const readiness = object({ field, operator: enumeration('equals', 'not_equals'), value: {},
@@ -106,7 +107,7 @@ export function validateToolArguments(name, args) {
 
 export function planCoverageMatrix(lines, plan) {
   return lines.map((originalExpectation,index)=>({line:index+1,originalExpectation,
-    business:plan.checks.filter(check=>check.line===index+1).map(check=>({id:check.id,requirement:check.requirement,channel:check.channel})),
+    business:plan.checks.filter(check=>check.line===index+1).map(check=>({id:check.id,requirement:check.requirement,channel:check.channel,beforeAction:check.beforeAction})),
     process:(plan.processChecks??[]).filter(check=>check.line===index+1).map(check=>({id:check.id,requirement:check.requirement,kind:check.kind,relatedCheckIds:check.relatedCheckIds??[]}))}));
 }
 export function duplicatePlanChecks(plan) {

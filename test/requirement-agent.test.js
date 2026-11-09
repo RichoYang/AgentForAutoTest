@@ -273,6 +273,89 @@ test('failed-case retry preserves same Job history and passed results, and refus
   await run(); assert.equal(calls, 2); assert.equal(journal.executionHistory.length, 1);
 });
 
+test('a scenario action waits for its independent post-preparation baseline without waiting for future results', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-action-baseline-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, 'reports'));
+  await writeFile(path.join(root, 'source.js'), 'GET reads, POST creates DRAFT, PATCH advances or restores, DELETE removes the owned record.');
+  let record, writes = 0;
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    if (request.method === 'POST') record = { key: JSON.parse(body).key, status: 'DRAFT' };
+    if (request.method === 'PATCH') { writes++; record.status = JSON.parse(body).status; }
+    if (request.method === 'DELETE') record = undefined;
+    response.end(JSON.stringify({ record: record ?? null }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const iniPath = path.join(root, 'environment.ini');
+  await writeFile(iniPath, '[Demo.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat\nbase_url=http://127.0.0.1:' + server.address().port);
+  const job = { id: 'JOB-local', projectId: 'demo', requirement: {} };
+  const journal = { publication: { url: 'https://fixture.invalid/sheets/Fixture', version: '1' } };
+  const prefix = 'AOS_JOB_local';
+  const field = ['body', 'record', 'status'];
+  const equal = expected => ({ field, operator: 'equals', expected });
+  const expectation = '1. The prepared record is DRAFT before advancing.\n2. It is ACTIVE after advancing.';
+  const agentModel = async ({ call }) => ({ close: async () => {}, async turn() {
+    const invoke = (name, args) => call('test_' + name, { args }, 'call-' + name);
+    const source = await invoke('source', { action: 'read', path: 'source.js' });
+    for (const [name, method, access, body] of [['lookup', 'GET', 'read'], ['create', 'POST', 'create', { key: { $input: 'key' } }],
+      ['advance', 'PATCH', 'update', { status: { $input: 'status' } }], ['remove', 'DELETE', 'delete']]) {
+      await invoke('register', { name, sourceRefs: [source.sourceRef], reason: 'fixture', spec: {
+        kind: 'http', resource: 'platform', access, path: '/record', method, authenticated: false, ...(body ? { body } : {}),
+      } });
+    }
+    const base = { businessKey: prefix, ownership: { field: ['body', 'record', 'key'], value: prefix }, cleanupAction: 'restore original record' };
+    const preparation = await invoke('mutate', { ...base, id: 'prepare', purpose: 'prepare', operation: 'create', input: { key: prefix },
+      verify: { operation: 'lookup', before: [{ field: ['body', 'record'], operator: 'absent' }], after: [equal('DRAFT')] },
+      restore: { operation: 'remove', input: {} } });
+    const sample = await invoke('observe', { operation: 'lookup' });
+    const check = (id, line, expected, quote) => ({ id, line, requirement: quote, channel: 'api', type: 'text', operator: 'equals',
+      expected, basis: { quote }, measurement: { observationId: sample.observationId, field } });
+    const plan = { version: 1, steps: ['Read the prepared baseline', 'Advance the record', 'Read the result'], prerequisites: [], checks: [
+      { ...check('before', 1, 'DRAFT', 'The prepared record is DRAFT before advancing.'), beforeAction: { operation: 'advance', input: { status: 'ACTIVE' } } },
+      check('after', 2, 'ACTIVE', 'It is ACTIVE after advancing.'),
+    ], processChecks: [{ id: 'P01', line: 3, kind: 'report', requirement: 'Verify the 15-sheet report.', relatedCheckIds: ['after'] }] };
+    await invoke('plan', plan);
+    const advance = () => invoke('mutate', { ...base, id: 'advance', purpose: 'scenario', operation: 'advance', input: { status: 'ACTIVE' },
+      verify: { operation: 'lookup', before: [equal('DRAFT')], after: [equal('ACTIVE')] },
+      restore: { operation: 'advance', input: { status: 'DRAFT' } } });
+    await assert.rejects(advance(), error => error.code === 'action_baseline_missing' && /before/.test(error.message));
+    assert.equal(writes, 0);
+    assert.equal(journal.mutations.length, 1);
+    const compare = (checkId, observation) => invoke('assert', { checkId, observationId: observation.observationId, field });
+    await assert.rejects(compare('before', preparation), /independent pre-action/);
+    await assert.rejects(compare('before', sample), /fresh scenario observation/);
+    const baseline = await invoke('observe', { operation: 'lookup' });
+    assert.equal((await compare('before', baseline)).passed, true);
+    await advance();
+    assert.equal(writes, 1);
+    const after = await invoke('observe', { operation: 'lookup' });
+    await assert.rejects(compare('before', after), /post-action/);
+    assert.equal((await compare('after', after)).passed, true);
+    assert.deepEqual(await invoke('process', { checkId: 'P01', evidenceRefs: [] }),
+      { proven: false, deferred: true, phase: 'report_verification', checkId: 'P01' });
+    await invoke('finish', { actual: 'DRAFT before advancing and ACTIVE afterwards.' });
+    return { text: 'recorded' };
+  } });
+  await executeCases({ job, journal, source: {}, index: [{ caseId: 'C1', row: 2, requirementIds: [] }],
+    settings: { environment: { name: 'UAT', platform: 'Demo', iniPath, lockKey: 'local', resources: {
+      platform: { section: 'Demo.Uat.Platform', scope: 'full_crud' } } }, lockDirectory: path.join(root, 'locks'), execution: { mode: 'agent' } },
+    project: { repoPath: root }, manifest: { headers: ['预期结果'], rows: [[expectation + '\n3. Verify the 15-sheet report.']] }, regression: { files: { 'references/execution-standard.md': '' } },
+    workDir: root, reportDir: path.join(root, 'reports'), save: async () => {}, progress: async () => {}, agentModel,
+    review: async () => ({ accepted: true, errors: [] }) });
+  assert.equal(journal.results.C1.status, '通过');
+  assert.equal(journal.cleanup.verified, true);
+  assert.equal(writes, 2);
+  assert.equal(record, undefined);
+  const adapter = createRequirementAgent({}, { workDir: root });
+  const supplement = await adapter.supplementProcesses({ index: [{ caseId: 'C1', row: 2 }] }, journal,
+    { headers: ['预期结果'], rows: [[expectation + '\n3. Verify the 15-sheet report.']] });
+  assert.equal(supplement.C1.historicalProven, 0);
+  assert.deepEqual(supplement.C1.checks.P01, { kind: 'report', disposition: 'deferred', phase: 'report_verification' });
+});
+
 test('measurement query mismatches are recoverable tool errors while matching queries retain real failures', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-measurement-')); t.after(() => rm(root, { recursive: true, force: true }));
   const query = "SELECT SHA2(JSON_OBJECT('name',name),256) AS hash FROM account WHERE id=?";

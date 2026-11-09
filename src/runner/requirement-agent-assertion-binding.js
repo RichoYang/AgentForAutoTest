@@ -107,7 +107,8 @@ export function assertionBinding(check, observation, args, sources, context = {}
       ?{representation:{encoding:'decimal-text',exact:typeof observationAt(observation.data,field)==='string'||Number.isFinite(observationAt(observation.data,field))&&(!Number.isInteger(observationAt(observation.data,field))||Number.isSafeInteger(observationAt(observation.data,field)))}}:{}) }));
   if (refs && (!Array.isArray(refs) || refs.some(ref => !sources[ref]?.text))) throw agentError('sourceRefs must reference concrete source already read by this Job');
   const tokens = fields.flat().filter(part => typeof part === 'string' && !['body', 'data', 'rows', 'values'].includes(part));
-  const evidence = refs ? refs.map(ref => ({ sourceRef: ref, ...sources[ref] }))
+  const evidenceRefs = refs ?? observation.lifecycle?.operation?.sourceRefs;
+  const evidence = evidenceRefs?.length ? evidenceRefs.map(ref => ({ sourceRef: ref, ...sources[ref] }))
     : check.channel === 'api' ? Object.entries(sources).filter(([, source]) => source.text && tokens.some(token => source.text.includes(token)))
       .map(([sourceRef, source]) => ({ sourceRef, ...source })) : [];
   const query = observation.measurement ?? (observation.input?.sql ? observation.input : undefined);

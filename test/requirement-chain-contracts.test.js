@@ -5,6 +5,7 @@ import { validateToolArguments } from '../src/runner/requirement-agent-contracts
 import { checkCoverage, recordGap, resolveGaps } from '../src/runner/requirement-agent-progress.js';
 import { runRequirementTest } from '../src/runner/requirement-test.js';
 import { executeCases } from '../src/runner/requirement-execution.js';
+import { assertionBinding } from '../src/runner/requirement-agent-assertion-binding.js';
 
 test('native tool schemas expose actual fields, preserve dynamic inputs and locate malformed nested fields', () => {
   for (const tool of requirementAgentTools) assert.ok(tool.inputSchema.properties.args.properties || tool.inputSchema.properties.args.anyOf);
@@ -18,6 +19,18 @@ test('native tool schemas expose actual fields, preserve dynamic inputs and loca
     spec: { kind: 'http', resource: 'r', access: 'read', unknownExecutionCode: 'exec' } }), /spec.unknownExecutionCode/);
   assert.throws(() => validateToolArguments('snapshot', { resource: 'r', database: 'd', table: 't', scope: {}, pageSize: -1 }), /pageSize/);
 });
+test('assertion review defaults to the observed operation proof and preserves explicit evidence requirements', () => {
+  const check = { channel: 'api', type: 'number', requirement: 'count' };
+  const observation = { channel: 'api', data: { status: 200, body: { count: 2, removed: null } },
+    lifecycle: { operation: { sourceRefs: ['fresh'] } } };
+  const sources = { old: { text: 'old count proof' }, fresh: { text: 'current count proof' } };
+  assert.deepEqual(assertionBinding(check, observation, { field: ['body', 'count'] }, sources).sources.map(source => source.sourceRef), ['fresh']);
+  assert.deepEqual(assertionBinding(check, observation, { field: ['body', 'count'], sourceRefs: ['old'] }, sources).sources.map(source => source.sourceRef), ['old']);
+  assert.throws(() => assertionBinding(check, observation, { calculation: { terms: [
+    { field: ['body', 'removed'], sign: 1, nullAs: { value: 0, reason: 'not established' } },
+  ] } }, sources), /nullAs requires sourceRefs/);
+});
+
 test('independent check coverage counts identities once and retains historical failures separately', () => {
   const current = { plan: { checks: [{ id: 'a' }, { id: 'b' }] }, assertions: {
     a: [{ compared: true, passed: false }, { compared: true, passed: true }, { compared: true, passed: true }] } };
@@ -55,6 +68,24 @@ test('cancelled jobs remain terminal before intake, resource access or adapter u
   const before = structuredClone(journal);
   await assert.rejects(executeCases({ job, journal }), { code: 'requirement_cancelled' });
   assert.deepEqual(journal, before);
+});
+
+test('sibling checks sharing stale evidence keep their first attempts and close only on their own comparison', () => {
+  const current = {};
+  const record = checkId => recordGap(current, { tool: 'test_assert', args: { checkId, observationId: 'old' }, evidenceVersion: 'old',
+    error: { code: 'assertion_observation_stale', message: 'Fresh observation required', gapTarget: 'observation:old', gapScope: 'shared_observation' } });
+  for (const checkId of ['C01', 'C02', 'C03', 'C04', 'C05']) assert.equal(record(checkId).unchanged, 0);
+  assert.equal(Object.keys(current.gaps).length, 1);
+  const [gap] = Object.values(current.gaps);
+  assert.deepEqual(gap.targetAttempts, { C01: 1, C02: 1, C03: 1, C04: 1, C05: 1 });
+  resolveGaps(current, 'test_observe', { observationId: 'unrelated' });
+  resolveGaps(current, 'test_assert', { checkId: 'C01', observationId: 'fresh' });
+  assert.deepEqual(gap.resolvedTargets, ['C01']);
+  assert.equal(gap.resolved, false);
+  assert.equal(record('C02').unchanged, 1);
+  assert.equal(record('C02').unchanged, 2);
+  for (const checkId of ['C02', 'C03', 'C04', 'C05']) resolveGaps(current, 'test_assert', { checkId, observationId: 'fresh' });
+  assert.equal(Object.values(current.gaps)[0].resolved, true);
 });
 
 test('changing mutation request ids or reviewer wording cannot reset the same unresolved object gap', () => {

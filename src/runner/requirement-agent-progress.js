@@ -38,16 +38,22 @@ export function recordGap(current, { tool, args, error, evidenceVersion }) {
   // One model batch may submit sibling checks before receiving any rejection.
   // Group the shared diagnosis, but keep the pre-existing per-target repeat
   // threshold rather than making the third sibling's first call fatal.
-  const targetAttempts=error.gapTarget?{...(repeated?previous.targetAttempts:{}),
-    [gapTarget(tool,args)]:(repeated?previous.targetAttempts?.[gapTarget(tool,args)]??0:0)+1}:undefined;
+  const member = gapTarget(tool, args);
+  const resolvedTargets = (previous?.resolvedTargets ?? []).filter(item => item !== member);
+  const targetAttempts = error.gapTarget ? { ...(repeated ? previous.targetAttempts : {}),
+    [member]: (repeated && !previous.resolvedTargets?.includes(member) ? previous.targetAttempts?.[member] ?? 0 : 0) + 1 } : undefined;
   const gap = { id, tool, target, codes, operation: args.operation, businessKey: args.businessKey, disposition: error.review?.disposition ?? 'invalid_contract',
     evidenceVersion, evidenceChanges: (previous?.evidenceChanges ?? 0) + Number(Boolean(previous && previous.evidenceVersion !== evidenceVersion)),
     attempts: (previous?.attempts ?? 0) + 1, ...(targetAttempts?{targetAttempts}:{}),
-    unchanged:targetAttempts?Math.max(...Object.values(targetAttempts))-1:repeated?previous.unchanged+1:0,
+    unchanged:targetAttempts?targetAttempts[member]-1:repeated?previous.unchanged+1:0,
     firstAt: previous?.firstAt ?? new Date().toISOString(), lastAt: new Date().toISOString(),
     missing: findings.length ? findings.map(item => ({ field: item.field, reason: item.reason, next: item.next })) : error.fields ?? [error.safeMessage ?? error.message],
     confirmed: { coverage: checkCoverage(current), aliases: Object.keys(current.aliases ?? {}), preflightChecks: Object.keys(current.preflights ?? {}),...(error.stageEvidence?{pageStage:error.stageEvidence}:{}) },
-    next: '补查对应源码/Schema/原始完整性证据，或采用不同调查入口；不能只改回答、SQL写法或添加无关观测。无法证明基线时先恢复再重执行。', resolved: false };
+    next: '补查对应源码/Schema/原始完整性证据，或采用不同调查入口；不能只改回答、SQL写法或添加无关观测。无法证明基线时先恢复再重执行。', resolved: false,
+    ...(error.gapScope === 'shared_observation' ? { scope: error.gapScope, resolvedTargets, details: error.gapDetails,
+      next: '按关联检查重新读取冻结后对应阶段的独立业务观测，再逐项断言。若前态已改变，只能使用原始合格观测或恢复重做。' } : {}),
+    ...(error.code === 'action_baseline_missing' ? { disposition: 'missing_evidence', details: error.gapDetails,
+      next: '先在对应渠道回读并比较所列前态检查，再重试该动作。' } : {}) };
   current.gaps[id] = gap;
   return gap;
   });
@@ -57,9 +63,15 @@ export function recordGap(current, { tool, args, error, evidenceVersion }) {
 export function resolveGaps(current, tool, args) {
   const target = gapTarget(tool, args);
   const stage=current.plan?.checks.find(check=>check.id===args.checkId)?.pageStage;
-  for (const gap of Object.values(current.gaps ?? {})) if (gap.tool === tool && (gap.target === target
+  for (const gap of Object.values(current.gaps ?? {})) {
+    if (gap.tool !== tool || gap.resolved) continue;
+    if (gap.scope === 'shared_observation') {
+      if (!Object.hasOwn(gap.targetAttempts, target)) continue;
+      gap.resolvedTargets = [...new Set([...gap.resolvedTargets, target])];
+      if (Object.keys(gap.targetAttempts).some(member => !gap.resolvedTargets.includes(member))) continue;
+    } else if (!(gap.target === target
     || stage&&gap.target==='page_stage:'+stage
-    || tool === 'test_mutate' && args.businessKey && gap.businessKey === args.businessKey && gap.operation === args.operation)) {
+    || tool === 'test_mutate' && args.businessKey && gap.businessKey === args.businessKey && gap.operation === args.operation)) continue;
     gap.resolved = true; gap.resolvedAt = new Date().toISOString();
     if (gap.target !== target) gap.supersededBy = target;
   }

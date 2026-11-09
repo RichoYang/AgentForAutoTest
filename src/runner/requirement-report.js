@@ -80,12 +80,21 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
     });
   }
   const specialty = { fix_verifications: [], code_chains: [], export_validations: [] };
+  const processNotes = [];
   const unexecutedReason = requirementCleanupAfterCancellation(job) ? '取消后仅执行清理，本轮未运行此用例。'
     : '本轮未运行此用例。';
   for (const item of index) {
     const result = results[item.caseId];
+    const process = journal.processFinalization?.[item.caseId];
     const cells = Object.fromEntries(manifest.headers.map((header, col) => [header, manifest.rows[item.row - 2][col]]));
-    let ids = await evidence(result?.evidence, item.caseId);
+    const processProofs = Object.entries(process?.checks ?? {});
+    let ids = await evidence([...(result?.evidence ?? []), ...processProofs.map(([, check]) => check.evidence).filter(Boolean)], item.caseId);
+    if (processProofs.length) {
+      const checks = processProofs.map(([id, check]) => id + ' ' + ({ proven: '已证明', deferred: '在报告实际核验阶段登记回执',
+        missing_evidence: '缺证据', contradictory_evidence: '证据矛盾', invalid_contract: '契约不合法' })[check.disposition]);
+      processNotes.push(item.caseId + ' 尝试 ' + process.attempt + ' 的原过程证明 ' + process.historicalProven + '/' + processProofs.length
+        + '。本报告构建时的逐项状态为 ' + checks.join('、') + '。');
+    }
     if (!ids.length) {
       const file = 'not-executed-' + item.caseId + '.json';
       await writeJson(path.join(reportDir, file), { caseId: item.caseId, status: '未执行', reason: unexecutedReason });
@@ -171,7 +180,7 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
         version: repo.commit, scope: repo.service_scope ?? repo.branch })),
       execution_scope: journal.requirements.map(item => item.id + ' · ' + item.rule),
       safety_notes: '已绑定非生产资源。业务运行证据仅来自本轮。',
-      method_notes: [...(releaseNotes.length ? ['发布版本证据：' + releaseNotes.join(' ') + ' 详见证据索引。'] : []),
+      method_notes: [...(releaseNotes.length ? ['发布版本证据：' + releaseNotes.join(' ') + ' 详见证据索引。'] : []), ...processNotes,
         ...Object.entries({ fix_verifications: '修复复测', code_chains: '代码调用链', export_validations: '导出核验' })
         .map(([section, label]) => label + '：' + (specialty[section].length ? '见专项工作表'
           : cases.every(item => item.status === '不适用') ? '本轮所有用例均不适用' : '本轮没有已登记的专项结果，未确认是否适用或完成'))],

@@ -5,6 +5,7 @@ import { generateValidatedCases } from './requirement-generation.js';
 import { reviseMaterialCases } from './requirement-material-revision.js';
 import { publishCases } from './requirement-publication.js';
 import { executeCases, requirementResources } from './requirement-execution.js';
+import { createRequirementAgent } from './requirement-agent.js';
 import { buildRequirementReport } from './requirement-report.js';
 import { matchesRequirementTopic, requirementCleanupAfterCancellation, resolveRequirementOptions } from '../shared/requirement-options.js';
 import { verifiedMutationCleanup } from './requirement-mutation-measurement.js';
@@ -210,6 +211,18 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     await executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, save, progress, codexBin: config.codexBin,
       plan: dependencies.plan, project, agentModel: dependencies.agentModel, review: dependencies.review });
 
+    if (!settings.adapter && settings.execution?.mode === 'agent' && Object.values(journal.results ?? {}).some(result => result.checkCoverage?.processTotal)) {
+      const resources = await requirementResources(settings.environment, { allowUnavailable: true });
+      const agent = createRequirementAgent(settings.execution, { workDir, codexBin: config.codexBin, review: dependencies.review });
+      const prior = journal.processFinalization;
+      journal.processFinalization = await agent.supplementProcesses({ index, jobId: job.id, projectId: job.projectId,
+        environment: settings.environment.name, reports: reportDir, checkOutput: resources.checkOutput, resourceCatalog: resources.catalog }, journal, manifest);
+      if (prior && Object.entries(prior).some(([caseId, entry]) => entry.resultHash !== journal.processFinalization[caseId]?.resultHash)) {
+        (journal.processFinalizationHistory ??= []).push(prior);
+      }
+      await save();
+    }
+
     stage = '测试报告验证';
     journal.phase = stage;
     await save();
@@ -218,6 +231,13 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       job, journal, source, index, manifest, regression, workDir, reportDir, dataDir: config.dataDir, save,
       codexBin: config.codexBin, timeZone: settings.timeZone, visualModel: dependencies.visualModel,
     });
+    const processChecks = Object.values(journal.processFinalization ?? {}).flatMap(entry => Object.values(entry.checks));
+    for (const check of processChecks) if (check.kind === 'report' && check.disposition === 'deferred'
+      && artifact.complete === true && journal.visualReview?.count === 15) {
+      Object.assign(check, { disposition: 'proven', at: new Date().toISOString(), report: { id: artifact.id, sha256: artifact.sha256,
+        verificationHash: artifact.verificationHash, visualSheets: journal.visualReview.count } });
+    }
+    const processProven = processChecks.filter(check => check.disposition === 'proven').length;
     journal.phase = job.requirement.cleanupOnly ? '清理与报告完成'
       : summary.notExecuted || summary.blocked ? '报告生成；业务验收未完成' : '业务测试及报告完成';
     journal.artifact = artifact;
@@ -231,9 +251,14 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         + summary.notExecuted + ' 未执行，' + summary.notApplicable + ' 不适用。',
       '覆盖：' + journal.requirements.length + ' 项已抽取条款都有用例映射。登记 ' + summary.issues + ' 项问题，详情见测试报告。',
       '清理：' + cleanup + '。报告已通过结构与文件校验并生成逐表预览。',
+      ...(processChecks.length ? ['当前过程证明 ' + processProven + '/' + processChecks.length
+        + '，其中恢复后补证 ' + processChecks.filter(check => check.phase === 'post_cleanup' && check.disposition === 'proven').length
+        + '，报告阶段 ' + processChecks.filter(check => check.phase === 'report_verification' && check.disposition === 'proven').length
+        + '。原尝试的过程记录保留。'] : []),
     ].join('\n');
     return { outcome: 'ready', finalMessage, requirementReport: artifact,
-      requirementSummary: { ...summary, cleanup, caseUrl: journal.publication.url } };
+      requirementSummary: { ...summary, cleanup, caseUrl: journal.publication.url,
+        ...(processChecks.length ? { process: { total: processChecks.length, proven: processProven } } : {}) } };
   } catch (error) {
     const known = error instanceof RequirementWait;
     journal.phase = stage;
