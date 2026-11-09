@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { resultPages } from './result-presentation.js';
+import { jobTerminalMention } from './requester-mention.js';
 
 const chatIdOf=value=>{if(!value||typeof value!=='object')return null;if(typeof value.chat_id==='string')return value.chat_id;for(const child of Object.values(value)){const id=chatIdOf(child);if(id)return id;}return null;};
 
@@ -11,6 +12,16 @@ export function messageIdOf(value) {
   if (typeof value.message_id === 'string') return value.message_id;
   for (const child of Object.values(value)) { const id = messageIdOf(child); if (id) return id; }
   return null;
+}
+
+function blocksTerminalMention(job, mention) {
+  if (job.status === 'awaiting_clarification') {
+    if (mention?.kind === 'browser_login') return false;
+    const waiting = job.workflow === 'requirement_test' && jobTerminalMention(job);
+    return !waiting || waiting.text !== mention?.text || waiting.replyTo !== mention?.replyTo || waiting.profile !== mention?.profile;
+  }
+  if (job.status === 'awaiting_environment_approval') return mention?.kind !== 'environment_approval';
+  return ['queued', 'running', 'cancelling', 'awaiting_approval'].includes(job.status);
 }
 
 // Durable delivery outbox: a failed update NEVER reruns Codex or creates another task.
@@ -135,7 +146,7 @@ export class LiveCards {
        const question=key.startsWith('question:')?fresh.questions?.[key.slice(9)]:null;
        return {latest:fresh.cardMessages[key],questionReady:!question||(question.generation<=entry.generation
         &&!fresh.conversations.some(t=>t.questionId===question.id&&['queued','thinking','decided'].includes(t.status))
-        &&!fresh.jobs.some(j=>j.questionId===question.id&&['queued','running','cancelling','awaiting_approval',...(entry.terminalMention?.kind==='browser_login'?[]:['awaiting_clarification']),...(entry.terminalMention?.kind==='environment_approval'?[]:['awaiting_environment_approval'])].includes(j.status)))};
+        &&!fresh.jobs.some(j=>j.questionId===question.id&&blocksTerminalMention(j,entry.terminalMention)))};
       });
       if ((!privateCard || entry.publicCompletionMention) && entry.terminalMention && !entry.mentionDelivered && latest.revision === entry.revision && questionReady) {
         if(entry.publicCompletionMention)await this.authorizeDestination?.(entry.destination,entry);

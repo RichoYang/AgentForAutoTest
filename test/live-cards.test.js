@@ -8,6 +8,7 @@ import { ExecutionActivity, commandLabel } from '../src/shared/execution-activit
 import { LiveCards } from '../src/control-plane/live-cards.js';
 import { conversationCard, cumulativeToolCalls, jobCard, publicText, resultParts } from '../src/control-plane/message-cards.js';
 import { createControlPlane, handleLarkCliEvent, notifyJobEvent } from '../src/control-plane/server.js';
+import { jobTerminalMention } from '../src/control-plane/requester-mention.js';
 
 const destination = { replyTo: 'om_question', profile: 'owner' };
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
@@ -57,6 +58,28 @@ test('requirement cards show current independent checks and distinguish report d
   const failed = jobCard(job);
   assert.match(failed.header.title.content, /业务测试完成.*有失败/);
   assert.equal(failed.header.template, 'red');
+});
+
+test('a delivered requirement wait card can notify its requester while a generic completion still waits', async t => {
+  const { store, cards, calls } = await setup(t);
+  const waiting = { questionId: 'QST-requirement', workflow: 'requirement_test', status: 'awaiting_clarification',
+    originChatType: 'group', originMessageId: 'om_wait', originProfile: 'qa', senderId: 'ou_requester' };
+  await store.transact(state => {
+    state.questions = Object.fromEntries(['QST-requirement', 'QST-generic'].map(id => [id, { id, generation: 1 }]));
+    state.conversations = [];
+    state.jobs = [waiting, { ...waiting, questionId: 'QST-generic', workflow: 'single_developer' }];
+  });
+  const card = conversationCard(chat({ status: 'ready', response: '等待处理' }));
+  const reminder = { ...jobTerminalMention(waiting), replyInThread: true };
+  await cards.upsert('question:QST-requirement', card, destination,
+    { immediate: true, terminal: true, generation: 1, terminalMention: reminder });
+  await cards.upsert('question:QST-generic', card, destination,
+    { immediate: true, terminal: true, generation: 1, terminalMention: reminder });
+  const delivered = calls.filter(call => call.type === 'text');
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].id, 'om_wait');
+  assert.equal(delivered[0].options.profile, 'qa');
+  assert.equal(delivered[0].options.replyInThread, true);
 });
 
 test('only real tool events count once; no reasoning, outputs or arguments are exposed', () => {
