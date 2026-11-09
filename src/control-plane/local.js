@@ -1,6 +1,5 @@
 import path from 'node:path';
 import {recoverLocalExecutions} from '../runner/local-executions.js';
-import { loadConversationSettings } from './conversation-settings.js';
 import { randomBytes } from 'node:crypto';
 import { createControlPlane } from './server.js';
 import { startLarkEventSources } from './lark-event-source.js';
@@ -10,7 +9,7 @@ import { runnerConfig } from '../runner/config.js';
 async function main() {
   const adminToken = process.env.AGENTOS_ADMIN_TOKEN || randomBytes(32).toString('hex');
   const runnerToken = process.env.AGENTOS_RUNNER_TOKEN || randomBytes(32).toString('hex');
-  const { server, config, projects, agents, store, requirementRoutes } = await createControlPlane({
+  const { server, config, projects, agents, store, requirementRoutes, conversations, conversationSettings } = await createControlPlane({
     adminToken,
     runnerToken,
     feishu: { transport: 'lark-cli' },
@@ -19,14 +18,14 @@ async function main() {
   const localRecovery=await recoverLocalExecutions(store,localExecutionRegistry);
   if(localRecovery.blocked?.length)console.warn('[local-execution] process identity remains unverified; task leases stay fenced',JSON.stringify(localRecovery.blocked));
   await new Promise((resolve) => server.listen(config.port, config.host, resolve));
-  console.log(`[control-plane] listening on http://${config.host}:${config.port}`);
+  console.log(`[control-plane] listening on http://${config.host}:${config.port} (conversation concurrency ${conversations.concurrency}, ${conversations.concurrencySource})`);
   const eventSources = await startLarkEventSources({
     serverUrl: `http://${config.host}:${config.port}`,
     adminToken: config.adminToken,
     dataDir: config.dataDir,
     requirementRoutes,
     excludedMessageChats: projects.messageExcludedChatIds,
-    editedMentions: (await loadConversationSettings(config.conversationFile)).editedMentions,
+    editedMentions: conversationSettings.editedMentions,
     watchedChatIds: Object.keys(projects.chatProjectMap ?? {}).filter(id=>!projects.retiredChatIds?.includes(id)),
     cliEntry: config.feishu.cliEntry,
   }, agents.agents);

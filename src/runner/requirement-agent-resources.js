@@ -136,6 +136,14 @@ export function createAgentResources(config, scope) {
   const authentication = new Map();
   const schemas = new Map();
   const operations = () => scope.state.operations;
+  async function send(resource, method, url, transport, dispatch) {
+    const complete = await scope.startRequest?.({ resource, method, path: url.pathname, transport });
+    let response;
+    try { response = await dispatch(); }
+    catch (error) { await complete?.({ outcome: 'no_response' }); throw error; }
+    await complete?.({ outcome: 'response', status: transport === 'browser' ? response.status() : response.status });
+    return response;
+  }
   async function connect(resource, database) {
     if (resource.resource_type !== 'mysql') throw agentError('Resource is not MySQL');
     return mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
@@ -232,7 +240,7 @@ export function createAgentResources(config, scope) {
             state.effect = null;
           }
         }
-        const response = await route.fetch({ maxRedirects: 0, maxRetries: 0 });
+        const response = await send(resourceName, method, url, 'browser', () => route.fetch({ maxRedirects: 0, maxRetries: 0 }));
         if (response.status() >= 300 && response.status() < 400) throw agentError('Redirect requires a separately verified endpoint');
         if (['xhr', 'fetch'].includes(request.resourceType())) {
           let body;
@@ -294,7 +302,9 @@ export function createAgentResources(config, scope) {
           if (!['account', 'username', 'password'].includes(credential) || !resource[credential]) throw agentError('Configured authentication credential is unavailable');
           fields.set(field, resource[credential]);
         }
-        const response = await fetch(resourceURL(resource, auth.path), { method: 'POST', body: fields, redirect: 'manual', signal: AbortSignal.timeout(30000) });
+        const authUrl = resourceURL(resource, auth.path);
+        const response = await send(spec.resource, 'POST', authUrl, 'http', () => fetch(authUrl, {
+          method: 'POST', body: fields, redirect: 'manual', signal: AbortSignal.timeout(30000) }));
         const cookies = response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
         if (response.status >= 400 || !cookies) throw agentError('Configured resource authentication did not establish a session');
         authentication.set(spec.resource, cookies);
@@ -307,11 +317,13 @@ export function createAgentResources(config, scope) {
     }
     if (resource.resource_type === 'rabbitmq') headers.authorization = 'Basic ' + Buffer.from(resource.username + ':' + resource.password).toString('base64');
     const body = resolveInput(spec.body, input);
-    const response = await fetch(url, { method: spec.method ?? 'GET', headers: { ...headers, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(spec.timeoutMs ?? 30000) });
+    const method = spec.method ?? 'GET';
+    const response = await send(spec.resource, method, url, 'http', () => fetch(url, {
+      method, headers: { ...headers, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(spec.timeoutMs ?? 30000) }));
     const text = await response.text();
     let data; try { data = JSON.parse(text); } catch { data = text; }
-    return { status: response.status, body: sanitized(data), path: url.pathname, method: spec.method ?? 'GET',
+    return { status: response.status, body: sanitized(data), path: url.pathname, method,
       request: { query: sanitized(Object.fromEntries(url.searchParams)), ...(body !== undefined ? { body: sanitized(body) } : {}) } };
   }
 

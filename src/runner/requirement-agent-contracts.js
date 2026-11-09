@@ -29,8 +29,12 @@ const check = object({ id: string, line: { type: 'integer', minimum: 1 }, requir
   operator: enumeration('equals', 'contains', 'gt', 'gte', 'lt', 'lte'), type: enumeration('number', 'text', 'boolean', 'null'), unit: { type: 'string' },
   basis: object({ quote: string, observationId: string, field, explanation: string }), measurement },
 ['id', 'line', 'requirement', 'channel', 'expected', 'operator', 'type', 'basis']);
+const requestProof = object({ scope: enumeration('runner', 'service'), phase: enumeration('prepare', 'scenario'), resource: string,
+  requests: array(object({ method: string, path: string, count: integer }, ['method', 'path', 'count']), 1),
+  audit: object({ operation: string, correlation: string }, ['operation', 'correlation']) }, ['scope', 'phase', 'resource', 'requests']);
 const processCheck = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string,
-  kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup', 'report'), relatedCheckIds: array(string) }, ['id', 'line', 'requirement', 'kind']);
+  kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup', 'report'), relatedCheckIds: array(string),
+  requestProof }, ['id', 'line', 'requirement', 'kind']);
 const pageStage=object({id:string,step:{type:'integer',minimum:1},resource:string,action:enumeration('goto','click','select'),path:string,selector:string,value:{},subject:map},['id','step','resource','action','subject']);
 const invocation = { operation: string, input: map, subject: map, ...page };
 const readiness = object({ field, operator: enumeration('equals', 'not_equals'), value: {},
@@ -56,6 +60,7 @@ export const requirementToolSchemas = {
     fields: { type: 'object', additionalProperties: object({ selector: string, read: enumeration('text', 'input', 'visible', 'count', 'attribute'), attribute: string }, ['selector', 'read']) },
     operation: string, delayMs: { type: 'number', minimum: 0 }, abort: { type: 'boolean' }, status: { type: 'integer' }, body: {} }, ['resource', 'action']),
   plan: { anyOf: [object({ action: { const: 'inspect' } }, ['action']),
+    object({ action: { const: 'process_preflight' }, check: processCheck }, ['action', 'check']),
     object({ identityCorrections: array(object({ checkId: string, subject: map }, ['checkId', 'subject']), 1) }, ['identityCorrections']),
     object({ version: { const: 1 }, steps: array(string, 1), pageStages:array(pageStage), prerequisites: array(object({ objects: string, target_state: string, construction_entry: string,
       unique_identifier: string, verification_method: string, cleanup_method: string }, ['objects', 'target_state', 'construction_entry', 'unique_identifier', 'verification_method', 'cleanup_method'])), checks: array(check, 1), processChecks: array(processCheck) }, ['version', 'steps', 'prerequisites', 'checks'])] },

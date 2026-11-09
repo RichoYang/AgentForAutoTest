@@ -51,4 +51,12 @@
 
 ## 运维及验证边界
 
+### 请求次数与过程取证
+
+如果原需求约束本 Runner 在准备或场景阶段的 HTTP 请求次数，将它登记为 `execution_evidence` 的 `requestProof`。填写 `scope: "runner"`、`phase: "prepare"` 或 `"scenario"`、已授权 `resource` 和 `requests`。每项按实际方法、精确 URL 路径和期望次数登记。明确禁用的入口登记为 `count: 0`。传输记录按用例尝试及测量轮次归属，包含 Runner 发起的 HTTP 和受控浏览器实际发送尝试、HTTP 状态及无响应结果。任务中断留下未确认记录时不能据此证明次数。变更台账另用于证明操作意图、状态对账与恢复。Runner 传输范围无法证明其他调用者或代理层的请求次数。
+
+原文明确要求独立服务端请求审计时，使用 `scope: "service"` 并提供 `audit: { operation, correlation }`。通过已有 `test_register` 按当前源码登记同一受控资源的只读 HTTP GET。关联键须归本任务所有，查询传递 `mode`、`correlation`、`from`、`through`。在相关写入前调用 `test_plan { action: "process_preflight", check }`，以 `mode=capability` 实际验证入口、权限、来源和窗口契约。正式计划保留同一契约，计划审查会收到已核验的预检回执。主机用 `mode=collect` 读取实际窗口。准备窗口在冻结计划前读取并保存，场景窗口由 `test_process` 读取。服务响应形如 `{"source":"audit-instance-id","correlation":"task-owned-key","from":"ISO time","through":"ISO time","complete":true,"entries":[{"id":"request-id","at":"ISO time","correlation":"task-owned-key","method":"POST","path":"/example"}]}`。来源与关联必须匹配，报告须覆盖完整窗口。未授权、窗口不足或重复、错对象条目都不能证明要求。能力缺失应在副作用前处理，实际窗口内容由动作产生。请求次数由程序比较，审查器核对映射和取证语义。
+
+`test_finish` 的 `incomplete_checks` 诊断列出当前业务和过程缺项、阶段、已有或失效证据及下一步。产品失败单列，保留真实失败结论。`report_verification` 项在清理和报告生成后单独登记。外部连接尝试和 HTTP 错误响应分别列出，释放条件来自实际证据。若原准备窗口不可重建，先恢复受影响对象，再开始新的测量轮次。
+
 无需迁移现有配置或旧Windows v1登记。本轮不部署、不重启、不改专员权限、不发真实群消息；原取消任务只读。验证使用新的专用回环服务、MySQL及Chromium，真实模型保持实际配置。历史候选重放、固定模型和协议夹具只算模块证据；库存与冻结后留出另走正常需求Runner、自主模型和真实工具，模拟飞书传输不算真实群入口。

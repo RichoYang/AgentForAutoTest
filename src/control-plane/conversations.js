@@ -44,6 +44,7 @@ export class ConversationService {
     this.engine = options.decide ? null : new CodexConversationEngine({ dataDir: context.config.dataDir, file: context.config.codexRuntimeFile });
     this.decide = options.decide ?? ((input, signal, detail) => this.engine.decide(input, { ...detail, signal }));
     this.concurrency = options.concurrency ?? 3;
+    this.concurrencySource = options.concurrencySource ?? (options.concurrency === undefined ? 'default' : 'override');
     this.feedbackMs = options.feedbackMs ?? 3000;
     this.workers = new Map();
     this.feedback = new Map();

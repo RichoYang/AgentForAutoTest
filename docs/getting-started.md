@@ -338,6 +338,10 @@ git pull --ff-only
 
 在 `config/conversation.local.json` 开启 `groupSessions` 与 `questionCards`，使用 Codex 原生持久会话，并让每个新问题维护一张主卡片。不开启时保留现有隔离记忆和卡片行为；不会改变普通成员权限或改建话题群。配置、使用、状态结构、备份及限制见[群共享会话与一问一卡](group-question-cards.md)。
 
+会话并发按程序传入的 `conversationOptions.concurrency`、进程环境变量 `AGENTOS_CONVERSATION_CONCURRENCY`、`config/conversation.local.json` 的 `concurrency` 顺序取第一个已设置的值。全部缺省时使用 3。文件和程序接受正安全整数，环境变量使用十进制整数字符串。选中的值无效会在启动前报出配置来源。改动随对应控制面下次启动生效。启动日志与 `/health` 的 `conversationConcurrency`、`conversationConcurrencySource` 显示实值与来源。需求 Runner 仍由 `AGENTOS_RUNNER_CONCURRENCY` 单独控制。
+
+配置文件示例为 `{"groupSessions":true,"questionCards":true,"concurrency":1}`。也可在启动前设置 `$env:AGENTOS_CONVERSATION_CONCURRENCY='1'`（PowerShell）或 `export AGENTOS_CONVERSATION_CONCURRENCY=1`（macOS shell）。
+
 ## 可选：受控 UAT/PRD 查询
 
 按[环境查询部署与权限说明](environment-access.md)在 Mac 本机配置，准备专用只读数据库账号和已审核模板。源码只读沙箱不放宽；PRD 普通成员请求逐次等待指定环境负责人批准。

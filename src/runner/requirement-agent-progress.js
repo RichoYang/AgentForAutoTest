@@ -20,6 +20,32 @@ export function checkCoverage(current) {
     historicalAttempts: status.reduce((sum, item) => sum + item.attempts, 0), checks: status };
 }
 
+export function finishDiagnostics(current, missing, httpErrors) {
+  const coverage = checkCoverage(current);
+  const businessIds = new Set((current.plan?.checks ?? []).map(check => check.id));
+  const missingChecks = missing.map(check => {
+    if (businessIds.has(check.id)) return { checkId: check.id, role: 'business', phase: check.beforeAction ? 'pre_action' : check.pageStage ?? 'execution',
+      status: 'uncompared', evidence: 'No independent comparison in this measurement epoch',
+      next: check.beforeAction ? 'Use the saved eligible pre-action observation, or restore and repeat if none exists' : 'Observe the required channel and compare with test_assert' };
+    const saved = current.processProofs?.[check.id];
+    const priorGap = Object.values(current.gaps ?? {}).filter(gap => !gap.resolved && gap.tool === 'test_process' && gap.target === check.id).at(-1);
+    return { checkId: check.id, role: 'process', phase: check.kind === 'cleanup' ? 'cleanup' : check.requestProof?.phase ?? 'execution',
+      status: saved ? 'invalidated' : 'missing_evidence',
+      evidence: saved ? { previousProof: saved.evidence, invalidatedByMutation: saved.invalidatedByMutation,
+        invalidatedByRequest: saved.invalidatedByRequest, reason: 'Saved proof does not cover the current ledger or request trace' }
+        : priorGap?.missing ?? 'No verified process evidence for this check',
+      next: check.kind === 'cleanup' && !current.cleanup?.verified ? 'Run test_cleanup and verify restoration, then call test_process'
+        : 'Use current scoped evidence with test_process for ' + check.id };
+  });
+  return { planFrozen: Boolean(current.plan), missingChecks, coverage,
+    productFailures: coverage.checks.filter(check => check.current === 'failed').map(check => check.checkId),
+    deferred: (current.plan?.processChecks ?? []).filter(check => check.kind === 'report')
+      .map(check => ({ checkId: check.id, role: 'process', phase: 'report_verification' })),
+    externalAttempts: current.externalErrors ?? [], httpErrors,
+    next: !current.plan ? 'Freeze an executable plan after resolving prerequisites'
+      : 'Complete the listed checks, or document an actual external dependency, attempted alternatives and the release action' };
+}
+
 // Successful unrelated observations and differently worded answers do not close
 // a gap. Only a successful operation for that target closes it. Even changed
 // evidence is not progress if the review still identifies the same missing field.
@@ -53,7 +79,8 @@ export function recordGap(current, { tool, args, error, evidenceVersion }) {
     ...(error.gapScope === 'shared_observation' ? { scope: error.gapScope, resolvedTargets, details: error.gapDetails,
       next: '按关联检查重新读取冻结后对应阶段的独立业务观测，再逐项断言。若前态已改变，只能使用原始合格观测或恢复重做。' } : {}),
     ...(error.code === 'action_baseline_missing' ? { disposition: 'missing_evidence', details: error.gapDetails,
-      next: '先在对应渠道回读并比较所列前态检查，再重试该动作。' } : {}) };
+      next: '先在对应渠道回读并比较所列前态检查，再重试该动作。' } : {}),
+    ...(error.code === 'incomplete_checks' ? { disposition: 'missing_evidence', details: error.gapDetails, next: error.gapDetails.next } : {}) };
   current.gaps[id] = gap;
   return gap;
   });

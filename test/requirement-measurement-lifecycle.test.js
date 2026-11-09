@@ -153,7 +153,12 @@ test('process expectations reuse real ledger evidence, cannot skip cleanup, and 
     await assert.rejects(invoke('process', args), /requires test_cleanup/);
     await invoke('cleanup', {}); assert.equal((await invoke('process', args)).proven, true);
     mutations[0].receipt = { changed: true };
-    await assert.rejects(invoke('finish', { actual: 'Must not accept stale process proof' }), /Incomplete checks/);
+    await assert.rejects(invoke('finish', { actual: 'Must not accept stale process proof' }), error => {
+      assert.match(error.safeMessage, /Incomplete checks: cleanup \(process, cleanup, invalidated\)/);
+      assert.equal(error.gap.details.missingChecks[0].evidence.previousProof.sanitized, true);
+      assert.deepEqual(error.gap.details.productFailures, ['amount']);
+      return true;
+    });
     await invoke('process', args);
     assert.equal((await invoke('finish', { actual: 'Product failure retained and cleanup proven from real ledger' })).status, '失败');
     return { text: 'done' };

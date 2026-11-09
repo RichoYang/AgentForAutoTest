@@ -29,7 +29,7 @@ import { JsonStore } from '../shared/store.js';
 import { environmentContinuation } from '../shared/investigation-review.js';
 import { nextStage, routeInstruction, routeInstructionForStage, stageLabel } from '../shared/protocol.js';
 
-import { loadConversationSettings } from './conversation-settings.js';
+import { loadConversationSettings, resolveConversationConcurrency } from './conversation-settings.js';
 import { loadMemorySettings } from './memory.js';
 import { ConversationService, splitReply, responseMessageId } from './conversations.js';
 import { LiveCards } from './live-cards.js';
@@ -44,6 +44,8 @@ const adminDirectory = fileURLToPath(new URL('./admin/', import.meta.url));
 
 export async function createControlPlane(overrides = {}) {
   const config = controlConfig(overrides);
+  const conversationSettings = await loadConversationSettings(config.conversationFile);
+  const { concurrency, source: concurrencySource } = resolveConversationConcurrency(overrides.conversationOptions?.concurrency, conversationSettings.concurrency);
   await loadEnvironments();
   const projects = overrides.projects ?? await loadProjects(config.projectsFile);
   const agents = overrides.agents ?? await loadAgents(config.agentsFile);
@@ -87,7 +89,8 @@ export async function createControlPlane(overrides = {}) {
       saved.updatedAt = new Date().toISOString();
     }
   });
-  const conversations = new ConversationService(context, { ...await loadConversationSettings(config.conversationFile), memorySettings: await loadMemorySettings(config.memoryFile), ...overrides.conversationOptions, decide: overrides.conversationResponder });
+  const conversations = new ConversationService(context, { ...conversationSettings, memorySettings: await loadMemorySettings(config.memoryFile), ...overrides.conversationOptions,
+    concurrency, concurrencySource, decide: overrides.conversationResponder });
   context.conversations = conversations;
   context.retention=new RetentionService(context);
   // Finish startup retention before recovering old card/report/knowledge outboxes.
@@ -111,7 +114,7 @@ export async function createControlPlane(overrides = {}) {
     conversations.start().catch((error) => console.error('[conversation-start]', error.message));
   });
   server.once('close', () => { cards.stop();void (async()=>{await context.retention.close();await Promise.allSettled([conversations.stop(),context.reports.close(),context.websiteBrowser.close(),context.knowledge.close()]);})(); });
-  return { server, config, projects, agents, store, requirementRoutes, conversations, cards, retention:context.retention };
+  return { server, config, projects, agents, store, requirementRoutes, conversations, conversationSettings, cards, retention:context.retention };
 }
 
 export async function repairStaleTerminalQuestionCards(context) {
@@ -215,6 +218,7 @@ async function route(context) {
       controlRequestProtocol: CONTROL_PROTOCOL, stateReadPolicy:'stat-cache-detached-v1', stateProjectionPolicy:'detached-select-singleflight-v1',retention:context.retention.status(),stateReads:store.readMetrics,processMemory:{rssBytes:process.memoryUsage().rss,heapUsedBytes:process.memoryUsage().heapUsed,heapTotalBytes:process.memoryUsage().heapTotal}, pendingControlRequests:context.controlReceipts.pending.size, stateTransaction:store.lastTransaction??null,
       memoryPolicy: 'question-native-or-sender-extractive-v2', memoryStatus: context.conversations.memory.status,
       conversationTransport: 'app-server-stdio', conversationConcurrency: context.conversations.concurrency,
+      conversationConcurrencySource: context.conversations.concurrencySource,
       messagePresentation: context.cards?.enabled ? 'live-cards-v1' : 'text', cardActions: 'v1-lease-fenced',
       analysisWorkflow: 'continuous-developer-tools-v2', runnerConcurrency: Number(process.env.AGENTOS_RUNNER_CONCURRENCY ?? 3), sourcePolicy: 'folder-evidence-v1', analysisSourcePolicy: 'origin-ff-before-analysis-v1', analysisSnapshotPolicy: 'isolated-environment-source-v1', analysisSourceCachePolicy:'immutable-project-environment-commit-v1',
       resultPresentation: 'analysis-adaptive-tables-v4', identityPolicy: 'profile-linked-human-v1',
@@ -802,9 +806,9 @@ function isLoopback(host) {
 }
 
 async function main() {
-  const { server, config } = await createControlPlane();
+  const { server, config, conversations } = await createControlPlane();
   server.listen(config.port, config.host, () => {
-    console.log(`[control-plane] listening on http://${config.host}:${config.port}`);
+    console.log(`[control-plane] listening on http://${config.host}:${config.port} (conversation concurrency ${conversations.concurrency}, ${conversations.concurrencySource})`);
   });
 }
 
