@@ -1,26 +1,61 @@
 import { createHash } from 'node:crypto';
 import { notifyJobEvent } from './server.js';
-import { requirementOptions, resolveRequirementOptions } from '../shared/requirement-options.js';
+import { requirementOptions, requirementTopicFingerprint, resolveRequirementOptions } from '../shared/requirement-options.js';
 
 export const REQUIREMENT_TEST = 'requirement_test';
 const openId = /^ou_[a-zA-Z0-9]+$/;
 
 export function validateRequirementRoutes(projects, agents) {
   const routes = new Map();
+  const scoped = [];
   for (const [projectId, project] of Object.entries(projects.projects)) {
     const test = project.requirementTest;
     if (!test) continue;
     const { bot, document, allowedChatIds, requesterOpenIds } = test;
     const matches = Object.values(agents.agents).filter(agent => agent.profile === bot?.profile && agent.openId === bot?.openId);
     if (matches.length !== 1 || !openId.test(bot.openId) || !/^cli_[a-z0-9]+$/.test(bot.appId)
-      || routes.has(bot.profile) || !document?.profile || document.profile === bot.profile
+      || !document?.profile || document.profile === bot.profile
       || !openId.test(document.openId) || !/^cli_[a-z0-9]+$/.test(document.appId)
       || !Array.isArray(allowedChatIds) || !allowedChatIds.length
-      || allowedChatIds.some(id => projects.chatProjectMap[id] !== projectId || !projects.topicChatIds?.includes(id))
+      || allowedChatIds.some(id => !projects.topicChatIds?.includes(id))
       || !Array.isArray(requesterOpenIds) || !requesterOpenIds.length || requesterOpenIds.some(id => !openId.test(id))) {
       throw new Error('Invalid requirement testing identity or project binding: ' + projectId);
     }
-    routes.set(bot.profile, { projectId, project, test });
+    const route = { projectId, project, test };
+    if (test.topicBindings !== undefined) {
+      scoped.push(route);
+    } else {
+      if (routes.has(bot.profile) || allowedChatIds.some(id => projects.chatProjectMap[id] !== projectId)) {
+        throw new Error('Invalid requirement testing identity or project binding: ' + projectId);
+      }
+      routes.set(bot.profile, route);
+    }
+  }
+  for (const route of scoped) {
+    const { projectId, test } = route;
+    const primary = routes.get(test.bot.profile);
+    if (!primary || primary.test.bot.appId !== test.bot.appId || primary.test.bot.openId !== test.bot.openId
+      || ['domain', 'profile', 'appId', 'openId'].some(key => primary.test.document[key] !== test.document[key])
+      || test.allowedChatIds.some(id => !primary.test.allowedChatIds.includes(id))
+      || test.requesterOpenIds.some(id => !primary.test.requesterOpenIds.includes(id))
+      || !Array.isArray(test.topicBindings) || !test.topicBindings.length) {
+      throw new Error('Invalid requirement topic project binding: ' + projectId);
+    }
+    primary.topics ??= new Map();
+    primary.topicDocuments ??= new Set();
+    for (const binding of test.topicBindings) {
+      const { chatId, rootId, documentUrl } = binding ?? {};
+      const topic = chatId + ':' + rootId;
+      if (!test.allowedChatIds.includes(chatId) || !/^om_[a-zA-Z0-9_-]+$/.test(rootId ?? '')
+        || typeof documentUrl !== 'string' || requirementLinks(documentUrl, test.document.domain)[0] !== documentUrl) {
+        throw new Error('Invalid requirement topic document binding: ' + projectId);
+      }
+      if (primary.topics.has(topic) || primary.topicDocuments.has(documentUrl)) {
+        throw new Error('Duplicate requirement topic or document: ' + projectId);
+      }
+      primary.topics.set(topic, { ...route, binding });
+      primary.topicDocuments.add(documentUrl);
+    }
   }
   return routes;
 }
@@ -35,8 +70,10 @@ export function requirementLinks(content, domain) {
 }
 
 export async function handleRequirementMessage(context, event) {
-  const route = context.requirementRoutes.get(event.agent_profile);
-  if (!route) return null;
+  const primary = context.requirementRoutes.get(event.agent_profile);
+  if (!primary) return null;
+  const root = event.root_id || event.thread_id || event.message_id;
+  const route = primary.topics?.get(event.chat_id + ':' + root) ?? primary;
   const { projectId, project, test } = route;
   const { bot } = test;
   if (event.receiving_app_id !== bot.appId || event.receiving_bot_id !== bot.openId
@@ -46,12 +83,15 @@ export async function handleRequirementMessage(context, event) {
   }
   const ids = new Set((event.mentions ?? []).map(m => m.id?.open_id ?? m.id ?? m.open_id).filter(Boolean));
   if (ids.size && !ids.has(bot.openId)) return { ignored: true };
-  const root = event.root_id ?? event.thread_id ?? event.message_id;
   const text = requirementCommandText(event.content, event.mentions);
   const clarification = text.match(/^确认图示\s+(IMGQ-[a-f0-9]{12})\s+(.+)$/s);
   const command = clarification ? 'material_confirm' : requirementCommand(text);
   if (ids.size > 1) return reply('请在话题中只 @ 一个智能体，再发送需求链接。');
   const links = requirementLinks(event.content, test.document.domain);
+  if (route.binding ? links.some(url => url !== route.binding.documentUrl)
+    : links.some(url => primary.topicDocuments?.has(url)) || (links.length && /^AgentOS隔离验收(?:\s|[：:])/.test(text))) {
+    return { ignored: true, reason: 'requirement_topic_scope' };
+  }
   if (links.length > 1) return reply('每个话题只接受一份需求，请在单独话题中发起。');
   let options;
   if (links.length && ids.has(bot.openId)) {
@@ -66,6 +106,8 @@ export async function handleRequirementMessage(context, event) {
     agentRole: REQUIREMENT_TEST, agentProfile: bot.profile, workflow: REQUIREMENT_TEST, stage: REQUIREMENT_TEST,
     taskIntent: REQUIREMENT_TEST, instruction: '需求测试',
     requirement: { root, threadId: event.thread_id ?? null, parent: event.reply_to ?? event.parent_id ?? null, url: links[0] ?? null,
+      ...(route.binding ? { topicBinding: requirementTopicFingerprint(project),
+        ...(typeof event.event_id === 'string' ? { eventId: event.event_id } : {}) } : {}),
       ...(clarification ? { materialConfirmation: { id: clarification[1], answer: clarification[2].trim() } } : {}),
       ...(options && Object.keys(options).length ? { options } : {}) },
   };

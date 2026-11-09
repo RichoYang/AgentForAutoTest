@@ -7,12 +7,52 @@ import { JsonStore } from '../src/shared/store.js';
 import { handleRequirementMessage, validateRequirementRoutes } from '../src/control-plane/requirement-testing.js';
 import { publishCases, versionNames } from '../src/runner/requirement-publication.js';
 import { requirementResources } from '../src/runner/requirement-execution.js';
+import { runRequirementTest } from '../src/runner/requirement-test.js';
 import { createControlPlane } from '../src/control-plane/server.js';
 import { larkEventSourcePlans } from '../src/control-plane/lark-event-source.js';
 import { requirementOptions, resolveRequirementOptions } from '../src/shared/requirement-options.js';
 import { requirementAnchors, validateCases } from '../src/runner/requirement-generation.js';
 
 const domain = 'example.feishu.cn';
+
+test('one specialist can bind a specific topic and document to a separate requirement project', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentos-requirement-topic-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const bot = { profile: 'qa', appId: 'cli_qa', openId: 'ou_qa' };
+  const document = { domain, profile: 'doc-user', appId: 'cli_docs', openId: 'ou_document' };
+  const base = { bot, document, allowedChatIds: ['oc_group'], requesterOpenIds: ['ou_owner'] };
+  const documentUrl = 'https://' + domain + '/docx/Isolated';
+  const isolated = { ...base, topicBindings: [{ chatId: 'oc_group', rootId: 'om_isolated', documentUrl }] };
+  const projects = { chatProjectMap: { oc_group: 'ordinary' }, topicChatIds: ['oc_group'],
+    projects: { ordinary: { requirementTest: base }, isolated: { requirementTest: isolated } } };
+  const agents = { agents: { qa: bot } };
+  const store = new JsonStore(path.join(directory, 'state.json'));
+  const routes = validateRequirementRoutes(projects, agents);
+  assert.equal(larkEventSourcePlans({ requirementRoutes: routes }, agents.agents).length, 2);
+  const context = { projects, requirementRoutes: routes, store, feishu: { reply: async () => {} } };
+  const event = { agent_profile: bot.profile, receiving_app_id: bot.appId, receiving_bot_id: bot.openId,
+    chat_type: 'group', chat_id: 'oc_group', sender_id: 'ou_owner', mentions: [{ id: bot.openId }],
+    root_id: 'om_isolated', message_id: 'om_request', event_id: 'evt_fixture', content: documentUrl };
+  const result = await handleRequirementMessage(context, event);
+  const job = await store.getJob(result.jobId);
+  assert.equal(job.projectId, 'isolated');
+  assert.match(job.requirement.topicBinding, /^[a-f0-9]{64}$/);
+  assert.equal(job.requirement.eventId, 'evt_fixture');
+  const config = { projects: projects.projects, dataDir: directory };
+  await assert.rejects(runRequirementTest({ ...job, projectId: 'ordinary' }, config, async () => {}), /项目绑定不符/);
+  await assert.rejects(runRequirementTest({ ...job, requirement: { ...job.requirement, root: 'om_other' } }, config, async () => {}), /项目绑定不符/);
+  const changed = { projects: { ...projects.projects, isolated: { ...projects.projects.isolated, repoPath: directory } }, dataDir: directory };
+  await assert.rejects(runRequirementTest(job, changed, async () => {}), /项目绑定不符/);
+  assert.deepEqual(await handleRequirementMessage(context, event), { duplicate: true });
+  await handleRequirementMessage(context, { ...event, message_id: 'om_repeat' });
+  assert.equal((await store.read()).jobs.length, 1);
+  const denied = await handleRequirementMessage(context, { ...event, root_id: 'om_other', message_id: 'om_wrong_topic' });
+  assert.equal(denied.reason, 'requirement_topic_scope');
+  assert.equal((await handleRequirementMessage(context, { ...event, content: 'https://' + domain + '/docx/Other', message_id: 'om_wrong_doc' })).reason, 'requirement_topic_scope');
+  const ordinary = await handleRequirementMessage(context, { ...event, root_id: 'om_other', message_id: 'om_ordinary', content: 'https://' + domain + '/docx/Ordinary' });
+  assert.equal((await store.getJob(ordinary.jobId)).projectId, 'ordinary');
+  assert.throws(() => validateRequirementRoutes({ ...projects, projects: { ...projects.projects, other: projects.projects.isolated } }, agents), /Duplicate requirement topic/);
+});
 
 test('local startup exposes the verified routes used to stamp the requirement event', async t => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'agentos-requirement-startup-'));

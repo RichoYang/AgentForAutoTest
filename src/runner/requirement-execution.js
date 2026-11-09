@@ -1,4 +1,5 @@
 import { lstat, readFile, unlink } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { hashFile } from '../shared/file-digest.js';
@@ -43,6 +44,9 @@ export async function requirementResources(environment, { allowUnavailable = fal
   const ini = await readFile(environment.iniPath, 'utf8').catch(() => {
     throw new RequirementWait('environment_config', '无法读取本项目的非生产资源配置。');
   });
+  if (environment.iniSha256 !== undefined && createHash('sha256').update(ini).digest('hex') !== environment.iniSha256) {
+    throw new RequirementWait('environment_config', '已固定的非生产资源配置摘要不符。');
+  }
   const entries = iniResources(ini);
   const permitted = new Map();
   const secrets = new Set();

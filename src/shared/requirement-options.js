@@ -1,4 +1,17 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+
+export function requirementTopicFingerprint(project) {
+  return createHash('sha256').update(JSON.stringify(project)).digest('hex');
+}
+
+export function matchesRequirementTopic(project, job) {
+  const bindings = project.requirementTest.topicBindings;
+  if (!bindings) return job.requirement.topicBinding === undefined;
+  return job.requirement.topicBinding === requirementTopicFingerprint(project)
+    && bindings.some(binding => binding.chatId === job.chatId && binding.rootId === job.requirement.root
+      && binding.documentUrl === job.requirement.url);
+}
 
 const inputLabels = { supplementDirectory: '补充文档', developerDirectory: '开发反馈' };
 

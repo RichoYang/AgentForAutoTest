@@ -206,6 +206,7 @@ async function route(context) {
         executionAdapterConfigured: Boolean(route.test.adapter || route.test.execution),
         executionMode: route.test.execution?.mode ?? (route.test.adapter ? 'adapter' : 'catalog'),
         executionProtocol: route.test.execution?.mode === 'agent' ? 'native-tools-ledger-v1' : 'catalog-v1',
+        ...(route.topics?.size ? { scopedTopicCount: route.topics.size } : {}),
         releaseManifestConfigured: Boolean(route.test.execution?.releaseManifest?.path),
         releaseRequiredComponents: Object.keys(route.test.execution?.releaseManifest?.components ?? {}).length,
         releaseEvidencePolicy: 'case-scoped',

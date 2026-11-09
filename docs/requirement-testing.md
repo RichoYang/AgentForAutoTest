@@ -14,10 +14,12 @@
 | --- | --- |
 | `bot.profile`, `bot.appId`, `bot.openId` | 机器人消息身份。须与 `agents.local.json` 匹配 |
 | `allowedChatIds`, `requesterOpenIds` | 可受理群和真人发起人 |
+| `topicBindings` | 可选。数组项填写已核实的 `chatId`、根消息 `rootId` 和完整 `documentUrl`。只将这些话题交给当前项目 |
 | `document.profile`, `document.appId`, `document.openId`, `document.configDir`, `document.domain` | 已登录的文档用户及认证目录，独立于机器人。必须具有需求、模板、目录和新表的实际权限 |
 | `templateUrl`, `projectFolderUrl`, `timeZone` | 参考工作簿、项目版本目录、月份计算时区。按 `YYYY年MM月版本` 复用或建子目录，标题使用需求名和版本后缀 |
 | `environment` | `name` 限 SIT/UAT，`platform`、`iniPath`、`resources` 配置明确的本项目资源节及 `read` 或 `full_crud` 范围，`lockKey` 配置共享资源锁 |
 | `environment.aliases` | 同一套已验证测试资源可登记另一个 SIT/UAT 名称。消息中的「测试环境」选用项目绑定，原请求名称和实际绑定分别记录 |
+| `environment.iniSha256` | 可选。固定资源 INI 的 UTF-8 内容摘要，执行层在加载资源时核对 |
 | `allowedProjectFolderUrls`, `allowedReportDirectories`, `allowedInputDirectories` | 可按任务指定的飞书用例目录、本机结果目录和本机材料目录。部署者登记项目内批准的完整链接或绝对路径 |
 | `lockDirectory`, `reportDirectory` | 共享资源锁和项目报告证据的本机绝对目录 |
 | `skills.generator`, `skills.regression` | 各有绝对 `path` 和 `sha256`。按 `requirement-files.js` 中列表依次散列每个路径、NUL、文件内容、NUL |
@@ -30,6 +32,16 @@
 | `analysisRepositories` | 项目源仓与分支。执行前记录配置分支提交，报告另列运行版本证据 |
 
 凭据只在受控执行层读取 `config.ini` 对应节，不放入项目配置、提示词、日志、报告或群回复。仅允许配置为 `configured` 和 `ai_access=allowed` 的资源；写操作还要求本项目配置和 INI 均为 `full_crud`。项目适配器是本地受信任代码，不应由需求文本、模型输出或群成员上传。适配器本身应固定 UI/API/SQL/任务入口，限制业务键，阻止 DDL 和未知归属记录，并完成证据脱敏。
+
+## 在同一群使用独立的话题项目
+
+1. 保留 `chatProjectMap` 中的默认项目。先发一条不含 @ 和需求链接的标记消息作为新话题根，并回读确认群、根消息 ID 和话题 ID。
+2. 为受限任务增加单独项目，配置实际源码、环境资源、用例目录和报告目录。`topicBindings` 示例为 `[{"chatId":"oc_群标识","rootId":"om_根消息标识","documentUrl":"https://你的租户.feishu.cn/docx/需求标识"}]`。复用默认项目的机器人和文档身份，授权群和发起人只能是默认范围的子集。
+3. 隔离验收可将新项目绑定到专用 Git 根、回环服务、单独的数据库和限定库权限的账号。通过资源加载器核对实际地址、数据库及权限，并以 `environment.iniSha256` 固定专用 INI。配置中仅登记所需资源及本轮输出路径。
+4. 重新加载专员实例后检查 `/health` 中的 `scopedTopicCount`，同时核对运行源码、项目配置和消费者归属。从登记根消息发起话题内回复，单独 @ 专员，发送匹配的需求链接。以 `AgentOS隔离验收` 开头的带链接指令要求显式话题绑定。
+5. 路由拒绝重叠的话题或需求链接。已登记的受限需求链接在错话题不会进入默认项目。新 Job 保存话题项目摘要和可取得的源事件 ID，Runner 在调用模型前复核摘要、群、根消息、文档、资源和源码。保留配置直至任务和报告清理完成，然后移除临时话题项目。
+
+话题绑定复用同一消息和卡片订阅。需要验证真实群时，应保留源消息、事件、话题、Job、云端用例回读和附件摘要。模块测试和模拟传输的结果按各自入口记录。
 
 ## 执行和恢复
 

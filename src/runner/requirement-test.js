@@ -4,9 +4,9 @@ import { generatorReferences, loadSkill, privateDirectory, readJson, readRequire
 import { generateValidatedCases } from './requirement-generation.js';
 import { reviseMaterialCases } from './requirement-material-revision.js';
 import { publishCases } from './requirement-publication.js';
-import { executeCases } from './requirement-execution.js';
+import { executeCases, requirementResources } from './requirement-execution.js';
 import { buildRequirementReport } from './requirement-report.js';
-import { resolveRequirementOptions } from '../shared/requirement-options.js';
+import { matchesRequirementTopic, resolveRequirementOptions } from '../shared/requirement-options.js';
 import { verifiedMutationCleanup } from './requirement-mutation-measurement.js';
 
 export async function runRequirementTest(job, config, emit, dependencies = {}) {
@@ -14,7 +14,8 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
   const project = config.projects[job.projectId];
   const configured = project?.requirementTest;
   if (!configured || configured.bot.profile !== job.agentProfile || !configured.allowedChatIds.includes(job.chatId)
-    || !configured.requesterOpenIds.includes(job.senderId) || !/^JOB-[A-Za-z0-9-]+$/.test(job.id)) {
+    || !configured.requesterOpenIds.includes(job.senderId) || !/^JOB-[A-Za-z0-9-]+$/.test(job.id)
+    || !matchesRequirementTopic(project, job)) {
     throw new Error('需求测试 Runner 项目绑定不符');
   }
   const settings = resolveRequirementOptions(configured, job.requirement.options);
@@ -47,6 +48,12 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
   const readSource = url => readRequirementWithInputs(client, url, settings.inputDirectories, workDir);
   let stage = '需求读取';
   try {
+    if (job.requirement.topicBinding) {
+      // Resolve the same resource contract used by execution before invoking any model.
+      const resources = await requirementResources(settings.environment);
+      journal.topicResources = Object.fromEntries(resources.names.map(name => [name, resources.identity(name)]));
+      journal.repositories ??= await sourceBaseline(project);
+    }
     delete journal.waitCode;
     const url = new URL(job.requirement.url);
     if (url.protocol !== 'https:' || url.hostname !== settings.document.domain || !/^\/(?:docx|wiki)\/[A-Za-z0-9]+$/.test(url.pathname)) {
