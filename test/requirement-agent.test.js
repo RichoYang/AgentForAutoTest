@@ -128,10 +128,11 @@ test('adapter upgrade advances an interrupted attempt once and leaves untouched 
   assert.equal(journal.cleanup.verified, true);
 });
 
-test('native cleanup retains the action receipt and reconciles a lost receipt without replay', async t => {
+test('native cleanup verifies restored state independently of forward readiness and stops at uncertain recovery', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-cleanup-receipt-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const states = new Map([['confirmed', 'changed'], ['lost', 'changed']]);
+  const ids = ['deferred', 'lost', 'confirmed', 'async'];
+  const states = new Map(ids.map(id => [id, 'changed']));
   const writes = [];
   const server = createServer((request, response) => {
     const id = request.url.split('/').at(-1);
@@ -147,13 +148,14 @@ test('native cleanup retains the action receipt and reconciles a lost receipt wi
   t.after(() => new Promise(resolve => server.close(resolve)));
   const adapter = createRequirementAgent({}, { workDir: root });
   const resource = { base_url: 'http://127.0.0.1:' + server.address().port };
-  const mutations = ['confirmed', 'lost'].map(id => ({ key: 'mutation-' + id, caseId: 'C1', intent: {
+  const mutations = ids.map(id => ({ key: 'mutation-' + id, caseId: 'C1', intent: {
     agent: true, operation: 'update', target: 'entry', resource: 'platform', businessKey: id,
     ownership: { field: ['body', 'id'], value: id }, snapshot: { status: 200, body: { id, status: 'original' } },
     stateFields: [['body', 'id'], ['body', 'status']], before: [{ field: ['body', 'status'], operator: 'equals', expected: 'original' }],
     after: [{ field: ['body', 'status'], operator: 'equals', expected: 'changed' }],
     verifySpec: { kind: 'http', method: 'GET', access: 'read', resource: 'platform', path: '/entry/{id}' }, verifyInput: { id },
     restoreSpec: { kind: 'http', method: 'POST', access: 'update', resource: 'platform', path: '/restore/{id}' }, restoreInput: { id },
+    ...(id === 'async' ? { ready: { field: ['body', 'status'], operator: 'equals', value: 'changed', timeoutMs: 25 } } : {}),
     cleanupAction: 'Restore the original status',
   } }));
   const scope = { mutations, reports: root, jobId: 'JOB-cleanup', projectId: 'fixture', environment: 'UAT', checkOutput: value => value,
@@ -163,8 +165,10 @@ test('native cleanup retains the action receipt and reconciles a lost receipt wi
       mutation.cleanup = { ...mutation.cleanup, ...fields };
     } };
   const first = await adapter.cleanup(scope);
-  assert.deepEqual(first.pending, ['mutation-lost']);
-  const [confirmed, lost] = mutations;
+  assert.deepEqual(first.pending, ['mutation-lost', 'mutation-deferred']);
+  const [, lost, confirmed, asynchronous] = mutations;
+  assert.equal(asynchronous.cleanup.after.body.status, 'original');
+  assert.deepEqual(writes, ['async', 'confirmed', 'lost']);
   assert.equal(confirmed.cleanup.actionReceipts?.length, 1);
   const [receipt] = confirmed.cleanup.actionReceipts;
   assert.equal(receipt.response.status, 202);
@@ -176,12 +180,65 @@ test('native cleanup retains the action receipt and reconciles a lost receipt wi
   assert.ok(confirmed.cleanup.record.evidence.includes(receipt.evidence));
   const second = await adapter.cleanup(scope);
   assert.equal(second.verified, true);
-  assert.deepEqual(writes, ['lost', 'confirmed']);
+  assert.deepEqual(writes, ['async', 'confirmed', 'lost', 'deferred']);
   assert.equal(lost.cleanup.actionReceipts?.length ?? 0, 0);
   assert.equal(confirmed.cleanup.restoration, 'action-receipt');
   assert.equal(lost.cleanup.restoration, 'reconciled-readback');
   assert.equal(lost.cleanup.verified, true);
   assert.ok(second.evidence.includes(receipt.evidence));
+});
+
+test('native cleanup checks archived intermediate readback before accepting an already unwound async transition', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-cleanup-archive-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const observed = state => ({ status: 200, body: { id: 'sample', state } });
+  const server = createServer((request, response) => {
+    assert.equal(request.method, 'GET');
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify(observed('original').body));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const resource = { base_url: 'http://127.0.0.1:' + server.address().port };
+  const verifySpec = { kind: 'http', method: 'GET', access: 'read', resource: 'platform', path: '/sample' };
+  const restoreSpec = { kind: 'http', method: 'POST', access: 'update', resource: 'platform', path: '/restore' };
+  const intent = (id, before) => ({ id, agent: true, operation: 'update', target: 'sample', businessKey: 'sample',
+    ownership: { field: ['body', 'id'], value: 'sample' }, verifySpec, verifyInput: {},
+    stateFields: [['body', 'id'], ['body', 'state']], before: [], after: [], snapshot: observed(before),
+    restoreSpec, restoreInput: { state: before }, cleanupAction: 'Restore sample state' });
+  const beforeEvidence = { path: 'agent-' + 'a'.repeat(32) + '.json', type: '清理前回读', sanitized: true };
+  const receiptEvidence = { path: 'action.json', type: '清理动作回执', sanitized: true };
+  const at = seconds => new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString();
+  const older = { key: 'older', caseId: 'C1', intent: intent('older', 'original'), cleanup: {
+    before: observed('intermediate'), beforeEvidence: [beforeEvidence], after: observed('original'), verified: true,
+    actionReceipts: [{ startedAt: at(4) }], evidence: [beforeEvidence], record: { cleanup_id: 'older' },
+  } };
+  const newer = { key: 'newer', caseId: 'C1', intent: { ...intent('newer', 'intermediate'),
+    ready: { field: ['body', 'state'], operator: 'equals', value: 'approved', timeoutMs: 10 } }, cleanup: {
+    before: observed('approved'), verified: false, actionReceipts: [{ returnedAt: at(2),
+      operation: restoreSpec, input: { state: 'intermediate' }, response: observed('intermediate'), evidence: receiptEvidence }],
+  } };
+  const context = { jobId: 'JOB-archive', projectId: 'isolated', environment: 'UAT' };
+  const scope = { ...context, mutations: [older, newer], reports: root, checkOutput: value => value,
+    useRead: (_name, apply) => apply(resource), restore: () => assert.fail('Recovery must not replay a write'),
+    async saveCleanup(key, fields) {
+      const target = this.mutations.find(item => item.key === key);
+      target.cleanup = { ...target.cleanup, ...fields };
+    } };
+  const filename = path.join(root, beforeEvidence.path);
+  const saveObservation = (jobId, seconds) => writeFile(filename,
+    JSON.stringify({ ...context, jobId, at: at(seconds), key: older.key, before: older.cleanup.before }));
+  const adapter = createRequirementAgent({}, { workDir: root });
+  await saveObservation('JOB-foreign', 3);
+  assert.deepEqual((await adapter.cleanup(scope)).pending, ['newer']);
+  await saveObservation(context.jobId, 1);
+  assert.deepEqual((await adapter.cleanup(scope)).pending, ['newer']);
+  await saveObservation(context.jobId, 3);
+  const result = await adapter.cleanup(scope);
+  assert.equal(result.verified, true);
+  assert.equal(newer.cleanup.restoration, 'archived-readback');
+  assert.deepEqual(newer.cleanup.after, observed('intermediate'));
+  assert.ok(newer.cleanup.evidence.includes(beforeEvidence));
 });
 
 test('failed-case retry preserves same Job history and passed results, and refuses unresolved writes', async t => {

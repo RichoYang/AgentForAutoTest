@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
+import { lstat, readFile, writeFile } from 'node:fs/promises';
 import { gzip } from 'node:zlib';
 import { promisify, isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -14,7 +14,7 @@ import { agentError, createAgentResources, readSource, resolveInput, sanitized, 
 import { requirementToolSchemas, validateToolArguments,operationNameSchema,planCoverageMatrix,duplicatePlanChecks,pageStageErrors } from './requirement-agent-contracts.js';
 import { compareRecordSnapshots } from './requirement-snapshot.js';
 import { checkCoverage, recordGap, resolveGaps } from './requirement-agent-progress.js';
-import { mutationReadbackHash, validateMutationReadback, repairHttpEnvelope } from './requirement-mutation-measurement.js';
+import { mutationReadbackHash, validateMutationReadback, repairHttpEnvelope, verifiedMutationCleanup } from './requirement-mutation-measurement.js';
 
 const instructions = `你是项目需求测试专员。你必须亲自使用工具调查、构造、执行、取证和清理，不得用计划或报告冒充完成。
 沿用原需求和每条用例；历史结果只供参考。不要因为缺少现成样本或接口目录而停止：读取源码、schema、状态机、权限、业务接口，优先 UI/API，然后授权消息/调度，最后受控数据库 CRUD。
@@ -214,23 +214,63 @@ export function createRequirementAgent(config, options) {
     if (spec.access !== 'read') throw agentError('Verification operation must be read-only');
     return scope.useRead(spec.resource, resource => runtime.performSpec(spec, input, resource));
   }
+  function forwardSettled(observed, ready) {
+    const value = observationAt(observed, ready.field);
+    return (observed.status === undefined || observed.status >= 200 && observed.status < 300)
+      && value !== undefined && (ready.operator === 'equals' ? sameValue(value, ready.value) : !sameValue(value, ready.value));
+  }
+  function matchesRestoration(observed, intent) {
+    try {
+      return observed.status === intent.snapshot.status
+        && snapshotHash(observed, intent.stateFields) === snapshotHash(intent.snapshot, intent.stateFields);
+    } catch { return false; }
+  }
   async function settledReadback(runtime, scope, intent, phase, entries = []) {
     if (!intent.ready) return lookup(runtime, scope, intent.verifySpec, intent.verifyInput);
     const started = Date.now(), polls = [], ready = intent.ready;
+    const restoring = phase === 'after_restore';
     for (;;) {
       const observed = await lookup(runtime, scope, intent.verifySpec, intent.verifyInput);
       const value = observationAt(observed, ready.field);
-      const settled = (observed.status === undefined || observed.status >= 200 && observed.status < 300)
-        && value !== undefined && (ready.operator === 'equals' ? sameValue(value, ready.value) : !sameValue(value, ready.value));
+      const settled = restoring ? matchesRestoration(observed, intent) : forwardSettled(observed, ready);
       polls.push({ at: new Date().toISOString(), value, settled });
       if (settled || Date.now() - started >= (ready.timeoutMs ?? 30000)) {
-        entries.push(await evidence(scope, '异步业务就绪回读', { intentId: intent.id, phase, ready, polls, settled,
+        entries.push(await evidence(scope, '异步业务就绪回读', { intentId: intent.id, phase,
+          ...(restoring ? { restoreTargetHash: snapshotHash(intent.snapshot, intent.stateFields) } : { ready }), polls, settled,
           query: { spec: intent.verifySpec, input: intent.verifyInput }, observed }));
-        if (!settled) throw new RequirementWait('mutation_uncertain', '业务仍在处理中或就绪字段缺失；已保留回读证据和未决台账，不重复写入或提前恢复。');
+        if (!settled) throw new RequirementWait('mutation_uncertain', restoring
+          ? '恢复回读尚未达到原快照；保留未决台账，暂停更早的撤销步骤。'
+          : '业务仍在处理中或就绪字段缺失；已保留回读证据和未决台账，不重复写入或提前恢复。');
         return observed;
       }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
+  }
+  async function archivedRestoration(runtime, scope, mutation, intent, olderMutations) {
+    const receipt = mutation.cleanup?.actionReceipts?.at(-1);
+    if (!intent.ready || !receipt || !matchesRestoration(receipt.response, intent)
+      || !isDeepStrictEqual(receipt.operation, intent.restoreSpec) || !isDeepStrictEqual(receipt.input, intent.restoreInput)) return null;
+    // Older versions could continue unwinding after the right restore was
+    // rejected. Reuse only the next same-target restore's actual before-read.
+    const chain = olderMutations.filter(item => item.caseId === mutation.caseId
+      && item.intent.businessKey === intent.businessKey && isDeepStrictEqual(item.intent.verifySpec, intent.verifySpec)
+      && isDeepStrictEqual(item.intent.verifyInput, intent.verifyInput)
+      && Date.parse(item.cleanup?.actionReceipts?.[0]?.startedAt) >= Date.parse(receipt.returnedAt));
+    if (!chain.length || chain.some(item => !verifiedMutationCleanup(item))) return null;
+    const next = chain[0];
+    const entry = next.cleanup.beforeEvidence?.find(item => item.sanitized && item.type === '清理前回读'
+      && /^agent-[a-f0-9]{32}\.json$/.test(item.path));
+    if (!entry) return null;
+    const file = path.join(scope.reports, entry.path);
+    if (!(await lstat(file).catch(() => null))?.isFile()) return null;
+    const saved = await readJson(file);
+    if (saved?.jobId !== scope.jobId || saved.projectId !== scope.projectId || saved.environment !== scope.environment
+      || saved.key !== next.key || !(Date.parse(receipt.returnedAt) <= Date.parse(saved.at)
+        && Date.parse(saved.at) <= Date.parse(next.cleanup.actionReceipts[0].startedAt))
+      || !isDeepStrictEqual(saved.before, next.cleanup.before) || !matchesRestoration(saved.before, intent)) return null;
+    const fresh = await lookup(runtime, scope, intent.verifySpec, intent.verifyInput);
+    if (!matchesRestoration(fresh, chain.at(-1).intent)) return null;
+    return { after: saved.before, evidence: entry, nextMutationKey: next.key, at: saved.at, fresh };
   }
   async function reconcile(scope) {
     await initialize();
@@ -881,7 +921,12 @@ export function createRequirementAgent(config, options) {
       const pending = [], records = [], entries = [];
       const runtime = createAgentResources(config, context(scope));
       try {
-        for (const mutation of [...scope.mutations].reverse()) {
+        const ordered = [...scope.mutations].reverse();
+        for (const [index, mutation] of ordered.entries()) {
+          if (pending.length) {
+            if (!verifiedMutationCleanup(mutation)) pending.push(mutation.key);
+            continue;
+          }
           if (!mutation.intent.agent) {
             const old = await legacy.cleanup({ ...scope, mutations: [mutation] });
             pending.push(...old.pending); records.push(...old.records); entries.push(...old.evidence); continue;
@@ -906,27 +951,34 @@ export function createRequirementAgent(config, options) {
               && snapshotHash(mutation.cleanup.after, intent.stateFields) === originalHash) {
               records.push(mutation.cleanup.record); entries.push(...mutation.cleanup.evidence); continue;
             }
-            const before = await settledReadback(runtime, scope, intent, 'before_restore', entries);
-            if (!mutation.cleanup?.before) await scope.saveCleanup(mutation.key, { before, beforeEvidence: [await evidence(scope, '清理前回读', { before, key: mutation.key })] });
             let actionReceipts = mutation.cleanup?.actionReceipts ?? [];
-            if (snapshotHash(before, intent.stateFields) !== originalHash) {
-              if (intent.operation !== 'delete' && !sameValue(observationAt(before, intent.ownership.field), intent.businessKey)) throw agentError('Cleanup target ownership cannot be verified');
-              const startedAt = new Date().toISOString();
-              const response = await scope.restore(mutation.key, intent.restoreSpec.access, async resource => {
-                await runtime.verifyAuthentication(intent.restoreSpec.resource, resource, intent.authentication?.[intent.restoreSpec.resource]);
-                return runtime.performSpec(intent.restoreSpec, intent.restoreInput, resource);
-              }, intent.restoreSpec.resource);
-              const receipt = scope.checkOutput(sanitized({ mutationKey: mutation.key, startedAt, returnedAt: new Date().toISOString(),
-                operation: intent.restoreSpec, input: intent.restoreInput, response }));
-              actionReceipts = [...actionReceipts, { ...receipt, evidence: await evidence(scope, '清理动作回执', receipt) }];
-              await scope.saveCleanup(mutation.key, { actionReceipts });
+            const archived = await archivedRestoration(runtime, scope, mutation, intent, ordered.slice(index + 1));
+            if (!archived) {
+              const priorReady = intent.ready && mutation.cleanup?.before && forwardSettled(mutation.cleanup.before, intent.ready);
+              const current = priorReady ? await lookup(runtime, scope, intent.verifySpec, intent.verifyInput) : null;
+              const before = current && matchesRestoration(current, intent) ? current
+                : await settledReadback(runtime, scope, intent, 'before_restore', entries);
+              if (!mutation.cleanup?.before) await scope.saveCleanup(mutation.key, { before,
+                beforeEvidence: [await evidence(scope, '清理前回读', { before, key: mutation.key })] });
+              if (snapshotHash(before, intent.stateFields) !== originalHash) {
+                if (intent.operation !== 'delete' && !sameValue(observationAt(before, intent.ownership.field), intent.businessKey)) throw agentError('Cleanup target ownership cannot be verified');
+                const startedAt = new Date().toISOString();
+                const response = await scope.restore(mutation.key, intent.restoreSpec.access, async resource => {
+                  await runtime.verifyAuthentication(intent.restoreSpec.resource, resource, intent.authentication?.[intent.restoreSpec.resource]);
+                  return runtime.performSpec(intent.restoreSpec, intent.restoreInput, resource);
+                }, intent.restoreSpec.resource);
+                const receipt = scope.checkOutput(sanitized({ mutationKey: mutation.key, startedAt, returnedAt: new Date().toISOString(),
+                  operation: intent.restoreSpec, input: intent.restoreInput, response }));
+                actionReceipts = [...actionReceipts, { ...receipt, evidence: await evidence(scope, '清理动作回执', receipt) }];
+                await scope.saveCleanup(mutation.key, { actionReceipts });
+              }
             }
-            const after = await settledReadback(runtime, scope, intent, 'after_restore', entries);
+            const after = archived?.after ?? await settledReadback(runtime, scope, intent, 'after_restore', entries);
             if (snapshotHash(after, intent.stateFields) !== originalHash) throw agentError('Cleanup readback differs from the original snapshot');
-            const restoration = actionReceipts.length ? 'action-receipt' : 'reconciled-readback';
+            const restoration = archived ? 'archived-readback' : actionReceipts.length ? 'action-receipt' : 'reconciled-readback';
             const entry = await evidence(scope, '清理回查', { key: mutation.key, originalHash, after, restoration,
-              measurementCorrection: mutation.cleanup?.measurementCorrection?.evidence });
-            const cleanupEvidence = [...actionReceipts.map(receipt => receipt.evidence), entry];
+              measurementCorrection: mutation.cleanup?.measurementCorrection?.evidence, ...(archived ? { archived } : {}) });
+            const cleanupEvidence = [...actionReceipts.map(receipt => receipt.evidence), ...(archived ? [archived.evidence] : []), entry];
             const cleanupRecord = { cleanup_id: 'CLEAN-' + digest(mutation.key).slice(0, 16), case_ids: [mutation.caseId], target: intent.target,
               identifier: intent.businessKey, expected_state: '恢复变更前的业务快照', cleanup_action: intent.cleanupAction,
               actual_state: '回读与变更前快照一致', status: '已清理', mutationKey: mutation.key, evidence: cleanupEvidence };
