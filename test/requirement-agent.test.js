@@ -128,6 +128,62 @@ test('adapter upgrade advances an interrupted attempt once and leaves untouched 
   assert.equal(journal.cleanup.verified, true);
 });
 
+test('native cleanup retains the action receipt and reconciles a lost receipt without replay', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agent-cleanup-receipt-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const states = new Map([['confirmed', 'changed'], ['lost', 'changed']]);
+  const writes = [];
+  const server = createServer((request, response) => {
+    const id = request.url.split('/').at(-1);
+    response.setHeader('content-type', 'application/json');
+    if (request.method === 'GET') return response.end(JSON.stringify({ id, status: states.get(id) }));
+    writes.push(id);
+    states.set(id, 'original');
+    if (id === 'lost') return request.socket.destroy();
+    response.writeHead(202);
+    response.end(JSON.stringify({ acknowledged: true, id, token: 'should-be-redacted' }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const adapter = createRequirementAgent({}, { workDir: root });
+  const resource = { base_url: 'http://127.0.0.1:' + server.address().port };
+  const mutations = ['confirmed', 'lost'].map(id => ({ key: 'mutation-' + id, caseId: 'C1', intent: {
+    agent: true, operation: 'update', target: 'entry', resource: 'platform', businessKey: id,
+    ownership: { field: ['body', 'id'], value: id }, snapshot: { status: 200, body: { id, status: 'original' } },
+    stateFields: [['body', 'id'], ['body', 'status']], before: [{ field: ['body', 'status'], operator: 'equals', expected: 'original' }],
+    after: [{ field: ['body', 'status'], operator: 'equals', expected: 'changed' }],
+    verifySpec: { kind: 'http', method: 'GET', access: 'read', resource: 'platform', path: '/entry/{id}' }, verifyInput: { id },
+    restoreSpec: { kind: 'http', method: 'POST', access: 'update', resource: 'platform', path: '/restore/{id}' }, restoreInput: { id },
+    cleanupAction: 'Restore the original status',
+  } }));
+  const scope = { mutations, reports: root, jobId: 'JOB-cleanup', projectId: 'fixture', environment: 'UAT', checkOutput: value => value,
+    useRead: (_name, apply) => apply(resource), restore: (_key, _access, apply) => apply(resource),
+    async saveCleanup(key, fields) {
+      const mutation = mutations.find(item => item.key === key);
+      mutation.cleanup = { ...mutation.cleanup, ...fields };
+    } };
+  const first = await adapter.cleanup(scope);
+  assert.deepEqual(first.pending, ['mutation-lost']);
+  const [confirmed, lost] = mutations;
+  assert.equal(confirmed.cleanup.actionReceipts?.length, 1);
+  const [receipt] = confirmed.cleanup.actionReceipts;
+  assert.equal(receipt.response.status, 202);
+  assert.equal(receipt.response.body.id, 'confirmed');
+  assert.equal(receipt.response.body.token, '[REDACTED]');
+  const saved = JSON.parse(await readFile(path.join(root, receipt.evidence.path), 'utf8'));
+  assert.equal(saved.mutationKey, confirmed.key);
+  assert.equal(saved.response.body.acknowledged, true);
+  assert.ok(confirmed.cleanup.record.evidence.includes(receipt.evidence));
+  const second = await adapter.cleanup(scope);
+  assert.equal(second.verified, true);
+  assert.deepEqual(writes, ['lost', 'confirmed']);
+  assert.equal(lost.cleanup.actionReceipts?.length ?? 0, 0);
+  assert.equal(confirmed.cleanup.restoration, 'action-receipt');
+  assert.equal(lost.cleanup.restoration, 'reconciled-readback');
+  assert.equal(lost.cleanup.verified, true);
+  assert.ok(second.evidence.includes(receipt.evidence));
+});
+
 test('failed-case retry preserves same Job history and passed results, and refuses unresolved writes', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'agent-failed-retry-')); t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, 'reports'));

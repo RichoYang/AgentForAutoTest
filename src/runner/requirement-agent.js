@@ -191,6 +191,7 @@ export function createRequirementAgent(config, options) {
       kind === 'process' ? '本次仅审执行过程要求：证据来自Runner真实台账和当前观测。确认源码/入口、原始类型/精度、先冻结后动作/取证、回执丢失后先对账、就绪条件、恢复范围与回查是否满足该条原要求。业务金额/状态/数量必须有相关程序比较，不能因过程材料存在而判业务通过。没有触发的丢回执分支如实标注未发生，不凭空要求该正常分支制造故障；若本用例明确要求制造丢回执，则需真实丢失与对账证据。report由Runner在所有清理后按已固定15表契约生成并另行验证，当前只审作为报告输入的恢复台账，不能宣称报告已生成。' : '',
       kind === 'operation' && payload.spec?.kind === 'database' ? '这是授权数据库上的直接核对或准备操作，不要求业务仓存在完全相同的SQL入口。以所给实际schemas、实体/业务规则和SQL本身核实表、字段、只读语义或结构化CRUD；不要要求为临时快照查询先在产品源码新增接口。' : '',
       kind === 'process' ? 'related.compared及assertionEvidence是程序已完成独立业务比较的证明；业务是否通过由该比较单独判定，本次accepted仅代表check指定的过程被证明。产品失败与正确取证/等待/清理可以同时成立，不得因产品实际值不符合预期而拒绝已满足的过程要求。时间顺序区分purpose=prepare与purpose=scenario：准备动作及其原始回读发生在plan前是正常步骤；只有场景动作必须在plan和测量预检后。' : '',
+      kind === 'process' ? 'currentMutationKeys 标记当前尝试及测量轮次的变更。此前轮次的台账仅用于了解恢复历史。cleanup.actionReceipts 是实际恢复响应，cleanup.restoration=reconciled-readback 表示程序通过原快照与回读确认恢复且无可用动作响应。按原条款判断是否还需要动作证据，不因丢失回执要求重发已核实生效的动作。' : '',
       kind === 'assertion_binding' ? 'planContext.checks[].measured包含本次实际已比较字段的原始观测ID、路径和值。sameObservation=true的同一数组行身份或集合计数可以证明当前行关联及唯一性；别的观测或别行不能代证。只用这些值核验身份/范围，不借兄弟业务结果推断当前应通过。pageTimeline是Runner保存的实际页面动作、URL、就绪与身份字段及时间；可核验A→B→A时序，不能凭steps文字认定切换已发生。' : '',
       kind === 'assertion_binding' ? 'executionContext是本次尝试及测量时期的真实准备/场景/对账/恢复台账，可结合源码证明对象新建、从未执行过的后续操作及当前取证阶段；prepared或未确认回执不能当已生效。页面观测的at是动作及等待结束后保存证据的时间，不是导航开始时间；导航开始看lifecycle.actionStartedAt，结束看actionCompletedAt，因此同次goto等待的ready.at早于观测保存at是正常顺序。' : '',
       kind === 'assertion_binding' ? 'selected.representation是程序对原始值的编码核验。number按decimal-text精确比较，已证实的十进制数字字符串不必改成JS number或另造计算；编码不转换null/missing/错误响应。空行不能提供行内身份，完整快照contract.scope是程序实际采集的范围，可结合源码/schema及完整性证明空集合范围；任意请求参数或模型声明不能代证。' : '',
@@ -306,6 +307,7 @@ export function createRequirementAgent(config, options) {
       const mutationVersion = kind => digest((scope.getMutations?.() ?? scope.mutations ?? []).map(item => ({
         key: item.key, intent: item.intent, phase: item.phase, receipt: item.receipt, applyAttempts: item.applyAttempts,
         ...(kind === 'cleanup' ? { cleanup: item.cleanup } : {}) })));
+      const mutationPrefix = () => `${scope.attempt ?? 1}:${current.epoch ? 'epoch' + current.epoch + ':' : ''}`;
       const pageData = (record, args) => {
         const data = args.field ? observationAt(record.data, args.field) : record.data;
         const offset = args.offset ?? 0, limit = args.limit ?? 50;
@@ -423,7 +425,7 @@ export function createRequirementAgent(config, options) {
             for (const check of current.plan.checks) await verifyPreflight(check, current.preflights[check.id]);
           }
           if (!args.id || !args.cleanupAction || !args.ownership?.field || args.ownership.value !== args.businessKey) throw agentError('Mutation needs stable id, ownership readback field and restoration');
-          const mutationId = `${scope.attempt ?? 1}:${current.epoch ? 'epoch' + current.epoch + ':' : ''}${args.id}`;
+          const mutationId = mutationPrefix() + args.id;
           const previous = (scope.getMutations?.() ?? scope.mutations).find(item => item.intent.id === mutationId);
           const snapshot = previous?.intent.snapshot ?? await lookup(runtime, scope, verifySpec, args.verify.input ?? {});
           validateMutationReadback({ verifySpec, snapshot, ownership: args.ownership, stateFields: args.verify.stateFields, before: args.verify.before, after: args.verify.after });
@@ -646,10 +648,9 @@ export function createRequirementAgent(config, options) {
                   at: state.observations[result.observationId]?.at, field: result.field, observed: result.observed, evidence: result.evidence })) })) } });
           binding.observation = { observationId: observation.observationId, at: observation.at };
           if(stageProof)binding.pageStageProof=stageProof;
-          const mutationPrefix = `${scope.attempt ?? 1}:${current.epoch ? 'epoch' + current.epoch + ':' : ''}`;
           binding.executionContext = { planAt: current.planAt, preparationCompletedAt: current.lastPreparationAt,
             scenarioStartedAt: current.scenarioStartedAt,
-            mutations: (scope.getMutations?.() ?? scope.mutations ?? []).filter(record => record.intent?.id?.startsWith(mutationPrefix)) };
+            mutations: (scope.getMutations?.() ?? scope.mutations ?? []).filter(record => record.intent?.id?.startsWith(mutationPrefix())) };
           if (check.channel === 'page') binding.pageTimeline = current.observations.map(id => state.observations[id])
             .filter(record => record.channel === 'page' && record.at <= observation.at)
             .map(record => ({ observationId: record.observationId, at: record.at, action: record.input.action,
@@ -742,7 +743,8 @@ export function createRequirementAgent(config, options) {
             pageTimeline:current.observations.map(id=>state.observations[id]).filter(record=>record.channel==='page').map(record=>({observationId:record.observationId,at:record.at,epoch:record.epoch??0,resource:record.input?.resource,action:record.input?.action,lifecycle:record.data.lifecycle,ready:record.data.ready,url:record.data.url})),
             observed, sources, planReview:current.planReview,
             planAt: current.planAt, scenarioStartedAt: current.scenarioStartedAt, preflights: current.preflights,
-            mutations, cleanup: current.cleanup, coverage: checkCoverage(current), reportContract: 'Runner fixed 15 sheets; generated and verified after case cleanup, not yet claimed complete' };
+            mutations, currentMutationKeys: mutations.filter(record => record.intent?.id?.startsWith(mutationPrefix())).map(record => record.key),
+            cleanup: current.cleanup, coverage: checkCoverage(current), reportContract: 'Runner fixed 15 sheets; generated and verified after case cleanup, not yet claimed complete' };
           const reviewed = await review(scope, 'process', payload);
           current.processProofs ??= {}; current.processProofs[check.id] = { at: new Date().toISOString(), evidence: reviewed.evidence,
             observationIds: args.evidenceRefs.map(ref => ref.observationId), mutationVersion: mutationVersion(check.kind), proven: true };
@@ -906,22 +908,30 @@ export function createRequirementAgent(config, options) {
             }
             const before = await settledReadback(runtime, scope, intent, 'before_restore', entries);
             if (!mutation.cleanup?.before) await scope.saveCleanup(mutation.key, { before, beforeEvidence: [await evidence(scope, '清理前回读', { before, key: mutation.key })] });
+            let actionReceipts = mutation.cleanup?.actionReceipts ?? [];
             if (snapshotHash(before, intent.stateFields) !== originalHash) {
               if (intent.operation !== 'delete' && !sameValue(observationAt(before, intent.ownership.field), intent.businessKey)) throw agentError('Cleanup target ownership cannot be verified');
-              await scope.restore(mutation.key, intent.restoreSpec.access, async resource => {
+              const startedAt = new Date().toISOString();
+              const response = await scope.restore(mutation.key, intent.restoreSpec.access, async resource => {
                 await runtime.verifyAuthentication(intent.restoreSpec.resource, resource, intent.authentication?.[intent.restoreSpec.resource]);
                 return runtime.performSpec(intent.restoreSpec, intent.restoreInput, resource);
               }, intent.restoreSpec.resource);
+              const receipt = scope.checkOutput(sanitized({ mutationKey: mutation.key, startedAt, returnedAt: new Date().toISOString(),
+                operation: intent.restoreSpec, input: intent.restoreInput, response }));
+              actionReceipts = [...actionReceipts, { ...receipt, evidence: await evidence(scope, '清理动作回执', receipt) }];
+              await scope.saveCleanup(mutation.key, { actionReceipts });
             }
             const after = await settledReadback(runtime, scope, intent, 'after_restore', entries);
             if (snapshotHash(after, intent.stateFields) !== originalHash) throw agentError('Cleanup readback differs from the original snapshot');
-            const entry = await evidence(scope, '清理回查', { key: mutation.key, originalHash, after,
+            const restoration = actionReceipts.length ? 'action-receipt' : 'reconciled-readback';
+            const entry = await evidence(scope, '清理回查', { key: mutation.key, originalHash, after, restoration,
               measurementCorrection: mutation.cleanup?.measurementCorrection?.evidence });
+            const cleanupEvidence = [...actionReceipts.map(receipt => receipt.evidence), entry];
             const cleanupRecord = { cleanup_id: 'CLEAN-' + digest(mutation.key).slice(0, 16), case_ids: [mutation.caseId], target: intent.target,
               identifier: intent.businessKey, expected_state: '恢复变更前的业务快照', cleanup_action: intent.cleanupAction,
-              actual_state: '回读与变更前快照一致', status: '已清理', mutationKey: mutation.key, evidence: [entry] };
-            await scope.saveCleanup(mutation.key, { verified: true, after, evidence: [entry], record: cleanupRecord });
-            entries.push(entry); records.push(cleanupRecord);
+              actual_state: '回读与变更前快照一致', status: '已清理', mutationKey: mutation.key, evidence: cleanupEvidence };
+            await scope.saveCleanup(mutation.key, { verified: true, restoration, after, evidence: cleanupEvidence, record: cleanupRecord });
+            entries.push(...cleanupEvidence); records.push(cleanupRecord);
           } catch (error) {
             pending.push(mutation.key);
             const entry = await evidence(scope, '清理待恢复', { key: mutation.key, error: error.safeMessage ?? error.code ?? error.name });
