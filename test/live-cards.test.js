@@ -49,6 +49,7 @@ test('requirement cards show current independent checks and distinguish report d
   job.status = 'completed';
   job.result = { finalMessage: '报告已生成。', requirementSummary: { fail: 0, blocked: 0, notExecuted: 4 } };
   job.requirement = { cleanupOnly: true };
+  job.events.push({ type: 'cancelled', processesExited: true, at: now });
   const cleaned = jobCard(job);
   assert.match(cleaned.header.title.content, /已取消.*清理与报告完成/);
   assert.notEqual(cleaned.header.template, 'green');
@@ -58,6 +59,20 @@ test('requirement cards show current independent checks and distinguish report d
   const failed = jobCard(job);
   assert.match(failed.header.title.content, /业务测试完成.*有失败/);
   assert.equal(failed.header.template, 'red');
+});
+
+test('cleanup-only after an interruption retains the business outcome, including old records', () => {
+  const now = new Date().toISOString();
+  const job = { id: 'JOB-cleanup', workflow: 'requirement_test', status: 'completed', createdAt: now, updatedAt: now,
+    events: [{ type: 'completed', at: now }], requirement: { cleanupOnly: true },
+    result: { requirementSummary: { fail: 1, blocked: 0, notExecuted: 0 } } };
+  assert.match(jobCard(job).header.title.content, /业务测试完成.*有失败/);
+  job.events.push({ type: 'cancelled', processesExited: true, at: now });
+  job.requirement.cleanupAfterCancellation = false;
+  job.result.requirementSummary.notExecuted = 1;
+  const partial = jobCard(job);
+  assert.match(partial.header.title.content, /清理与报告完成.*业务验收未完成/);
+  assert.doesNotMatch(partial.header.title.content, /已取消/);
 });
 
 test('a delivered requirement wait card can notify its requester while a generic completion still waits', async t => {

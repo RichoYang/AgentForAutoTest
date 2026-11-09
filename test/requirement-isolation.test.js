@@ -495,8 +495,10 @@ test('isolated requirement revision runs real Chromium, HTTP, recovery, workbook
   assert.equal(owned.size, 1);
   assert.equal((await readJson(journalFile)).mutations[0].reconciled, true);
   assert.equal((await message('cleanup', '恢复清理')).jobId, jobId);
+  assert.equal((await store.getJob(jobId)).requirement.cleanupAfterCancellation, false);
   const completed = await run();
   assert.equal(completed.outcome, 'ready', completed.finalMessage);
+  assert.match(completed.finalMessage, /保留已有业务判定/);
   assert.equal(createCount, 1);
   assert.equal(deleteCount, 2);
   assert.equal(owned.size, 0);

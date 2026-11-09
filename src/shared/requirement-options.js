@@ -13,6 +13,11 @@ export function matchesRequirementTopic(project, job) {
       && binding.documentUrl === job.requirement.url);
 }
 
+export function requirementCleanupAfterCancellation(job) {
+  return job.requirement?.cleanupOnly === true && (job.requirement.cleanupAfterCancellation
+    ?? job.events?.some(event => event.type === 'cancelled' && event.processesExited) ?? false);
+}
+
 const inputLabels = { supplementDirectory: '补充文档', developerDirectory: '开发反馈' };
 
 export function requirementOptions(content) {

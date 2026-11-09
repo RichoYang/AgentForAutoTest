@@ -1,6 +1,7 @@
 import {contactProgressText} from './contact-progress.js';
 import { failureDiagnostic } from '../shared/failure-diagnostic.js';
 import { stageLabel } from '../shared/protocol.js';
+import { requirementCleanupAfterCancellation } from '../shared/requirement-options.js';
 import { createHash } from 'node:crypto';
 import { publicText, conciseSummary, conversationPrimaryCardElements, analysisPrimaryCardElements, summaryParagraphs, resultPages, resultPanel, PRIMARY_RESPONSE_LIMIT } from './result-presentation.js';
 export { publicText } from './result-presentation.js';
@@ -98,7 +99,8 @@ export function requirementProgressLines(progress) {
 export function requirementCompletion(job) {
   const summary = job.result?.requirementSummary;
   if (job.workflow !== 'requirement_test' || job.status !== 'completed' || !summary) return null;
-  if (job.requirement?.cleanupOnly) return ['已取消 · 清理与报告完成', 'grey'];
+  if (requirementCleanupAfterCancellation(job)) return ['已取消 · 清理与报告完成', 'grey'];
+  if (job.requirement?.cleanupOnly && (summary.blocked || summary.notExecuted)) return ['清理与报告完成 · 业务验收未完成', 'orange'];
   if (summary.blocked || summary.notExecuted) return ['报告已生成 · 业务验收未完成', 'orange'];
   if (summary.fail) return ['业务测试完成 · 有失败', 'red'];
   return ['业务测试及报告完成', 'green'];

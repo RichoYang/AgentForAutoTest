@@ -7,6 +7,7 @@ import { mkdir, readFile, rename, writeFile, stat } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import { createId, nextStage } from './protocol.js';
+import { requirementCleanupAfterCancellation } from './requirement-options.js';
 
 const emptyState = () => ({ version: 1, jobs: [], runners: {}, processedMessages: {} });
 const MAX_CONTEXT_ENTRIES = 8;
@@ -759,8 +760,13 @@ function routeRequirementJob(state, input) {
     if (prior.result?.requirementWait !== 'project_confirmation') return current('requirement_invalid_transition');
     prior.requirement.confirmedProject = true;
   }
-  if (cleanup) prior.requirement.cleanupOnly = true;
-  else delete prior.requirement.cleanupOnly;
+  if (cleanup) {
+    prior.requirement.cleanupAfterCancellation = prior.status === 'cancelled' || requirementCleanupAfterCancellation(prior);
+    prior.requirement.cleanupOnly = true;
+  } else {
+    delete prior.requirement.cleanupOnly;
+    delete prior.requirement.cleanupAfterCancellation;
+  }
   if (retry) {
     prior.requirement.retryRequest = input.sourceMessageId;
     prior.requirement.retryStatuses = command === 'retry_failed' ? ['失败', '未执行'] : ['未执行'];

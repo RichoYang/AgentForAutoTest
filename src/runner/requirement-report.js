@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { hashFile } from '../shared/file-digest.js';
+import { requirementCleanupAfterCancellation } from '../shared/requirement-options.js';
 import { command, privateDirectory, readJson, writeJson } from './requirement-files.js';
 import { RequirementWait, digest } from './requirement-feishu.js';
 import { askNoTools } from './requirement-generation.js';
@@ -79,13 +80,15 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
     });
   }
   const specialty = { fix_verifications: [], code_chains: [], export_validations: [] };
+  const unexecutedReason = requirementCleanupAfterCancellation(job) ? '取消后仅执行清理，本轮未运行此用例。'
+    : '本轮未运行此用例。';
   for (const item of index) {
     const result = results[item.caseId];
     const cells = Object.fromEntries(manifest.headers.map((header, col) => [header, manifest.rows[item.row - 2][col]]));
     let ids = await evidence(result?.evidence, item.caseId);
     if (!ids.length) {
       const file = 'not-executed-' + item.caseId + '.json';
-      await writeJson(path.join(reportDir, file), { caseId: item.caseId, status: '未执行', reason: '已取消业务执行并进入恢复清理。' });
+      await writeJson(path.join(reportDir, file), { caseId: item.caseId, status: '未执行', reason: unexecutedReason });
       ids = await evidence([{ path: file, sanitized: true, type: '执行状态台账' }], item.caseId);
     }
     const issueId = result?.issue ? result.issue.issue_id || 'ISS-' + item.caseId : null;
@@ -130,7 +133,7 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
     cases.push({
       case_id: item.caseId, order: item.row, requirement_ref: item.requirementIds, title_type: cells['测试场景'] + ' · ' + cells['用例类型'],
       module: cells['模块'], page_or_target: cells['页面'], preconditions: cells['前置条件'], steps: cells['操作步骤'],
-      expected_result: cells['预期结果'], actual_result: result?.actual ?? '取消后仅执行清理，本轮未运行此用例。',
+      expected_result: cells['预期结果'], actual_result: result?.actual ?? unexecutedReason,
       status: result?.status ?? '未执行', evidence_ids: ids, issue_ids: item.issueId ? [item.issueId] : [],
       ...(result?.blocker ? { blocker_dependency: result.blocker.dependency } : {}),
       test_data_id: mutationLedger.filter(row => row.case_ids.includes(item.caseId)).map(row => row.primary_business_key),

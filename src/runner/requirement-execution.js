@@ -142,7 +142,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
   const migrating = journal.executionBinding && binding !== journal.executionBinding;
   const pendingMutations = (journal.mutations ?? []).filter(item => !verifiedMutationCleanup(item));
   if (migrating && pendingMutations.length) {
-    throw new RequirementWait('environment_version', '运行时权限或适配器版本已变化，需恢复原绑定后再处理已构造的数据。');
+    throw new RequirementWait('environment_version', '执行绑定已变化且仍有未决变更。请在原话题回复「恢复清理」，按已保存的资源和恢复契约核验；若资源已变化，先核对原绑定。');
   }
   if (!/^[a-z0-9_-]+$/.test(environment.lockKey ?? '')) throw new RequirementWait('environment_config', '缺少共享资源锁分组。');
   const lockRoot = await privateDirectory(settings.lockDirectory);

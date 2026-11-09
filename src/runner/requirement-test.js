@@ -6,7 +6,7 @@ import { reviseMaterialCases } from './requirement-material-revision.js';
 import { publishCases } from './requirement-publication.js';
 import { executeCases, requirementResources } from './requirement-execution.js';
 import { buildRequirementReport } from './requirement-report.js';
-import { matchesRequirementTopic, resolveRequirementOptions } from '../shared/requirement-options.js';
+import { matchesRequirementTopic, requirementCleanupAfterCancellation, resolveRequirementOptions } from '../shared/requirement-options.js';
 import { verifiedMutationCleanup } from './requirement-mutation-measurement.js';
 
 export async function runRequirementTest(job, config, emit, dependencies = {}) {
@@ -225,7 +225,8 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     const cleanup = journal.cleanup?.verified === true ? '已核验恢复' : '待恢复';
     const finalMessage = [
       '用例表：' + journal.publication.url,
-      ...(job.requirement.cleanupOnly ? ['本轮已恢复清理，未完成的业务用例保留为未执行。'] : []),
+      ...(job.requirement.cleanupOnly ? [requirementCleanupAfterCancellation(job)
+        ? '本轮已恢复清理，未完成的业务用例保留为未执行。' : '本轮已恢复清理并保留已有业务判定。'] : []),
       '执行统计：' + summary.total + ' 条，' + summary.pass + ' 通过，' + summary.fail + ' 失败，' + summary.blocked + ' 阻断，'
         + summary.notExecuted + ' 未执行，' + summary.notApplicable + ' 不适用。',
       '覆盖：' + journal.requirements.length + ' 项已抽取条款都有用例映射。登记 ' + summary.issues + ' 项问题，详情见测试报告。',
