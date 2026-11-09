@@ -15,7 +15,9 @@ function actionButton(job, action, label, type = 'default') {
     behaviors: [{ type: 'callback', value: { action, version: jobActionVersion(job) } }] };
   if (['cancel', 'approve', 'approve_environment'].includes(action)) button.confirm = {
     title: { tag: 'plain_text', content: label },
-    text: { tag: 'plain_text', content: action === 'approve_environment' ? '仅批准卡片展示的环境、模板、参数和限额；结果将在本群卡片显示，不授权任何修改。' : action === 'cancel' ? '停止后保留已有文件修改，不会回滚代码。确定继续？' : '确认当前阶段结论通过，并将任务交给下一角色执行？' },
+    text: { tag: 'plain_text', content: action === 'approve_environment' ? '仅批准卡片展示的环境、模板、参数和限额；结果将在本群卡片显示，不授权任何修改。'
+      : action === 'cancel' ? (job.workflow === 'requirement_test' ? '停止新增测试动作并保留变更台账。进程退出后可在原话题恢复清理。确定继续？'
+        : '停止后保留已有文件修改，不会回滚代码。确定继续？') : '确认当前阶段结论通过，并将任务交给下一角色执行？' },
   };
   return button;
 }
@@ -78,7 +80,32 @@ export function elapsed(start, end = Date.now()) {
   const seconds = Math.max(0, Math.floor((end - Date.parse(start)) / 1000) || 0);
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
+
+export function requirementProgressLines(progress) {
+  const status = progress?.requirement;
+  if (!status) return [];
+  const { cases, coverage, gaps } = status;
+  return [
+    ...(cases ? [`用例完成 ${cases.completed}/${cases.total}；通过 ${cases.passed}，失败 ${cases.failed}，阻断 ${cases.blocked}，未执行 ${cases.notExecuted}，不适用 ${cases.notApplicable}`] : []),
+    ...(coverage ? [
+      `当前用例 ${status.caseId}：独立业务检查 ${coverage.compared}/${coverage.total}，当前通过 ${coverage.passed}、失败 ${coverage.failed}；过程要求 ${coverage.processProven ?? 0}/${coverage.processTotal ?? 0}；历史断言尝试 ${coverage.historicalAttempts}。`,
+      `执行器错误 ${status.executorErrors}，未决变更 ${status.pendingMutations}，清理${status.cleanupVerified ? '已核验' : '未完成'}；用例运行 ${Math.floor(status.elapsedMs / 1000)} 秒。`,
+    ] : []),
+    ...(gaps?.length ? ['具体缺口：' + gaps.map(gap => JSON.stringify(gap.missing)).join('；'), '下一步：' + gaps.at(-1).next] : []),
+  ];
+}
+
+export function requirementCompletion(job) {
+  const summary = job.result?.requirementSummary;
+  if (job.workflow !== 'requirement_test' || job.status !== 'completed' || !summary) return null;
+  if (job.requirement?.cleanupOnly) return ['已取消 · 清理与报告完成', 'grey'];
+  if (summary.blocked || summary.notExecuted) return ['报告已生成 · 业务验收未完成', 'orange'];
+  if (summary.fail) return ['业务测试完成 · 有失败', 'red'];
+  return ['业务测试及报告完成', 'green'];
+}
+
 export function jobCard(job, now = Date.now(), { startAt = job.createdAt } = {}) {
+  const requirement = job.workflow === 'requirement_test';
   const expired=job.status==='awaiting_environment_approval' && !(Date.parse(job.environmentAccess?.expiresAt)>now);
   const labels = { running: ['执行中', 'blue'], queued: ['等待执行', 'blue'], completed: ['当前阶段已完成', 'green'],
     awaiting_environment_approval: ['待环境负责人批准查询', 'orange'],
@@ -87,15 +114,17 @@ export function jobCard(job, now = Date.now(), { startAt = job.createdAt } = {})
     cancelling: ['正在停止', 'orange'], resubmitted: ['补充已提交', 'blue'] };
   const terminalState = ['completed', 'blocked', 'failed', 'cancelled'].includes(job.status);
   const [label, color] = expired ? ['查询申请已过期 · 可重新申请', 'orange'] : !terminalState && job.result?.browserActionRequired === 'automation' ? ['等待本机浏览器授权 · 放行后自动继续', 'orange'] : !terminalState && job.result?.browserLoginRequired ? ['等待本机登录 · 登录后自动继续', 'orange'] : job.taskIntent === 'analysis' && job.result?.outcome === 'partial' && ['completed', 'awaiting_approval'].includes(job.status)
-    ? ['部分分析完成 · 有待核实', 'orange'] : labels[job.status] ?? ['等待更新', 'grey'];
+    ? ['部分分析完成 · 有待核实', 'orange'] : requirementCompletion(job) ?? labels[job.status] ?? ['等待更新', 'grey'];
   const active = ['running', 'queued', 'cancelling'].includes(job.status);
   const events = job.events ?? [];
   const attemptStart = events.filter((e) => e.type === 'started').at(-1)?.at ?? job.createdAt;
   const start = startAt ?? job.createdAt ?? attemptStart;
   const relevant = events.filter((e) => Date.parse(e.at) >= Date.parse(attemptStart));
   const activity = relevant.filter((e) => e.phase === 'tool_activity').at(-1)?.activity;
+  const requirementProgress = requirement && relevant.findLast(e => e.type === 'progress' && e.activity?.requirement)?.activity;
   const phase = relevant.filter((e) => e.type === 'progress' && e.phase).at(-1)?.phase;
-  const operation = job.status === 'cancelling' ? (job.cancellationError ?? (job.cancelReason?.includes('租约过期')?'执行器失联，任务已暂停；需确认原进程退出后收尾，未自动重跑。':null) ?? '已请求停止，等待执行器确认进程退出；已有文件修改将保留。')
+  const operation = job.status === 'cancelling' ? (job.cancellationError ?? (job.cancelReason?.includes('租约过期')?'执行器失联，任务已暂停；需确认原进程退出后收尾，未自动重跑。':null)
+    ?? (requirement ? '已请求停止测试，正在等待原进程退出；变更台账将保留。' : '已请求停止，等待执行器确认进程退出；已有文件修改将保留。'))
     : phase === 'verification' ? '正在运行项目验证命令' : phase === 'connection_retry' ? '连接异常，Codex 正在重试'
       : phase === 'model_capacity_retry' ? '当前模型服务繁忙，正在同一调查会话中自动重试'
     : job.status === 'queued' ? (job.taskIntent === 'analysis' && job.stage === 'developer' ? '开发已接单，等待 Runner 进行只读调查。' : '已接单，等待 Runner 执行。')
@@ -113,8 +142,10 @@ export function jobCard(job, now = Date.now(), { startAt = job.createdAt } = {})
   const elements = [...answerBlocks,
     { tag: 'column_set', flex_mode: 'none', horizontal_spacing: '12px', columns: [
       { tag: 'column', width: 'weighted', weight: 1, elements: [md(`**${elapsed(start, active ? now : Date.parse(job.updatedAt))}**`), md('总耗时', true)] },
-      { tag: 'column', width: 'weighted', weight: 1, elements: [md(`**${cumulativeToolCalls(relevant)} 次**`), md('累计实际工具调用', true)] },
+      ...(!requirement ? [{ tag: 'column', width: 'weighted', weight: 1, elements: [md(`**${cumulativeToolCalls(relevant)} 次**`), md('累计实际工具调用', true)] }] : []),
     ] }];
+  if (active && requirementProgress) elements.push(block(requirementProgressLines(requirementProgress)
+    .map(line => md(publicText(clip(line, 600))))));
   if (active && activity?.recent?.length) elements.push(block([md(`**最近完成 · 展示 ${activity.recent.length} / ${Number(activity.completed) || 0} 项**`),
     ...activity.recent.slice(-3).map((item) => md(`${item.failed ? '未通过' : '完成'} · ${publicText(clip(item.label, 120))}`, true))]));
   if (!active && job.result?.finalMessage) elements.push(resultPanel(resultPages(job.result.finalMessage)));

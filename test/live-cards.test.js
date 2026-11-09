@@ -28,6 +28,37 @@ async function setup(t, overrides = {}) {
 }
 const chat = (fields = {}) => ({ id: 'chat1', role: 'owner_intake', status: 'thinking', createdAt: new Date().toISOString(), ...fields });
 
+test('requirement cards show current independent checks and distinguish report delivery from business outcome', () => {
+  const now = new Date().toISOString();
+  const job = { id: 'JOB-card', workflow: 'requirement_test', stage: 'requirement_test', status: 'running',
+    createdAt: now, updatedAt: now, events: [{ type: 'started', at: now },
+      { type: 'progress', at: now, phase: 'tool_activity', activity: {
+        current: '测试环境执行与恢复', total: 4, requirement: { caseId: 'CASE-one',
+          cases: { total: 4, completed: 0, passed: 0, failed: 0, blocked: 0, notExecuted: 4, notApplicable: 0 },
+          coverage: { total: 3, compared: 2, passed: 1, failed: 1, processTotal: 1, processProven: 1, historicalAttempts: 5 },
+          executorErrors: 2, pendingMutations: 1, cleanupVerified: false, elapsedMs: 10000,
+          gaps: [{ missing: { evidence: 'page' }, next: '在正确页面重新观测' }] },
+      } }, { type: 'progress', at: now, phase: 'tool_activity', activity: { current: '工具调用', total: 4 } }],
+  };
+  const running = JSON.stringify(jobCard(job));
+  assert.match(running, /用例完成 0\/4.*独立业务检查 2\/3.*历史断言尝试 5.*执行器错误 2.*未决变更 1/);
+  assert.match(running, /下一步：在正确页面重新观测/);
+  assert.doesNotMatch(running, /累计实际工具调用|不会回滚代码/);
+
+  job.status = 'completed';
+  job.result = { finalMessage: '报告已生成。', requirementSummary: { fail: 0, blocked: 0, notExecuted: 4 } };
+  job.requirement = { cleanupOnly: true };
+  const cleaned = jobCard(job);
+  assert.match(cleaned.header.title.content, /已取消.*清理与报告完成/);
+  assert.notEqual(cleaned.header.template, 'green');
+  job.requirement = {};
+  assert.match(jobCard(job).header.title.content, /报告已生成.*业务验收未完成/);
+  job.result.requirementSummary = { fail: 1, blocked: 0, notExecuted: 0 };
+  const failed = jobCard(job);
+  assert.match(failed.header.title.content, /业务测试完成.*有失败/);
+  assert.equal(failed.header.template, 'red');
+});
+
 test('only real tool events count once; no reasoning, outputs or arguments are exposed', () => {
   const activity = new ExecutionActivity();
   assert.equal(activity.accept({ type: 'item.completed', item: { id: 'r', type: 'reasoning', text: 'PRIVATE' } }), null);
@@ -175,20 +206,29 @@ test('a failed requester mention retries without resending or updating the deliv
   assert.equal((await store.read()).cardMessages['mention-retry'].mentionDelivered, true);
 });
 
-test('full group conversation updates receipt, preserves AI output and ends with one requester mention', async (t) => {
+test('full group conversation updates receipt, preserves AI output and ends with one requester mention', { timeout: 10000 }, async (t) => {
   const { directory, client, calls } = await setup(t);
+  const thinking = deferred(), release = deferred();
   let aiCalls = 0;
   const app = await createControlPlane({ dataDir: directory, storeFile: path.join(directory, 'app.json'),
     projects: { projects: { demo: { displayName: 'demo' } }, chatProjectMap: { group: 'demo' } },
     agents: { agents: { owner_intake: { profile: 'owner', openId: 'bot' } } }, feishuClient: client,
-    conversationOptions: { feedbackMs: 5 }, conversationResponder: async () => {
-      aiCalls++; await pause(50); return { reply: 'AI 的真实回答', action: 'reply', intent: 'none', instruction: '', jobId: '', projectId: '', attachmentIds: [] };
+    conversationOptions: { feedbackMs: 30_000 }, conversationResponder: async () => {
+      aiCalls++; thinking.resolve(); await release.promise;
+      return { reply: 'AI 的真实回答', action: 'reply', intent: 'none', instruction: '', jobId: '', projectId: '', attachmentIds: [] };
     } });
-  t.after(async () => { await app.conversations.stop(); await app.cards.stop(); });
+  t.after(async () => { release.resolve(); await app.conversations.stop(); await app.cards.stop(); });
   const event = { type: 'im.message.receive_v1', message_id: 'm1', chat_id: 'group', sender_id: 'ou_human1', chat_type: 'group', sender_type: 'user',
     agent_role: 'owner_intake', agent_profile: 'owner', mentions: [{ id: 'bot' }], content: '你好' };
   const context = app.conversations.context;
-  await handleLarkCliEvent(context, event); await app.conversations.idle();
+  await handleLarkCliEvent(context, event);
+  await thinking.promise;
+  try {
+    const [turn] = (await app.store.read()).conversations;
+    assert.equal(turn.status, 'thinking');
+    await app.conversations.sendFeedback(turn.id);
+  } finally { release.resolve(); }
+  await app.conversations.idle();
   assert.equal(aiCalls, 1); assert.deepEqual(calls.map((c) => c.type), ['send', 'patch', 'text']);
   assert.match(JSON.stringify(calls[1].card), /AI 的真实回答/);
   assert.equal(calls[2].id, 'm1'); assert.equal(calls[2].options.profile, 'owner');

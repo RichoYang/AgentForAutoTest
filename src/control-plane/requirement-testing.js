@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { notifyJobEvent } from './server.js';
+import { requirementCompletion, requirementProgressLines } from './message-cards.js';
 import { requirementOptions, requirementTopicFingerprint, resolveRequirementOptions } from '../shared/requirement-options.js';
 
 export const REQUIREMENT_TEST = 'requirement_test';
@@ -160,7 +161,9 @@ function requirementStatus(job, reason, settings) {
   const labels = { queued: '等待执行', running: '执行中', cancelling: '等待旧进程退出', paused: '已暂停',
     awaiting_clarification: '待补充或解除阻塞', completed: '已完成', cancelled: '已取消', failed: '执行中断', blocked: '任务受阻' };
   const started = job.events.findLastIndex(event => event.type === 'started');
-  const progress = job.events.slice(Math.max(started, 0)).findLast(event => event.type === 'progress' && event.activity)?.activity;
+  const attempt = job.events.slice(Math.max(started, 0));
+  const progress = attempt.findLast(event => event.type === 'progress' && event.activity)?.activity;
+  const statistics = attempt.findLast(event => event.type === 'progress' && event.activity?.requirement)?.activity;
   const instructions = {
     requirement_unknown_command: '可回复「当前进度」「当前阻塞」「继续测试」「暂停测试」「取消测试」「恢复清理」「重试未执行」或「重试失败」。',
     requirement_confirmation_required: '解除阻塞需先回复「确认项目」。',
@@ -171,13 +174,9 @@ function requirementStatus(job, reason, settings) {
   const wait = job.result?.requirementWait;
   const resumeNote = wait === 'deployment_baseline' ? '上次停在发布核验。可回复「继续测试」接续原用例，发布证据缺口随报告记录。'
     : wait === 'execution_adapter' && (settings.execution || settings.adapter) ? '执行入口现已配置，可回复「继续测试」。' : '';
-  return [job.id + ' · ' + (labels[job.status] ?? job.status),
+  return [job.id + ' · ' + (requirementCompletion(job)?.[0] ?? labels[job.status] ?? job.status),
     progress?.current ? '最近阶段 ' + progress.current + (progress.total ? '（' + progress.completed + '/' + progress.total + '）' : '') : '',
-    progress?.requirement?.cases ? (() => { const c = progress.requirement.cases;
-      return `用例完成 ${c.completed}/${c.total}；通过 ${c.passed}，失败 ${c.failed}，阻断 ${c.blocked}，未执行 ${c.notExecuted}，不适用 ${c.notApplicable}`; })() : '',
-    progress?.requirement?.coverage ? (() => { const r = progress.requirement, c = r.coverage;
-      return `当前用例 ${r.caseId}：独立业务检查 ${c.compared}/${c.total}，当前通过 ${c.passed}、失败 ${c.failed}；过程要求 ${c.processProven ?? 0}/${c.processTotal ?? 0}；历史断言尝试 ${c.historicalAttempts}。执行器错误 ${r.executorErrors}，未决变更 ${r.pendingMutations}，清理${r.cleanupVerified ? '已核验' : '未完成'}；运行 ${Math.floor(r.elapsedMs / 1000)} 秒。`
-        + (r.gaps?.length ? '\n具体缺口：' + r.gaps.map(gap => JSON.stringify(gap.missing)).join('；') + '\n下一步：' + r.gaps.at(-1).next : ''); })() : '',
+    ...(!job.result?.requirementSummary ? requirementProgressLines(statistics) : []),
     resumeNote, job.result?.finalMessage && (resumeNote ? '上次任务回执\n' : '') + job.result.finalMessage,
     instructions[reason]].filter(Boolean).join('\n');
 }

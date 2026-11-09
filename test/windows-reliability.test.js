@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {fork,execFile} from 'node:child_process';import {once} from 'node:events';import {promisify} from 'node:util';
-import {mkdtemp,writeFile,readFile,readdir,rm,mkdir,symlink,realpath} from 'node:fs/promises';
+import {fork,execFile,spawn} from 'node:child_process';import {once} from 'node:events';import {promisify} from 'node:util';
+import {mkdtemp,writeFile,readFile,readdir,rm,mkdir,symlink,realpath,stat} from 'node:fs/promises';
 import os from 'node:os';import path from 'node:path';import {pathToFileURL,fileURLToPath} from 'node:url';
 import {withSnapshotLock} from '../src/shared/snapshot-lock.js';
 import {recoverLocalExecutions} from '../src/runner/local-executions.js';
@@ -10,6 +10,48 @@ import {JsonStore} from '../src/shared/store.js';
 const url=file=>pathToFileURL(path.resolve(file)).href;
 async function fixture(t){const root=await realpath(await mkdtemp(path.join(os.tmpdir(),'agentos-win-native-')));t.after(()=>rm(root,{recursive:true,force:true}));return root;}
 async function until(read,accept){const start=Date.now();for(;;){const value=await read();if(accept(value))return value;if(Date.now()-start>15000)throw Error('Native component did not settle');await new Promise(r=>setTimeout(r,50));}}
+
+test('Windows state replacement survives a reader that temporarily denies delete sharing', async t => {
+  if (process.platform !== 'win32') return;
+  const root = await fixture(t);
+  const file = path.join(root, 'state.json');
+  const store = new JsonStore(file);
+  await store.transact(state => { state.counter = 0; });
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    '$handle=[IO.File]::Open($env:AGENTOS_TEST_LOCK_TARGET,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)',
+    "try { [Console]::WriteLine('ready'); [void][Console]::ReadLine() } finally { $handle.Dispose() }",
+  ].join('; ');
+  const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    env: { ...process.env, AGENTOS_TEST_LOCK_TARGET: file }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const exited = once(holder, 'close');
+  let stderr = '';
+  holder.stderr.on('data', chunk => { stderr += chunk; });
+  try {
+    await Promise.race([
+      once(holder.stdout, 'data').then(([ready]) => assert.equal(String(ready).trim(), 'ready')),
+      exited.then(() => assert.fail(stderr || 'Windows file holder exited before acquiring the handle')),
+    ]);
+    let calls = 0;
+    const update = store.transact(state => { calls++; state.counter++; }).then(() => null, error => error);
+    await until(() => stat(file + '.' + process.pid + '.tmp').then(() => true, error => {
+      if (error.code !== 'ENOENT') throw error;
+      return false;
+    }), Boolean);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(JSON.parse(await readFile(file)).counter, 0);
+    holder.stdin.end();
+    assert.equal((await exited)[0], 0, stderr);
+    const error = await update;
+    if (error) throw error;
+    assert.equal(calls, 1);
+    assert.equal(JSON.parse(await readFile(file)).counter, 1);
+  } finally {
+    holder.stdin.end();
+    await exited;
+  }
+});
 
 test('Windows snapshot kernel lock survives contention, owner crash and rejects reparse paths',async t=>{
  if(process.platform!=='win32')return;const root=await fixture(t),file=path.join(root,'owner.mjs');

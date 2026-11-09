@@ -4,6 +4,7 @@ import { continuousReviewDecision, reviewDecision } from './investigation-review
 import { loadEnvironments, verifyApprovedPlan, verifyCompletedPlan, planQuery, fingerprint } from './environment-access.js';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import { mkdir, readFile, rename, writeFile, stat } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 import { createId, nextStage } from './protocol.js';
 
@@ -83,7 +84,18 @@ export class JsonStore {
     if(this.cache?.raw===raw){await this.snapshot();if(this.cache?.raw===raw)return;}
     await mkdir(path.dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${process.pid}.tmp`;
-    await writeFile(temporary,raw,{encoding:'utf8',mode:0o600});await rename(temporary,this.file);
+    await writeFile(temporary, raw, { encoding: 'utf8', mode: 0o600 });
+    // Windows readers can temporarily deny replacement. Retry the same atomic
+    // rename while holding the transaction queue, without rerunning its effect.
+    for (let backoff = 20; ; backoff *= 2) {
+      try {
+        await rename(temporary, this.file);
+        break;
+      } catch (error) {
+        if (process.platform !== 'win32' || backoff > 320 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+        await delay(backoff);
+      }
+    }
     const info=await stat(this.file);this.cache={signature:[info.dev,info.ino,info.size,info.mtimeMs,info.ctimeMs].join(':'),state:JSON.parse(raw),raw};
   }
 

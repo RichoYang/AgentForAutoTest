@@ -38,6 +38,12 @@ POSIX 保留文件0600/目录0700。目标符号链接被拒绝；ACL 失败不�
 
 锁异常先查看底层 Win32/PowerShell 诊断，核对普通目录及活跃持有者。恢复拒绝时检查 v2 元数据、创建时点、活跃数及租约，不强删锁或凭年龄重置任务。ACL 异常核对身份与 DACL，不提升权限或授予 Users 写权消除错误。
 
+### 控制面状态替换
+
+Windows 文件读取者可能暂时禁止删除共享，令状态库的同目录原子替换返回 `EPERM`。1.53.1 在原事务队列内对暂时性共享错误短暂退避，并重试同一个临时文件的替换。事务逻辑只运行一次，旧文件在替换成功前保持完整。持续拒绝仍上报原错误，可核对文件占用和 ACL。该重试只作用于单次文件提交。
+
+原生回归使用独立 Windows 进程持有临时测试状态的读取句柄。1.53.0 复现 `EPERM`，修复后核对旧内容在占用时仍可读，释放句柄后新状态仅提交一次。
+
 维护脚本及测试用 fileURLToPath 转换文件 URL，CLI 文件仍受相对目录约束；SQLite 在删除临时目录前关闭。macOS/POSIX 路径逻辑模拟与目标平台权限集成分开记录。Windows 使用真实 directory junction 验证越界拒绝，文件 worker 用真实标准流转发的原生测试夹具；固定输出不计模型验收。
 
 隔离入口：`scripts/verify-windows-runner.mjs` 使用真实控制面/AgentRunner/worker，受控中断本轮自身 Runner；`verify-windows-evidence.mjs` 使用真实规划模型/持久会话/MySQL工具，仅由隔离环境供给 SELECT-only 凭据；既有 `verify-requirement-chain.mjs` 完成库存工具、清理及15表报告，飞书传输模拟。每项绑定源码指纹、配置模型和人工干预，不能混称真实群或TPM业务验收。

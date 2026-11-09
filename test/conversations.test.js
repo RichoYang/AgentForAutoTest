@@ -261,7 +261,7 @@ test('different sessions run concurrently; same session preserves context and or
   const { app, inputs, replies } = await setup(t, async (input) => {
     if (input.message === 'slow') { started(); await blocked; }
     return decision({ reply: input.message });
-  });
+  }, { conversationOptions: { feedbackMs: 30_000 } });
   const feishu=app.conversations.context.feishu,reply=feishu.reply.bind(feishu);
   feishu.reply=async(...args)=>{const receipt=await reply(...args);if(args[1]==='other')otherSent();return receipt;};
   await app.conversations.enqueue(message('slow', 'slow'));
