@@ -28,6 +28,7 @@ plan 检查按原预期编号逐项列全，UI 断言须 browser.observe 的真�
 可恢复的参数、规划、查询、页面问题持续修正。有新证据时没有整任务时长或轮数上限。真实外部阻塞须说明具体资源、操作、已尝试替代路径及解除条件。最终用 finish 提交事实摘要；没有 finish 回执不得宣布用例完成。程序依据实际断言和台账判定，并负责清理与回读。`;
 
 const descriptions = {
+  connection: '核验资源目录中的已绑定资源。args:{resource}。读取连接、已配置登录的公开身份或有限 MySQL/管理接口元数据。不读取业务对象、不触发任务、不暴露凭据。入口、账号和连接策略由绑定提供。',
   source: '读取本项目源码。args: {action:"files"|"search"|"read"|"refs"|"history"|"show",path:"相对项目根目录",pattern?,start?,end?,offset?,limit?,ref?,file?}。refs/history/show 的 path 为子仓目录，show 使用 ref 和仓内 file，原样读取指定分支而不切换或覆盖用户文件。返回 sourceRef；register 必须引用已读取的源码。先读适用 AGENTS.md。可分页，不限总调查轮数。',
   schema: '读取授权 MySQL 的数据库、表、列、索引及建表定义。args:{resource,database?,table?}。数据库写入前必须调用本工具。',
   read_sql: '执行只读事务 SQL，结果完整落盘，模型按 offset/limit 取页。args:{resource,database,sql,params:[],offset?,limit?}，仅 SELECT/SHOW/DESCRIBE/EXPLAIN/WITH；禁止文件、锁或延时函数。返回 observationId。',
@@ -175,6 +176,7 @@ export function createRequirementAgent(config, options) {
       sources, schemas, identity: authentication?.identity ?? null, sourceRoot: scope.sourceRoot };
   }
   async function review(scope, kind, payload) {
+    scope.checkOutput(payload);
     const result = await (options.review ?? askNoTools)([
       '你是执行契约检查器，仅分析输入，不调用工具。输出 JSON {accepted:boolean,disposition:"proven"|"missing_evidence"|"contradictory_evidence"|"invalid_contract",errors:[具体字段错误],findings:[{field,code,reason,next}]}。code用稳定简短英文缺口类型，例如scope_missing、incomplete_collection、field_semantics，不把观测ID或具体SQL放入code；next给具体补证方向。已证明仅accepted=true且errors为空。确定性proof、completeness是Runner已核验的结果，仍需判断它们是否覆盖当前业务范围；不重复要求模型计算其已证明的完整分页/主键/精度。不要因没有版本发布号拒绝普通用例。environmentProof 是 Runner 已回读校验的资源归属和权限；不用要求源码重复证明本机环境配置。资源的reversibleSharedWrites=true是部署方对该资源内既有对象可恢复写入的项目级授权，不再要求目标另列sharedTargets；真实对象唯一归属、快照及恢复仍由mutation校验，不能省略。日志/埋点不是业务变更。operation 阶段登记模板，实际对象归属和前后状态由 mutation 阶段校验；不要要求模板预先拥有运行时才产生的对象。',
       kind === 'mutation' ? '核对具体变更和恢复目标都与 verify 回读的唯一业务对象相同，归属声明能由快照与所引源码证明。创建时请求必须写入 businessKey 或对应的唯一关联；修改时请求 ID 必须来自该对象回读；恢复必须能还原快照且不影响其他对象。不能凭模型声明或仅同一资源判定目标一致；恢复触发的新副作用也要覆盖。'
@@ -429,8 +431,8 @@ export function createRequirementAgent(config, options) {
       const observe = async (channel, data, input, subject, measurement, lifecycle) => {
         const entry = await evidence(scope, channel + '运行观测', { channel, data, input, subject, measurement, lifecycle });
         const observationId = entry.path.replace('.json', '');
-        const record = { observationId, caseKey: key, channel, data: scope.checkOutput(sanitized(data)), input, subject,
-          at: new Date().toISOString(), evidence: entry, measurement, lifecycle, epoch: current.epoch ?? 0 };
+        const record = scope.checkOutput({ observationId, caseKey: key, channel, data: sanitized(data), input, subject,
+          at: new Date().toISOString(), evidence: entry, measurement, lifecycle, epoch: current.epoch ?? 0 });
         state.observations[observationId] = record;
         current.observations.push(observationId);
         await saveState();
@@ -505,6 +507,10 @@ export function createRequirementAgent(config, options) {
           const spec = { ...args, kind: 'database', access: 'read' };
           return pageData(await observe('database', await lookup(runtime, scope, spec, {}), args, args.subject ?? {}, undefined, readPhase), args);
         }
+        if (name === 'connection') {
+          const receipt = scope.checkOutput(await runtime.inspect(args.resource));
+          return { ...receipt, evidence: await evidence(scope, '资源连接与身份回执', { resource: args.resource, receipt }) };
+        }
         if (name === 'register') {
           const spec = args.spec;
           if (!new RegExp(operationNameSchema.pattern).test(args.name ?? '') || !['http', 'database', 'browser'].includes(spec?.kind)
@@ -573,6 +579,8 @@ export function createRequirementAgent(config, options) {
         if (name === 'mutate') {
           const spec = state.operations[args.operation], verifySpec = state.operations[args.verify?.operation], restoreSpec = state.operations[args.restore?.operation];
           if (!spec || spec.access === 'read' || !verifySpec || verifySpec.access !== 'read' || !restoreSpec || restoreSpec.access === 'read') throw agentError('Mutation, verification and restore operations must all be registered');
+          await scope.assertWrite?.(spec.resource, spec.access);
+          await scope.assertWrite?.(restoreSpec.resource, restoreSpec.access);
           for (const name of [args.operation, args.verify.operation, args.restore.operation]) await ensureOperation(name);
           if (!['prepare', 'scenario'].includes(args.purpose) || args.purpose === 'scenario' && !current.plan) throw agentError('Freeze a complete plan before scenario writes');
           if (args.purpose === 'prepare' && current.plan) throw agentError('Preparation after the scenario baseline invalidates it; restore and restart the affected case with test_measure action:restart');
@@ -844,6 +852,8 @@ export function createRequirementAgent(config, options) {
           const check = plan?.checks.find(check => check.id === args.checkId);
           if (!check) throw agentError('Check is not in the frozen plan');
           const observation = knownObservation(args.observationId);
+          const resource = observation.input?.resource ?? observation.measurement?.resource;
+          if (resource) await scope.assertRead?.(resource);
           if (observation.data.proof?.complete && observation.data.contract && isDeepStrictEqual(args.field, ['hash'])) args = { ...args, snapshot: true };
           if (observation.channel !== check.channel || check.channel === 'page' && !observation.data.screenshot) throw agentError('Actual evidence channel does not match the required channel');
           if (!preflight && check.beforeAction && (observation.lifecycle?.role !== 'independent_read'
@@ -980,8 +990,11 @@ export function createRequirementAgent(config, options) {
           if (check.kind === 'cleanup' && (!current.cleanup?.verified || mutations.some(item => !item.cleanup?.verified))) throw agentError('Process cleanup evidence requires test_cleanup and verified restoration first');
           const related = (check.relatedCheckIds ?? []).map(id => ({ check: current.plan.checks.find(check => check.id === id), attempts: current.assertions[id] ?? [] }));
           if (related.some(item => !item.attempts.some(attempt => attempt.compared))) throw agentError('Complete the related independent business checks before reviewing process evidence');
-          const observed = args.evidenceRefs.map(ref => {
-            const record = knownObservation(ref.observationId);
+          const observations = args.evidenceRefs.map(ref => ({ ref, record: knownObservation(ref.observationId) }));
+          for (const resource of new Set(observations.map(({ record }) => record.input?.resource ?? record.measurement?.resource).filter(Boolean))) {
+            await scope.assertRead?.(resource);
+          }
+          const observed = observations.map(({ ref, record }) => {
             return { observationId: record.observationId, at: record.at, channel: record.channel, query: measurement(record), input: record.input,
               fields: ref.fields.map(field => {
                 const value = observationAt(record.data, field);
@@ -1070,6 +1083,7 @@ export function createRequirementAgent(config, options) {
       const call = async (tool, input, callId) => {
         input ??= {}; input.args ??= {};
         try {
+          scope.checkOutput(input.args);
           const result = scope.checkOutput(await dispatch(tool.replace(/^test_/, ''), input.args));
           resolveGaps(current, tool, input.args);
           await evidence(scope, '工具调用', { callId, tool, args: input.args, result });
@@ -1084,23 +1098,27 @@ export function createRequirementAgent(config, options) {
           if (!error.safeMessage && typeof error.sqlMessage === 'string') {
             try { error.safeMessage = scope.checkOutput(sanitized(error.sqlMessage)); } catch { /* Keep credential-bearing diagnostics private. */ }
           }
-          const diagnostic = { callId, tool, args: input.args, error: error.code ?? error.name, details: error.gapDetails,
+          let safeArgs = input.args;
+          try { scope.checkOutput(safeArgs); } catch { safeArgs = {}; }
+          try { scope.checkOutput({ message: error.safeMessage, review: error.review, fields: error.fields, details: error.gapDetails, stage: error.stageEvidence }); }
+          catch (redaction) { error = redaction; }
+          const diagnostic = { callId, tool, args: safeArgs, error: error.code ?? error.name, details: error.gapDetails,
             message: error.safeMessage ?? (error instanceof RequirementWait ? error.message : 'Local connector failed; inspect resource and request parameters') };
           const cause = error.cause?.code ?? error.code;
           diagnostic.external = error instanceof RequirementWait && error.code === 'environment_scope'
             || ['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EHOSTUNREACH', 'ECONNRESET'].includes(cause);
           current.externalErrors ??= [];
-          if (diagnostic.external) current.externalErrors.push({ tool, resource: input.args.resource ?? state.operations[input.args.operation]?.resource, code: cause });
-          const refs = input.args.sourceRefs ?? state.operationProofs?.[input.args.operation ?? input.args.name]?.sourceRefs ?? [];
-          const observed = state.observations[input.args.observationId];
-          const resource = input.args.resource ?? observed?.input?.resource ?? state.operations[input.args.operation]?.resource;
+          if (diagnostic.external) current.externalErrors.push({ tool, resource: safeArgs.resource ?? state.operations[safeArgs.operation]?.resource, code: cause });
+          const refs = safeArgs.sourceRefs ?? state.operationProofs?.[safeArgs.operation ?? safeArgs.name]?.sourceRefs ?? [];
+          const observed = state.observations[safeArgs.observationId];
+          const resource = safeArgs.resource ?? observed?.input?.resource ?? state.operations[safeArgs.operation]?.resource;
           const evidenceVersion = digest([refs.map(ref => state.sources[ref]?.sha256).sort(),
             Object.values(state.schemas).filter(schema => schema.resource === resource).map(schema => [schema.table, schema.columns, schema.indexes]),
-            (input.args.evidenceRefs ?? []).map(ref => ref.fields.map(field => observationAt(state.observations[ref.observationId]?.data, field))),
+            (safeArgs.evidenceRefs ?? []).map(ref => ref.fields.map(field => observationAt(state.observations[ref.observationId]?.data, field))),
             current.epoch ?? 0]);
-          const gap = recordGap(current, { tool, args: input.args, error, evidenceVersion });
+          const gap = recordGap(current, { tool, args: safeArgs, error, evidenceVersion });
           diagnostic.gap = gap;
-          if (tool === 'test_plan') await evidence(scope, '结构化计划候选', { candidate: input.args, errors: error.fields ?? [diagnostic.message] });
+          if (tool === 'test_plan') await evidence(scope, '结构化计划候选', { candidate: safeArgs, errors: error.fields ?? [diagnostic.message] });
           current.errors.push(await evidence(scope, '工具错误', diagnostic)); await saveState();
           error.gap = gap;
           if (gap.unchanged >= 2) {
@@ -1131,7 +1149,7 @@ export function createRequirementAgent(config, options) {
           instructions: instructions + '\n' + scope.standards + '\n' + (scope.skillRules ?? ''), tools: requirementAgentTools, call,
           progress: scope.progress, onThread: async info => { current.model = info; await saveState(); },
           onDiagnostic: async info => { await evidence(scope, '模型执行事件', info); } });
-        let prompt = JSON.stringify({ identity: { jobId: scope.jobId, projectId: scope.projectId, environment: scope.environment,
+        let prompt = JSON.stringify(scope.checkOutput({ identity: { jobId: scope.jobId, projectId: scope.projectId, environment: scope.environment,
           caseId: scope.item.caseId, attempt: scope.attempt ?? 1 }, runPrefix: scope.runPrefix, resourceNames: scope.resourceNames, resourceCatalog: scope.resourceCatalog,
           sourceRoot: scope.sourceRoot, source: scope.source, headers: scope.headers, row: scope.row, repositories: scope.repositories,
           sourceIndex: Object.entries(state.sources).map(([sourceRef, entry]) => ({ sourceRef, path: entry.path, file: entry.file,
@@ -1140,7 +1158,7 @@ export function createRequirementAgent(config, options) {
           priorAttemptReference,
           projectKnowledge: config.knowledgeFile ? await readJson(config.knowledgeFile) : undefined,
           knowledgePolicy: 'existingOperations 是本Job已审核的操作，可直接复用同一契约；需改变契约才另起名称登记。projectKnowledge 是跨任务线索，须核实当前源码和资源再登记。实时对象和基线必须本次回读，不从历史推断。',
-          recovery: current, mutations: scope.mutations });
+          recovery: current, mutations: scope.mutations }));
         const seen = new Set();
         while (!finished) {
           const answer = await model.turn(prompt);

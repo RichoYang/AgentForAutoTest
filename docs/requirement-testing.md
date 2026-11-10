@@ -17,7 +17,7 @@
 | `topicBindings` | 可选。数组项填写已核实的 `chatId`、根消息 `rootId` 和完整 `documentUrl`。只将这些话题交给当前项目 |
 | `document.profile`, `document.appId`, `document.openId`, `document.configDir`, `document.domain` | 已登录的文档用户及认证目录，独立于机器人。必须具有需求、模板、目录和新表的实际权限 |
 | `templateUrl`, `projectFolderUrl`, `timeZone` | 参考工作簿、项目版本目录、月份计算时区。按 `YYYY年MM月版本` 复用或建子目录，标题使用需求名和版本后缀 |
-| `environment` | `name` 限 SIT/UAT，`platform`、`iniPath`、`resources` 配置明确的本项目资源节及 `read` 或 `full_crud` 范围，`lockKey` 配置共享资源锁 |
+| `environment` | `name` 限 SIT/UAT，`platform`、`iniPath`、`resources` 配置明确的本项目资源节及 `read`、`create_update_read` 或 `full_crud` 范围，`lockKey` 配置共享资源锁 |
 | `environment.aliases` | 同一套已验证测试资源可登记另一个 SIT/UAT 名称。消息中的「测试环境」选用项目绑定，原请求名称和实际绑定分别记录 |
 | `environment.iniSha256` | 可选。固定资源 INI 的 UTF-8 内容摘要，执行层在加载资源时核对 |
 | `allowedProjectFolderUrls`, `allowedReportDirectories`, `allowedInputDirectories` | 可按任务指定的飞书用例目录、本机结果目录和本机材料目录。部署者登记项目内批准的完整链接或绝对路径 |
@@ -31,7 +31,7 @@
 | `execution.caseReleases` | 可选的用例版本前置，按原 caseId 登记组件和精确版本标识 |
 | `analysisRepositories` | 项目源仓与分支。执行前记录配置分支提交，报告另列运行版本证据 |
 
-凭据只在受控执行层读取 `config.ini` 对应节，不放入项目配置、提示词、日志、报告或群回复。仅允许配置为 `configured` 和 `ai_access=allowed` 的资源；写操作还要求本项目配置和 INI 均为 `full_crud`。项目适配器是本地受信任代码，不应由需求文本、模型输出或群成员上传。适配器本身应固定 UI/API/SQL/任务入口，限制业务键，阻止 DDL 和未知归属记录，并完成证据脱敏。
+凭据只在受控执行层按项目读取，操作权限取 INI 与项目绑定的交集。接入示例、受控连接探针、配置变化处理和故障诊断见[受控 INI 接入](controlled-ini.md)。项目适配器是本地受信任代码，由部署者登记。适配器应固定 UI/API/SQL/任务入口，限制业务键，阻止 DDL 和未知归属记录，并完成证据脱敏。
 
 ## 在同一群使用独立的话题项目
 

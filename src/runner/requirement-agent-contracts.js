@@ -44,6 +44,7 @@ const mutation = object({ ...invocation, id: string, purpose: enumeration('prepa
   restore: object({ operation: string, input: map }, ['operation']), cleanupAction: string, shared: { type: 'boolean' } },
 ['id', 'purpose', 'operation', 'businessKey', 'ownership', 'verify', 'restore', 'cleanupAction']);
 export const requirementToolSchemas = {
+  connection: object({ resource: string }, ['resource']),
   source: object({ action: enumeration('files', 'search', 'read', 'refs', 'history', 'show'), path: { type: 'string' }, pattern: string,
     start: { type: 'integer', minimum: 1 }, end: { type: 'integer', minimum: 1 }, ref: string, file: string, ...page }, ['action']),
   schema: object({ resource: string, database: string, table: string }, ['resource']),

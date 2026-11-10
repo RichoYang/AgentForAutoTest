@@ -1,5 +1,4 @@
 import { lstat, readFile, unlink } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { hashFile } from '../shared/file-digest.js';
@@ -10,105 +9,10 @@ import { caseReleaseRequirement, matchesCaseRelease } from './requirement-releas
 import { createRequirementAgent } from './requirement-agent.js';
 import { verifiedMutationCleanup } from './requirement-mutation-measurement.js';
 
+import { requirementResources } from './requirement-resources.js';
+export { requirementResources } from './requirement-resources.js';
+
 const writeOperations = ['create', 'update', 'delete', 'trigger'];
-const credentialField = /password|token|secret|cookie|connection_string/i;
-
-function iniResources(text) {
-  const entries = new Map();
-  let current;
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || /^[;#]/.test(line)) continue;
-    if (line.startsWith('[') && line.endsWith(']')) {
-      const name = line.slice(1, -1);
-      if (entries.has(name)) throw new RequirementWait('environment_config', '测试资源 INI 含重复配置节。');
-      current = Object.create(null);
-      entries.set(name, current);
-    } else if (current && line.includes('=')) {
-      const index = line.indexOf('=');
-      const name = line.slice(0, index).trim();
-      if (Object.hasOwn(current, name)) throw new RequirementWait('environment_config', '测试资源 INI 含重复字段。');
-      current[name] = line.slice(index + 1).trim();
-    }
-  }
-  return entries;
-}
-
-export async function requirementResources(environment, { allowUnavailable = false } = {}) {
-  const name = environment?.name;
-  if (!/^(SIT|UAT)$/.test(name) || !/^[a-zA-Z0-9]+$/.test(environment.platform ?? '')
-    || !path.isAbsolute(environment.iniPath) || !Object.keys(environment.resources ?? {}).length) {
-    throw new RequirementWait('environment_config', '测试必须绑定有明确资源范围的 SIT 或 UAT 环境。');
-  }
-  const prefix = environment.platform.toLowerCase() + '.' + name.toLowerCase() + '.';
-  const ini = await readFile(environment.iniPath, 'utf8').catch(() => {
-    throw new RequirementWait('environment_config', '无法读取本项目的非生产资源配置。');
-  });
-  if (environment.iniSha256 !== undefined && createHash('sha256').update(ini).digest('hex') !== environment.iniSha256) {
-    throw new RequirementWait('environment_config', '已固定的非生产资源配置摘要不符。');
-  }
-  const entries = iniResources(ini);
-  const permitted = new Map();
-  const secrets = new Set();
-  const valid = (section, binding) => binding?.section?.toLowerCase().startsWith(prefix) && section
-    && section.environment?.toUpperCase() === name
-    && section.status === 'configured' && section.ai_access === 'allowed'
-    && ['read', 'full_crud'].includes(binding.scope)
-    && ['full_crud', 'read_only', 'query_only', 'create_update_read'].includes(section.ai_operation_mode)
-    && (binding.scope !== 'full_crud' || section.ai_operation_mode === 'full_crud');
-  for (const [key, binding] of Object.entries(environment.resources)) {
-    const section = entries.get(binding?.section);
-    if (!valid(section, binding)) {
-      if (allowUnavailable) continue;
-      throw new RequirementWait('environment_config', '资源权限与已绑定测试环境不符：' + key);
-    }
-    permitted.set(key, { section, binding });
-    for (const [field, value] of Object.entries(section)) {
-      if (credentialField.test(field) && value.length >= 4) secrets.add(value);
-    }
-  }
-  if (!permitted.size) throw new RequirementWait('environment_config', '没有归属和权限明确的非生产测试资源。');
-  const denied = key => new RequirementWait('environment_scope', '资源归属或操作权限未通过非生产环境校验：' + key);
-  const assertWrite = async (key, operation) => {
-    const item = permitted.get(key);
-    if (!item || item.binding.scope !== 'full_crud' || !writeOperations.includes(operation)) throw denied(key);
-    let current;
-    try { current = iniResources(await readFile(environment.iniPath, 'utf8')).get(item.binding.section); }
-    catch { throw denied(key); }
-    if (!valid(current, item.binding) || digest(current) !== digest(item.section)) throw denied(key);
-  };
-  return {
-    names: [...permitted.keys()],
-    catalog: Object.fromEntries([...permitted].map(([key, { section, binding }]) => [key, {
-      section: binding.section, scope: binding.scope, environment: section.environment,
-      resource_type: section.resource_type, base_url: section.base_url, management_url: section.management_url,
-      database_name: section.database_name, status: section.status, ai_access: section.ai_access,
-      ai_operation_mode: section.ai_operation_mode,
-      reversibleSharedWrites: binding.reversibleSharedWrites === true, sharedTargets: binding.sharedTargets ?? [],
-    }])),
-    assertWrite,
-    identity(key) {
-      const item = permitted.get(key);
-      if (!item) return null;
-      const { section, binding } = item;
-      return digest([binding.section, Object.entries(section).filter(([field]) => !credentialField.test(field)).sort()]);
-    },
-    checkOutput(value) {
-      const encoded = JSON.stringify(value);
-      if (encoded && [...secrets].some(secret => encoded.includes(JSON.stringify(secret).slice(1, -1)))) {
-        throw new RequirementWait('execution_evidence', '适配器回执含未脱敏凭据，结果未登记。');
-      }
-      return value;
-    },
-    async use(key, operation, fn) {
-      const item = permitted.get(key);
-      if (!item) throw denied(key);
-      if (operation !== 'read') await assertWrite(key, operation);
-      // Only the locally pinned, trusted adapter receives the selected resource. Never serialize it.
-      return fn({ ...item.section });
-    },
-  };
-}
 
 export async function loadAdapter(spec) {
   if (!spec || !path.isAbsolute(spec.path) || !/^[a-f0-9]{64}$/.test(spec.sha256)) {
@@ -122,17 +26,17 @@ export async function loadAdapter(spec) {
   return adapter;
 }
 
-export async function executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, save, progress, codexBin, plan, project, agentModel, review }) {
+export async function executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, dataDir, save, progress, codexBin, plan, project, agentModel, review }) {
   // An upgrade must never convert a terminal cancellation into an implicit retry.
   // The explicit cleanup path below remains available without running cases.
   if (job.status === 'cancelled' && !job.requirement?.cleanupOnly) {
     throw new RequirementWait('requirement_cancelled', '任务已取消；版本升级不恢复执行，历史结果和清理记录保持。');
   }
   const environment = settings.environment;
-  const resources = await requirementResources(environment, { allowUnavailable: true });
+  const resources = await requirementResources(environment, { allowUnavailable: true, dataDir });
   const adapter = settings.adapter ? await loadAdapter(settings.adapter) : settings.execution
     ? (settings.execution.mode === 'agent' ? createRequirementAgent : createRequirementAdapter)(settings.execution, { workDir, codexBin, plan, agentModel, review }) : await loadAdapter();
-  const adapterBinding = settings.adapter ?? [settings.execution, await Promise.all(['adapter', 'assertions', 'release', 'subject', 'plan',
+  const adapterBinding = settings.adapter ?? [settings.execution, await Promise.all(['adapter', 'assertions', 'release', 'subject', 'plan', 'resources',
     ...(settings.execution.mode === 'agent' ? ['agent', 'agent-model', 'agent-resources', 'agent-assertion-binding', 'agent-contracts', 'agent-progress', 'snapshot', 'mutation-measurement'] : [])]
     .map(name => hashFile(fileURLToPath(new URL('./requirement-' + name + '.js', import.meta.url)))))];
   const currentBinding = digest([adapterBinding, environment.name, environment.platform, environment.resources, environment.lockKey]);
@@ -228,11 +132,20 @@ export async function executeCases({ job, settings, journal, source, index, mani
     return identity;
   };
   const useRead = async (key, fn) => {
-    checkResourceIdentity(key);
-    return resources.use(key, 'read', fn);
+    const identity = checkResourceIdentity(key);
+    return resources.use(key, 'read', async resource => {
+      journal.executionResourceBindings ??= {};
+      if (!Object.hasOwn(journal.executionResourceBindings, key)) {
+        journal.executionResourceBindings[key] = identity;
+        await save();
+      }
+      return fn(resource);
+    });
   };
   const standards = regression.files['references/execution-standard.md'];
-  const scope = { source, index, manifest, reports: reportDir, standards, useRead, checkOutput: resources.checkOutput,
+  const scope = { source, index, manifest, reports: reportDir, standards, useRead, checkOutput: resources.checkOutput, rememberSecret: resources.rememberSecret,
+    assertRead: async key => { checkResourceIdentity(key); await resources.assertRead(key); },
+    assertWrite: async (key, operation) => { checkResourceIdentity(key); await resources.assertWrite(key, operation); },
     jobId: job.id, sourceRoot: project?.repoPath, resourceNames: resources.names, resourceCatalog: resources.catalog, resourceIdentity: resources.identity, progress,
     skillRules: regression.files['SKILL.md'],
     runPrefix: 'AOS_' + job.id.replaceAll('-', '_'), projectId: job.projectId, environment: environment.name,

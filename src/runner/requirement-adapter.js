@@ -2,6 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import mysql from 'mysql2/promise';
 import { chromium } from 'playwright';
+import { managementReadAllowed, scopedDatabase } from './requirement-resources.js';
 import { askNoTools } from './requirement-generation.js';
 import { digest, RequirementWait } from './requirement-feishu.js';
 import { readJson, writeJson } from './requirement-files.js';
@@ -67,6 +68,7 @@ async function session(resource, login, run, effect, queries = new Map()) {
       const request = route.request();
       if (allowLogin && isLogin(request)) {
         allowLogin = false;
+        if (!managementReadAllowed(resource, 'POST', endpoint.pathname)) return block(route, '管理接口登录路径未通过只读校验');
         return guardedRequest(route);
       }
       const requestUrl = new URL(request.url());
@@ -78,6 +80,7 @@ async function session(resource, login, run, effect, queries = new Map()) {
         allowEffect = false;
         return guardedRequest(route);
       }
+      if (!managementReadAllowed(resource, request.method(), requestUrl.pathname)) return block(route, '管理接口请求未通过只读校验');
       const matches = [...queries.values()].filter(item => request.method() === 'POST' && request.url() === item.url.href);
       if (matches.length) {
         let payload;
@@ -156,7 +159,7 @@ function params(spec, input) {
   return input;
 }
 
-async function request(resource, spec, input, login, token) {
+async function request(resource, spec, input, login, token, readOnly) {
   const url = target(resource, spec.path);
   const headers = { accept: 'application/json' };
   if (token) headers[login.header] = token;
@@ -164,6 +167,9 @@ async function request(resource, spec, input, login, token) {
     headers.authorization = 'Basic ' + Buffer.from(resource.username + ':' + resource.password).toString('base64');
   }
   const method = spec.method ?? 'GET';
+  if (readOnly && !managementReadAllowed(resource, method, url.pathname)) {
+    throw new RequirementWait('environment_scope', '管理接口请求未通过只读校验');
+  }
   if (method === 'GET' || method === 'DELETE') {
     for (const [key, value] of Object.entries(input)) url.searchParams.set(key, String(value));
   }
@@ -188,7 +194,7 @@ async function mysqlRead(resource, spec, input) {
   if (resource.resource_type !== 'mysql') throw new Error('数据库资源类型不符');
   const connection = await mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306,
     user: resource.username, password: resource.password,
-    database: spec.database ?? (resource.database_name === 'not_specified' ? undefined : resource.database_name),
+    database: scopedDatabase(resource, spec.database),
     connectTimeout: 8000 });
   try {
     if (spec.healthOnly) {
@@ -206,10 +212,10 @@ async function mysqlRead(resource, spec, input) {
   }
 }
 
-async function callResource(resource, spec, input, login, effect, operations = {}) {
+async function callResource(resource, spec, input, login, effect, operations = {}, readOnly = true) {
   if (spec.kind === 'mysql') return mysqlRead(resource, spec, input);
   if (spec.kind === 'http' || spec.kind === 'csv') {
-    const invoke = ({ token } = {}) => request(resource, spec, input, login, token);
+    const invoke = ({ token } = {}) => request(resource, spec, input, login, token, readOnly);
     return spec.authenticated ? session(resource, login, invoke) : invoke();
   }
   if (spec.kind === 'browser') return session(resource, spec.authenticated === false ? null : login, async ({ page, submit, observe }) => {
@@ -449,9 +455,11 @@ export function createRequirementAdapter(config, options) {
           const checkpoint = scope.completedSteps?.[index];
           if (checkpoint) {
             if (checkpoint.inputHash !== digest(input)) throw new RequirementWait('execution_plan', '已执行步骤的输入与检查点不一致。');
+            await scope.assertRead?.(spec.resource);
             data = checkpoint.data;
             if (checkpoint.mutationEvidence) evidence.push(...checkpoint.mutationEvidence);
           } else if (spec.kind === 'fixture') {
+            await scope.assertWrite?.(spec.resource, 'delete');
             params(spec, input);
             const old = scope.mutations.find(record => record.intent.id === String(index));
             const snapshot = old?.intent.snapshot ?? await scope.useRead(spec.resource, resource => lookup(spec, key, resource));
@@ -460,7 +468,7 @@ export function createRequirementAdapter(config, options) {
               resource: spec.resource, operation: 'create', businessKey: key, beforeHash: old?.intent.beforeHash ?? digest(snapshot), snapshot,
               inputHash: digest(input), cleanupAction: '删除唯一运行夹具并回读' }, async resource => {
               const effect = spec.create.kind === 'browser' ? { ...spec.create.effect, key } : undefined;
-              await callResource(resource, { resource: spec.resource, ...spec.create }, fixtureInputs(spec, key, input), login, effect, operations);
+              await callResource(resource, { resource: spec.resource, ...spec.create }, fixtureInputs(spec, key, input), login, effect, operations, false);
               const after = await lookup(spec, key, resource);
               if (!after.exists) throw new Error('创建回执缺少运行夹具');
               return { observed: after, evidence: [await record(scope, [...id, 'mutation'], after)] };
@@ -582,7 +590,7 @@ export function createRequirementAdapter(config, options) {
               const observation = await record(scope, [mutation.key, 'before-cleanup'], before);
               await scope.saveCleanup?.(mutation.key, { before, beforeEvidence: [observation] });
             }
-            if (before.exists) await callResource(resource, spec.remove, fixtureInputs(spec, intent.businessKey), login);
+            if (before.exists) await callResource(resource, spec.remove, fixtureInputs(spec, intent.businessKey), login, undefined, {}, false);
             const after = await lookup(spec, intent.businessKey, resource);
             if (after.exists || digest(after) !== intent.beforeHash) throw new Error('清理回读与前置快照不同');
             return after;

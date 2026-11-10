@@ -51,7 +51,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
   try {
     if (job.requirement.topicBinding) {
       // Resolve the same resource contract used by execution before invoking any model.
-      const resources = await requirementResources(settings.environment);
+      const resources = await requirementResources(settings.environment, { allowUnavailable: true, dataDir: config.dataDir });
       journal.topicResources = Object.fromEntries(resources.names.map(name => [name, resources.identity(name)]));
       journal.repositories ??= await sourceBaseline(project);
     }
@@ -208,11 +208,11 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       journal.repositories = await sourceBaseline(project);
       await save();
     }
-    await executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, save, progress, codexBin: config.codexBin,
+    await executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, dataDir: config.dataDir, save, progress, codexBin: config.codexBin,
       plan: dependencies.plan, project, agentModel: dependencies.agentModel, review: dependencies.review });
 
     if (!settings.adapter && settings.execution?.mode === 'agent' && Object.values(journal.results ?? {}).some(result => result.checkCoverage?.processTotal)) {
-      const resources = await requirementResources(settings.environment, { allowUnavailable: true });
+      const resources = await requirementResources(settings.environment, { allowUnavailable: true, dataDir: config.dataDir });
       const agent = createRequirementAgent(settings.execution, { workDir, codexBin: config.codexBin, review: dependencies.review });
       const prior = journal.processFinalization;
       journal.processFinalization = await agent.supplementProcesses({ index, jobId: job.id, projectId: job.projectId,

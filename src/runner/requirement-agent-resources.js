@@ -9,6 +9,7 @@ import { observationAt } from './requirement-assertions.js';
 import { waitBusinessReady } from './requirement-adapter.js';
 import { digest } from './requirement-feishu.js';
 import { buildRecordSnapshot } from './requirement-snapshot.js';
+import { credentialField, managementReadAllowed, scopedDatabase } from './requirement-resources.js';
 
 const exec = promisify(execFile);
 export const agentError = message => Object.assign(new Error(message), { safeMessage: message });
@@ -73,7 +74,7 @@ export async function readSource(root, args) {
   const target = await realpath(path.resolve(root, args.path ?? '.'));
   const relative = path.relative(actualRoot, target);
   if (relative.startsWith('..') || path.isAbsolute(relative)) throw agentError('Source path is outside this project');
-  const sensitivePath = /(?:^|[\\/])(?:\.git|\.env[^\\/]*|\.npmrc|settings\.xml|[^\\/]+\.ini|[^\\/]+\.local\.[^\\/]+)(?:[\\/]|$)/i;
+  const sensitivePath = /(?:^|[\\/])(?:\.git|\.env[^\\/]*|\.npmrc|settings\.xml|requirement-resource-bindings|[^\\/]+\.ini|[^\\/]+\.local\.[^\\/]+)(?:[\\/]|$)/i;
   if (sensitivePath.test(relative) || sensitivePath.test(args.file ?? '')) throw agentError('Credentials and repository internals are not source-tool output');
   if (['refs', 'history', 'show'].includes(args.action)) {
     if (args.ref && (!/^[a-zA-Z0-9_./-]+$/.test(args.ref) || args.ref.startsWith('-'))) throw agentError('Invalid Git ref');
@@ -89,7 +90,7 @@ export async function readSource(root, args) {
   if (args.action === 'search' || args.action === 'files') {
     // Workspace VCS rules often ignore independently versioned business repos.
     const flags = ['--no-ignore-vcs', '--glob', '!**/node_modules/**', '--glob', '!**/.git/**', '--glob', '!*.local.*', '--glob', '!settings.xml',
-      '--glob', '!*.ini', '--glob', '!*.env*', '--glob', '!.npmrc'];
+      '--glob', '!*.ini', '--glob', '!*.env*', '--glob', '!.npmrc', '--glob', '!**/requirement-resource-bindings/**'];
     // execFile keeps stdin as a pipe. An explicit path makes rg search the source
     // tree instead of waiting forever for input from that still-open pipe.
     const directory = (await stat(target)).isDirectory();
@@ -126,8 +127,8 @@ export function sanitized(value) {
   if (value instanceof Date) return value.toJSON();
   if (Array.isArray(value)) return value.map(sanitized);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
-    [key, /password|(?:^|_)pwd|token|authorization|cookie|secret|connection_string/i.test(key) ? '[REDACTED]' : sanitized(entry)]));
-  if (typeof value === 'string') return value.replace(/((?:password|pwd|access_token|refresh_token|app_secret|client_secret|authorization)\s*["']?\s*[:=]\s*)[^\r\n,;]+/gi, '$1[REDACTED]');
+    [key, credentialField.test(key) ? '[REDACTED]' : sanitized(entry)]));
+  if (typeof value === 'string') return value.replace(/((?:[a-z_]*(?:password|token|secret|cookie)|pwd|authorization|(?:admin|private|api|access)[_-]?key|connection[_-]?string)\s*["']?\s*[:=]\s*)[^\r\n,;]+/gi, '$1[REDACTED]');
   return value;
 }
 
@@ -136,6 +137,16 @@ export function createAgentResources(config, scope) {
   const authentication = new Map();
   const schemas = new Map();
   const operations = () => scope.state.operations;
+  const loginFor = resource => config.logins?.[resource] ?? (resource === (config.login?.resource ?? 'platform') ? config.login : undefined);
+  const identityFrom = (body, fields, token) => Object.fromEntries(Object.entries(fields ?? {}).map(([key, field]) => {
+    if (!Array.isArray(field) || !field.length) throw agentError('Configured login identity field must be a nonempty path: ' + key);
+    const value = observationAt(body, field);
+    if (credentialField.test(key) || credentialField.test(field.at(-1)) || !['string', 'number'].includes(typeof value) || value === '' || value === token) {
+      throw agentError('Configured login identity field is missing or is not a public identity: ' + key);
+    }
+    scope.checkOutput?.(String(value));
+    return [key, String(value)];
+  }));
   async function send(resource, method, url, transport, dispatch) {
     const complete = await scope.startRequest?.({ resource, method, path: url.pathname, transport });
     let response;
@@ -147,7 +158,7 @@ export function createAgentResources(config, scope) {
   async function connect(resource, database) {
     if (resource.resource_type !== 'mysql') throw agentError('Resource is not MySQL');
     return mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
-      password: resource.password, database: database || (resource.database_name === 'not_specified' ? undefined : resource.database_name),
+      password: resource.password, database: scopedDatabase(resource, database),
       supportBigNumbers: true, bigNumberStrings: true, decimalNumbers: false, dateStrings: true,
       // We do not use query attributes; early 8.0 implementations interpret
       // the execute attribute flag as a server cursor and never send its rows.
@@ -207,10 +218,12 @@ export function createAgentResources(config, scope) {
 
   async function browserSession(resourceName, resource) {
     if (sessions.has(resourceName)) return sessions.get(resourceName);
+    const login = loginFor(resourceName);
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ serviceWorkers: 'block' });
     const page = await context.newPage();
     const state = { browser, context, page, token: null, network: [], effect: null, login: false, ready: null, fault: null };
+    const entryPath = new URL(resource.entry_url ?? resource.base_url ?? resource.management_url).pathname;
     sessions.set(resourceName, state);
     await context.route('**/*', async route => {
       const request = route.request();
@@ -218,7 +231,21 @@ export function createAgentResources(config, scope) {
         const url = new URL(request.url());
         const origin = resourceURL(resource, '/').origin;
         if (url.origin !== origin) throw agentError('Browser request is outside the bound resource');
+        await scope.assertRead?.(resourceName);
         const method = request.method();
+        const isLogin = state.login && login && url.pathname === login.path && method === 'POST';
+        const effect = state.effect && state.effect.path === url.pathname && state.effect.method === method;
+        if (!effect && !managementReadAllowed(resource, method, url.pathname)) {
+          throw agentError('This management request cannot be registered as read-only');
+        }
+        if (scope.connectionProbeOnly) {
+          const loginRequest = state.login && !state.loginSent && method === 'POST' && url.pathname === login?.path;
+          const entry = method === 'GET' && request.resourceType() === 'document' && !state.loginSent && url.pathname === entryPath;
+          const asset = method === 'GET' && ['stylesheet', 'script', 'font', 'image'].includes(request.resourceType())
+            && /\.(?:css|js|mjs|woff2?|ttf|ico|svg|png|jpe?g|webp)$/i.test(url.pathname);
+          if (!loginRequest && !entry && !asset) return route.abort();
+          if (loginRequest) state.loginSent = true;
+        }
         const fault = state.fault;
         if (fault && fault.path === url.pathname && fault.method === method) {
           state.network.push({ path: url.pathname, method, fault: { ...fault, simulated: true } });
@@ -227,10 +254,8 @@ export function createAgentResources(config, scope) {
           if (fault.status) return route.fulfill({ status: fault.status, contentType: 'application/json', body: JSON.stringify(fault.body ?? {}) });
         }
         if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-          const isLogin = state.login && config.login && url.pathname === config.login.path && method === 'POST';
           const read = Object.values(operations()).find(op => op.resource === resourceName && op.kind === 'http'
             && op.access === 'read' && op.method === method && op.path === url.pathname);
-          const effect = state.effect && state.effect.path === url.pathname && state.effect.method === method;
           if (!isLogin && !read && !effect) throw agentError('Browser request needs a verified read contract, or test_mutate with a registered browser goto/click operation and matching effect: '
             + method + ' ' + url.pathname + '. Registering an HTTP write alone does not authorize browser writes.');
           if (effect) {
@@ -242,7 +267,7 @@ export function createAgentResources(config, scope) {
         }
         const response = await send(resourceName, method, url, 'browser', () => route.fetch({ maxRedirects: 0, maxRetries: 0 }));
         if (response.status() >= 300 && response.status() < 400) throw agentError('Redirect requires a separately verified endpoint');
-        if (['xhr', 'fetch'].includes(request.resourceType())) {
+        if (['xhr', 'fetch'].includes(request.resourceType()) && !(state.login && url.pathname === login?.path)) {
           let body;
           try { body = await response.json(); } catch { body = null; }
           state.network.push({ path: url.pathname, method, status: response.status(), body: sanitized(body) });
@@ -253,31 +278,28 @@ export function createAgentResources(config, scope) {
         await route.abort().catch(() => {});
       }
     });
-    if (config.login && resourceName === (config.login.resource ?? 'platform')) {
+    if (login) {
       state.login = true;
       try {
-        await page.goto(resource.base_url, { waitUntil: 'domcontentloaded' });
-        await page.locator(config.login.accountSelector ?? 'input[placeholder="请输入用户名"]').fill(resource.account ?? resource.username);
-        await page.locator(config.login.passwordSelector ?? 'input[type="password"]').fill(resource.password);
+        await page.goto(resource.entry_url ?? resource.base_url, { waitUntil: 'domcontentloaded' });
+        await page.locator(login.accountSelector ?? 'input[placeholder="请输入用户名"]').fill(resource.account ?? resource.username);
+        await page.locator(login.passwordSelector ?? 'input[type="password"]').fill(resource.password);
         const [response] = await Promise.all([
-          page.waitForResponse(response => new URL(response.url()).pathname === config.login.path && response.request().method() === 'POST'),
-          config.login.submitSelector ? page.locator(config.login.submitSelector).click() : page.getByRole('button', { name: /^登\s*录$/ }).click(),
+          page.waitForResponse(response => new URL(response.url()).pathname === login.path && response.request().method() === 'POST'),
+          login.submitSelector ? page.locator(login.submitSelector).click() : page.getByRole('button', { name: /^登\s*录$/ }).click(),
         ]);
         const body = await response.json();
-        state.token = (config.login.tokenFields ?? [config.login.tokenField]).map(field => observationAt(body, field)).find(Boolean);
+        state.token = (login.tokenFields ?? [login.tokenField]).map(field => observationAt(body, field)).find(Boolean);
         if (!response.ok() || !state.token) throw agentError('Configured login did not establish a session');
-        const identity = {};
-        for (const [key, field] of Object.entries(config.login.identityFields ?? {})) {
-          if (!Array.isArray(field) || !field.length) throw agentError('Configured login identity field must be a nonempty path: ' + key);
-          const value = observationAt(body, field);
-          if (/password|token|secret|cookie|authorization/i.test(key + ' ' + field.at(-1))
-            || !['string', 'number'].includes(typeof value) || value === '' || value === state.token) {
-            throw agentError('Configured login identity field is missing or is not a public identity: ' + key);
-          }
-          identity[key] = String(value);
-        }
-        state.authentication = { resource: resourceName, at: new Date().toISOString(), path: config.login.path,
-          authenticated: true, identity, response: sanitized(body) };
+        scope.rememberSecret?.(state.token);
+        const identity = identityFrom(body, login.identityFields, state.token);
+        state.authentication = { resource: resourceName, at: new Date().toISOString(), path: login.path,
+          authenticated: true, identity };
+        const publicResponse = sanitized(body);
+        try {
+          scope.checkOutput?.(publicResponse);
+          if (!JSON.stringify(publicResponse).includes(state.token)) state.authentication.response = publicResponse;
+        } catch { /* Keep the selected public identity even if the upstream body echoes a secret. */ }
       } catch (error) {
         sessions.delete(resourceName);
         await browser.close();
@@ -293,6 +315,11 @@ export function createAgentResources(config, scope) {
     const query = resolveInput(spec.query ?? {}, input);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
     const headers = { accept: 'application/json' };
+    const method = (spec.method ?? 'GET').toUpperCase();
+    if (spec.access === 'read' && (!['GET', 'HEAD', 'OPTIONS', 'POST'].includes(method)
+      || !managementReadAllowed(resource, method, url.pathname))) {
+      throw agentError('This management request cannot be registered as read-only');
+    }
     const auth = config.resourceAuth?.[spec.resource];
     if (auth && spec.authenticated !== false) {
       if (auth.kind !== 'form') throw agentError('Unsupported configured authentication type');
@@ -303,24 +330,28 @@ export function createAgentResources(config, scope) {
           fields.set(field, resource[credential]);
         }
         const authUrl = resourceURL(resource, auth.path);
+        if (!managementReadAllowed(resource, 'POST', authUrl.pathname)) throw agentError('Configured authentication path is not read-safe');
         const response = await send(spec.resource, 'POST', authUrl, 'http', () => fetch(authUrl, {
           method: 'POST', body: fields, redirect: 'manual', signal: AbortSignal.timeout(30000) }));
-        const cookies = response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+        const cookiePairs = response.headers.getSetCookie().map(value => value.split(';')[0]);
+        for (const pair of cookiePairs) scope.rememberSecret?.(pair.slice(pair.indexOf('=') + 1));
+        const cookies = cookiePairs.join('; ');
         if (response.status >= 400 || !cookies) throw agentError('Configured resource authentication did not establish a session');
         authentication.set(spec.resource, cookies);
       }
       headers.cookie = authentication.get(spec.resource);
     }
-    if (spec.authenticated !== false && config.login && spec.resource === (config.login.resource ?? 'platform')) {
+    const login = loginFor(spec.resource);
+    if (spec.authenticated !== false && login) {
       const session = await browserSession(spec.resource, resource);
-      headers[config.login.header] = session.token;
+      headers[login.header] = session.token;
     }
     if (resource.resource_type === 'rabbitmq') headers.authorization = 'Basic ' + Buffer.from(resource.username + ':' + resource.password).toString('base64');
     const body = resolveInput(spec.body, input);
-    const method = spec.method ?? 'GET';
     const response = await send(spec.resource, method, url, 'http', () => fetch(url, {
       method, headers: { ...headers, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(spec.timeoutMs ?? 30000) }));
+    for (const value of response.headers.getSetCookie()) scope.rememberSecret?.(value.split(';')[0].split('=').slice(1).join('='));
     const text = await response.text();
     let data; try { data = JSON.parse(text); } catch { data = text; }
     return { status: response.status, body: sanitized(data), path: url.pathname, method,
@@ -354,8 +385,16 @@ export function createAgentResources(config, scope) {
   }
   return {
     async authenticationEvidence(resourceName, resource) {
-      if (!config.login || resourceName !== (config.login.resource ?? 'platform')) return null;
-      return (await browserSession(resourceName, resource)).authentication;
+      const login = loginFor(resourceName);
+      if (!login) return null;
+      const session = await browserSession(resourceName, resource);
+      if (!login.identityProbe) return session.authentication;
+      const url = resourceURL(resource, login.identityProbe.path);
+      const response = await send(resourceName, 'GET', url, 'http', () => fetch(url, { headers: { [login.header]: session.token },
+        redirect: 'manual', signal: AbortSignal.timeout(15000) }));
+      if (!response.ok) throw agentError('Configured session identity endpoint did not verify the current session');
+      return { resource: resourceName, at: new Date().toISOString(), path: url.pathname, authenticated: true,
+        identity: identityFrom(await response.json(), login.identityProbe.identityFields, session.token) };
     },
     async verifyAuthentication(resourceName, resource, expected) {
       if (!expected || !Object.keys(expected.identity ?? {}).length) return;
@@ -363,6 +402,40 @@ export function createAgentResources(config, scope) {
       if (!actual || digest(actual.identity) !== digest(expected.identity)) throw agentError('Authenticated identity changed; reconcile the original target before writing or restoring');
     },
     performSpec,
+    async inspect(resourceName) {
+      return scope.useRead(resourceName, async resource => {
+        if (resource.resource_type === 'mysql') {
+          const connection = await connect(resource);
+          try {
+            const [[receipt]] = await connection.query('SELECT 1 AS ready, CURRENT_USER() AS principal, DATABASE() AS databaseName');
+            const [grants] = await connection.query('SHOW GRANTS FOR CURRENT_USER');
+            const rules = grants.flatMap(row => Object.values(row));
+            return { connector: 'mysql', connected: String(receipt.ready) === '1',
+              principalMatchesConfiguredUser: receipt.principal.split('@')[0] === resource.username, database: receipt.databaseName,
+              globalPrivilege: rules.some(rule => !/^GRANT USAGE ON /i.test(rule) && /\bON \*\.\*/i.test(rule)),
+              grantEntries: rules.length };
+          } finally { await connection.end(); }
+        }
+        if (resource.resource_type === 'rabbitmq') {
+          const base = new URL(resource.management_url ?? resource.base_url);
+          const prefix = base.pathname.replace(/\/$/, '');
+          const request = suffix => http({ kind: 'http', access: 'read', resource: resourceName, path: prefix + suffix, authenticated: false }, {}, resource);
+          const overview = await request('/api/overview'), who = await request('/api/whoami');
+          return { connector: 'rabbitmq_management_http', status: overview.status, identityStatus: who.status,
+            principalMatchesConfiguredUser: who.status === 200 && who.body?.name === resource.username,
+            tags: Array.isArray(who.body?.tags) ? who.body.tags : typeof who.body?.tags === 'string' ? who.body.tags.split(',') : [] };
+        }
+        const authentication = await this.authenticationEvidence(resourceName, resource);
+        if (authentication) {
+          const { response, ...identity } = authentication;
+          return { connector: 'http_browser', ...identity };
+        }
+        const base = new URL(resource.base_url ?? resource.management_url);
+        const receipt = await http({ kind: 'http', access: 'read', resource: resourceName, path: base.pathname, authenticated: false }, {}, resource);
+        return { connector: resource.resource_type === 'xxl_job' ? 'scheduler_http' : 'http', status: receipt.status,
+          authenticated: false, path: receipt.path };
+      });
+    },
     async snapshot(args) {
       return scope.useRead(args.resource, async resource => {
         const connection = await connect(resource, args.database);
@@ -448,7 +521,11 @@ export function createAgentResources(config, scope) {
       return scope.useRead(args.resource, async resource => {
         const connection = await connect(resource, args.database);
         try {
-          if (!args.database) { const [rows] = await connection.query('SHOW DATABASES'); return { rows }; }
+          if (!args.database) {
+            const bound = scopedDatabase(resource);
+            if (bound) return { rows: [{ Database: bound }] };
+            const [rows] = await connection.query('SHOW DATABASES'); return { rows };
+          }
           if (!args.table) { const [rows] = await connection.query('SHOW TABLES'); return { rows }; }
           const [columns] = await connection.query('SHOW FULL COLUMNS FROM ' + identifier(args.table));
           const [indexes] = await connection.query('SHOW INDEX FROM ' + identifier(args.table));
@@ -511,7 +588,8 @@ export function createAgentResources(config, scope) {
                 : binding.read === 'input' ? await node.inputValue() : binding.read === 'attribute' ? await node.getAttribute(binding.attribute) : await node.allTextContents();
           }
           const filename = `page-${digest([scope.item.caseId, scope.attempt, Date.now()]).slice(0, 24)}.png`;
-          await page.screenshot({ path: path.join(scope.reports, filename), fullPage: true });
+          scope.checkOutput?.(data);
+          await page.screenshot({ path: path.join(scope.reports, filename), fullPage: true, mask: [page.locator('input[type=password]')] });
           data.screenshot = { path: filename, type: '页面实际截图', sanitized: true };
         }
         return data;

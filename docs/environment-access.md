@@ -2,6 +2,8 @@
 
 所有群成员都可以提出排查和查询要求。群聊是入口，本机 Codex 理解问题并选择工具；AgentOS 校验原始发起人、环境、范围和批准。共用一台电脑不意味着所有人继承电脑主人的权限。
 
+本文的环境排查使用独立的 `environments.local.json` 和 Keychain 授权。需求 Runner 的 [INI 资源接入](controlled-ini.md) 使用显式项目资源绑定，仅受理 SIT/UAT。两条入口各自核验身份和授权。
+
 ![环境工具工作流](images/agentos-environment-tools.png)
 
 ## 使用与权限

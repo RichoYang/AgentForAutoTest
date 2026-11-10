@@ -282,7 +282,8 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   assert.equal(current.cleanup.verified, true);
   assert.equal(current.deploymentLastCheck.sourceStatus, 403);
   assert.equal(current.deploymentLastCheck.proof[0].observed, sha('runtime-bundle'));
-  assert.deepEqual(requests, ['GET /releases', 'GET /runtime-version', 'GET /refresh-fixture', 'GET /fixture',
+  // Refresh invalidates the fixture binding, so neither lookup nor mutation is dispatched.
+  assert.deepEqual(requests, ['GET /releases', 'GET /runtime-version', 'GET /refresh-fixture',
     'GET /releases', 'GET /runtime-version', 'GET /budget']);
   const report = await readJson(path.join(workDir, 'normalized-report.json'));
   assert.ok(report.meta.method_notes.some(note => /HTTP 403.*缺少构建号.*缺少镜像标识/.test(note)));
