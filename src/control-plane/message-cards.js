@@ -104,6 +104,7 @@ export function requirementCompletion(job) {
   if (job.requirement?.cleanupOnly && (summary.blocked || summary.notExecuted)) return ['清理与报告完成 · 业务验收未完成', 'orange'];
   if (summary.blocked || summary.notExecuted) return ['报告已生成 · 业务验收未完成', 'orange'];
   if (summary.fail) return ['业务测试完成 · 有失败', 'red'];
+  if (summary.externalPending) return ['业务比较完成 · 外部回收待回执', 'orange'];
   return ['业务测试及报告完成', 'green'];
 }
 

@@ -239,10 +239,12 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         verificationHash: artifact.verificationHash, visualSheets: journal.visualReview.count } });
     }
     const processProven = processChecks.filter(check => check.disposition === 'proven').length;
+    const externalPending = processChecks.filter(check => check.kind === 'external_cleanup' && check.disposition !== 'proven').length;
     const incompleteFailures = Object.values(journal.results ?? {}).filter(result => result.status === '失败'
       && result.checkCoverage && (result.blocker || result.checkCoverage.compared < result.checkCoverage.total)).length;
     journal.phase = job.requirement.cleanupOnly ? '清理与报告完成'
-      : summary.notExecuted || summary.blocked || incompleteFailures ? '报告生成；业务验收未完成' : '业务测试及报告完成';
+      : summary.notExecuted || summary.blocked || incompleteFailures ? '报告生成；业务验收未完成'
+        : externalPending ? '业务比较及报告完成；外部过程待回执' : '业务测试及报告完成';
     journal.artifact = artifact;
     await save();
     const cleanup = journal.cleanup?.verified === true ? '已核验恢复' : '待恢复';
@@ -255,6 +257,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       ...(incompleteFailures ? ['其中 ' + incompleteFailures + ' 条已证明失败仍有未完成检查或执行缺口，分别见缺陷和阻断记录。'] : []),
       '覆盖：' + journal.requirements.length + ' 项已抽取条款都有用例映射。登记 ' + summary.issues + ' 项问题，详情见测试报告。',
       '清理：' + cleanup + '。报告已通过结构与文件校验并生成逐表预览。',
+      ...(externalPending ? ['另有 ' + externalPending + ' 项外部回收待核验。业务比较结论已保存，整体验收待外部回执。'] : []),
       ...(processChecks.length ? ['当前过程证明 ' + processProven + '/' + processChecks.length
         + '，其中恢复后补证 ' + processChecks.filter(check => check.phase === 'post_cleanup' && check.disposition === 'proven').length
         + '，报告阶段 ' + processChecks.filter(check => check.phase === 'report_verification' && check.disposition === 'proven').length
@@ -263,6 +266,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     return { outcome: 'ready', finalMessage, requirementReport: artifact,
       requirementSummary: { ...summary, cleanup, caseUrl: journal.publication.url,
         ...(incompleteFailures ? { incompleteFailures } : {}),
+        ...(externalPending ? { externalPending } : {}),
         ...(processChecks.length ? { process: { total: processChecks.length, proven: processProven } } : {}) } };
   } catch (error) {
     const known = error instanceof RequirementWait;

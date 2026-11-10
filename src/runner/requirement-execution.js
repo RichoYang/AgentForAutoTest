@@ -224,7 +224,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
     await save();
     return { release, releaseEvidence };
   };
-  const clean = async mutations => adapter.cleanup({ ...scope, mutations, prior: journal.cleanup,
+  const clean = async (mutations, startRequest) => adapter.cleanup({ ...scope, mutations, prior: journal.cleanup, startRequest,
     async restore(key, operation, apply, resourceName) {
       const mutation = journal.mutations.find(item => item.key === key);
       if (!mutation) throw new RequirementWait('mutation_scope', '清理操作缺少本轮变更记录。');
@@ -290,8 +290,8 @@ export async function executeCases({ job, settings, journal, source, index, mani
           await save();
         },
         getMutations: () => journal.mutations.filter(record => record.caseId === item.caseId),
-        async cleanupCase() {
-          const result = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
+        async cleanupCase(startRequest) {
+          const result = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId), startRequest));
           journal.caseCleanup ??= {}; journal.caseCleanup[item.caseId] = result; await save(); return result;
         },
         async savePreparation(preparation) { journal.preparations[item.caseId] = resources.checkOutput(preparation); await save(); } };

@@ -10,6 +10,42 @@ export function verifyObservationIdentity(check,observation,args){
   });
 }
 
+export function pageMethodSample(check, observation, args, stage) {
+  if (!args.sampleSubject) return check;
+  const action = observation.data.lifecycle?.pageAction;
+  const matchesStage = stage && observation.data.ready?.at && observation.input?.resource === stage.resource
+    && action?.action === stage.action && (stage.action === 'goto' ? action.path === stage.path : action.selector === stage.selector)
+    && (!Object.hasOwn(stage, 'value') || isDeepStrictEqual(stage.value, action.value))
+    && (!stage.ready || isDeepStrictEqual(stage.ready, observation.data.ready?.condition));
+  const identityFields = Object.keys(check.subject ?? {});
+  const descriptor = observation.data.measurements?.[args.field?.[1]]?.record;
+  const differences = identityFields.filter(dimension => !isDeepStrictEqual(check.subject[dimension], args.sampleSubject[dimension]));
+  const key = args.identity?.find(item => item.dimension === differences[0])?.field;
+  if (check.channel !== 'page' || !matchesStage || check.beforeAction || check.basis?.observationId
+    || args.field?.[0] !== 'values' || !descriptor || differences.length !== 1
+    || !isDeepStrictEqual(Object.keys(args.sampleSubject).sort(), identityFields.sort())
+    || key?.[0] !== 'values' || key?.[1] !== args.field[1] || !Object.hasOwn(descriptor.match, key?.[2])) {
+    throw agentError('sampleSubject is only for a method-only DOM record on the declared page stage, with the same scope and a different exact record key. It cannot certify a baseline or a business result.');
+  }
+  return { ...check, subject: args.sampleSubject, sampleKeyField: key[2] };
+}
+
+function domRecordShape(record) {
+  return { layout: record.layout, rows: record.rows, fields: record.fields, keyFields: Object.keys(record.match).sort() };
+}
+
+export function verifyPageMethodShape(sample, { field, keyField }, observed, args) {
+  const before = sample?.data.measurements?.[field[1]]?.record;
+  const after = observed.data.measurements?.[args.field?.[1]]?.record;
+  const shape = record => {
+    const { [keyField]: key, ...scope } = record.match;
+    return { ...domRecordShape(record), scope, hasKey: key !== undefined };
+  };
+  if (!before || !after || !isDeepStrictEqual(field.slice(2), args.field.slice(2)) || !isDeepStrictEqual(shape(before), shape(after))) {
+    throw agentError('Actual page record does not use the preflighted record layout, selectors and identity keys');
+  }
+}
+
 // Stages bind actual saved page actions, never labels added to an observation.
 export function pageStageContext(plan,check,current,observations,args={}){
   const stage=plan.pageStages?.find(stage=>stage.id===check.pageStage);if(!stage)return null;
@@ -31,7 +67,9 @@ export function pageStageContext(plan,check,current,observations,args={}){
   function actualField(record,identity,sample){
     const descriptor=sample?.data.measurements?.[identity.field?.[1]]??sample?.input?.fields?.[identity.field?.[1]];
     if(!descriptor||identity.field[0]!=='values')return identity.field;
-    const same=candidate=>candidate&&['selector','read','attribute'].every(key=>candidate[key]===descriptor[key]);
+    const same=candidate=>candidate&&(descriptor.record
+      ? candidate.record && isDeepStrictEqual(domRecordShape(candidate.record), domRecordShape(descriptor.record))
+      : !candidate.record && ['selector','read','attribute'].every(key=>candidate[key]===descriptor[key]));
     if(same(record.data.measurements?.[identity.field[1]]))return identity.field;
     const alias=Object.entries(record.data.measurements??{}).find(([,candidate])=>same(candidate))?.[0];
     return alias?['values',alias,...identity.field.slice(2)]:null;
@@ -41,6 +79,7 @@ export function pageStageContext(plan,check,current,observations,args={}){
     const identities=related.measurement?.identity??[];
     const sample=observations[related.measurement?.observationId];
     const candidates=(group?.records??[]).filter(record=>record.data.screenshot&&record.data.ready?.at>=group.action.startedAt&&record.data.values
+      &&(!wanted.ready||isDeepStrictEqual(wanted.ready,record.data.ready.condition))
       &&Object.entries(wanted.subject).every(([dimension,value])=>{const identity=identities.find(item=>item.dimension===dimension),field=identity&&actualField(record,identity,sample);return field&&isDeepStrictEqual(observationAt(record.data,field),value);}));
     return {stageId:wanted.id,action:group?.action,candidateObservationIds:candidates.map(record=>record.observationId),
       observations:candidates.map(record=>({observationId:record.observationId,at:record.at,readyAt:record.data.ready.at})),proven:candidates.length>0};
@@ -93,6 +132,19 @@ export function assertionBinding(check, observation, args, sources, context = {}
     || args.identity?.some(identity => identity.field?.[0] !== 'values'))) {
     throw agentError('Page assertions and subject identities must use observed DOM values; captured API traffic is diagnostic evidence only');
   }
+  if (check.channel === 'page') {
+    const records = observation.data.domRecords ?? {};
+    for (const field of fields.filter(path => Object.hasOwn(records, path[1]))) {
+      const record = records[field[1]];
+      const sameRecord = args.identity?.filter(item => item.field[1] === field[1]) ?? [];
+      const descriptor = observation.data.measurements[field[1]].record;
+      if (record.matched !== 1 || !sameRecord.some(item => Object.hasOwn(check.subject ?? {}, item.dimension)
+        && Object.hasOwn(descriptor.match, item.field[2]))
+        || args.identity?.some(item => Object.hasOwn(records, item.field[1]) && item.field[1] !== field[1])) {
+        throw agentError('DOM record value needs its exact business identity from the same matched DOM record');
+      }
+    }
+  }
   for(const field of fields)if(observation.channel==='database'&&field[0]==='rows'&&Number.isInteger(field[1])&&field.length>=3){
     const names=Array.isArray(observation.data.columns)?observation.data.columns.map(column=>column.name):observation.data.contract?.fields;
     if(names&&!names.includes(field[2]))throw agentError('Measurement field is absent from the verified query/snapshot columns: '+JSON.stringify(field));
@@ -122,7 +174,8 @@ export function assertionBinding(check, observation, args, sources, context = {}
     responseOutcome: observation.channel === 'api' && observation.data.body && !Array.isArray(observation.data.body)
       ? Object.fromEntries(Object.entries(observation.data.body).filter(([key]) => /^(?:success|ok|code|error|errorCode|message)$/.test(key))) : undefined,
     query, databaseSchemas,
-    page: check.channel === 'page' ? { url: observation.data.url, ready: observation.data.ready, dom: observation.data.dom } : undefined,
+    page: check.channel === 'page' ? { url: observation.data.url, ready: observation.data.ready, dom: observation.data.dom,
+      domRecords: observation.data.domRecords } : undefined,
     sources: evidence };
 }
 

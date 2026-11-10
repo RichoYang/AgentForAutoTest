@@ -2,6 +2,7 @@ import { digest } from './requirement-feishu.js';
 
 const gapTarget = (tool, args) => tool === 'test_mutate' && args.operation && args.businessKey
   ? args.operation + ':' + args.businessKey
+  : tool === 'test_plan' && args.action === 'process_preflight' ? 'process_preflight:' + args.check?.id
   : args.checkId ?? args.id ?? args.alias ?? args.operation ?? args.name ?? args.table
     ?? (tool === 'test_evidence' ? args.evidenceRef ?? args.observationId : undefined) ?? tool;
 
@@ -39,8 +40,8 @@ export function finishDiagnostics(current, missing, httpErrors) {
   });
   return { planFrozen: Boolean(current.plan), missingChecks, coverage,
     productFailures: coverage.checks.filter(check => check.current === 'failed').map(check => check.checkId),
-    deferred: (current.plan?.processChecks ?? []).filter(check => check.kind === 'report')
-      .map(check => ({ checkId: check.id, role: 'process', phase: 'report_verification' })),
+    deferred: (current.plan?.processChecks ?? []).filter(check => ['report','external_cleanup'].includes(check.kind))
+      .map(check => ({ checkId: check.id, role: 'process', phase: check.externalReceipt?.after ?? 'report_verification' })),
     externalAttempts: current.externalErrors ?? [], httpErrors,
     next: !current.plan ? 'Freeze an executable plan after resolving prerequisites'
       : 'Complete the listed checks, or document an actual external dependency, attempted alternatives and the release action' };
@@ -58,7 +59,13 @@ export function recordGap(current, { tool, args, error, evidenceVersion }) {
   const updated = groups.map(findings => {
   const codes = findings.length ? findings.map(item => item.code || item.field).sort()
     : [error.code ?? 'tool_error', ...(error.fields ?? [error.safeMessage ?? error.message]).map(field => field.replace(/agent-[a-f0-9]+/g, '#'))];
-  const id = digest([tool, target, findings.length ? findings.map(item => item.field) : codes]);
+  const field = findings[0]?.field ?? codes.join(' ');
+  const plan = current.planCandidate ?? args;
+  const baselineChecks = (plan.processChecks ?? []).filter(check => check.beforeAction);
+  const baseline = tool === 'test_plan' && /\bbaselines\b|processChecks.*(?:beforeAction|baselineChannel|measurement)|baseline_missing/i.test([field, ...codes, findings[0]?.reason].join(' '))
+    && (baselineChecks.find(check => field.includes('[' + check.id + ']') || field.includes('id=' + check.id)
+      || field.includes('.' + check.id + '.')) ?? (baselineChecks.length === 1 ? baselineChecks[0] : null));
+  const id = digest([tool, target, baseline ? ['process_baseline', baseline.id] : findings.length ? findings.map(item => item.field) : codes]);
   const previous = current.gaps[id];
   const repeated = previous && !previous.resolved;
   // One model batch may submit sibling checks before receiving any rejection.
@@ -88,6 +95,7 @@ export function recordGap(current, { tool, args, error, evidenceVersion }) {
 }
 
 export function resolveGaps(current, tool, args) {
+  if (tool === 'test_plan' && args.action === 'inspect') return;
   const target = gapTarget(tool, args);
   const stage=current.plan?.checks.find(check=>check.id===args.checkId)?.pageStage;
   for (const gap of Object.values(current.gaps ?? {})) {

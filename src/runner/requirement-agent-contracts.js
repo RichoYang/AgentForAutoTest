@@ -22,9 +22,15 @@ const spec = object({ resource: string, kind: enumeration('http', 'database', 'b
   path: pathTemplate, method: string, body: {}, query: map, authenticated: { type: 'boolean' }, channel: enumeration('api', 'message', 'job'),
   database: string, sql: string, params: array({}), table: string, values: map, where: map, expectedRows: { type: 'integer', minimum: 1 },
   action: enumeration('click', 'goto'), selector: string, effect: object({ path: pathTemplate, method: string, body: {} }, ['path', 'method']) }, ['resource', 'kind', 'access']);
-const measurement = object(selection, ['observationId']);
+const measurementSelection = { ...selection, sampleSubject: map };
+const measurement = object(measurementSelection, ['observationId']);
+const beforeAction = object({ operation: operationNameSchema, input: map }, ['operation']);
+const browserReady = object({ selector: string, state: enumeration('hidden', 'visible'), attribute: string, value: {}, text: string }, ['selector']);
+const domField = object({ selector: string, read: enumeration('text', 'attribute'), attribute: string }, ['selector', 'read']);
+const domRecord = object({ name: operationNameSchema, layout: enumeration('rows', 'parallel', 'json_parallel'), rows: string,
+  fields: { type: 'object', additionalProperties: domField }, match: map }, ['name', 'layout', 'fields', 'match']);
 const check = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string, pageStage:string,
-  beforeAction: object({ operation: operationNameSchema, input: map }, ['operation']),
+  beforeAction,
   channel: enumeration('page', 'api', 'database', 'message', 'job'), subject: map, expected: {},
   operator: enumeration('equals', 'contains', 'gt', 'gte', 'lt', 'lte'), type: enumeration('number', 'text', 'boolean', 'null'), unit: { type: 'string' },
   basis: object({ quote: string, observationId: string, field, explanation: string }), measurement },
@@ -33,9 +39,13 @@ const requestProof = object({ scope: enumeration('runner', 'service'), phase: en
   requests: array(object({ method: string, path: string, count: integer }, ['method', 'path', 'count']), 1),
   audit: object({ operation: string, correlation: string }, ['operation', 'correlation']) }, ['scope', 'phase', 'resource', 'requests']);
 const processCheck = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string,
-  kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup', 'report'), relatedCheckIds: array(string),
-  requestProof }, ['id', 'line', 'requirement', 'kind']);
-const pageStage=object({id:string,step:{type:'integer',minimum:1},resource:string,action:enumeration('goto','click','select'),path:string,selector:string,value:{},subject:map},['id','step','resource','action','subject']);
+  kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup', 'report', 'external_cleanup'), relatedCheckIds: array(string),
+  requestProof, beforeAction, baselineChannel: enumeration('page','api','database','message','job'),
+  runnerScope: object({ phase: enumeration('prepare','scenario','all'), allowed: array(object({ resource: string,
+    transport: enumeration('http','browser','database'), method: string, path: string }, ['resource','transport','method','path']), 1) }, ['phase','allowed']),
+  externalReceipt: object({ operation: operationNameSchema, actor: string, correlation: string,
+    after: enumeration('business_checks','job_end') }, ['actor','correlation','after']) }, ['id', 'line', 'requirement', 'kind']);
+const pageStage=object({id:string,step:{type:'integer',minimum:1},resource:string,action:enumeration('goto','click','select'),path:string,selector:string,value:{},subject:map,ready:browserReady},['id','step','resource','action','subject']);
 const invocation = { operation: string, input: map, subject: map, ...page };
 const readiness = object({ field, operator: enumeration('equals', 'not_equals'), value: {},
   timeoutMs: { type: 'integer', minimum: 1 } }, ['field', 'operator', 'value']);
@@ -57,16 +67,18 @@ export const requirementToolSchemas = {
   alias: object({ alias: string, value: {}, observationId: string, field, purpose: string }, ['alias', 'value', 'observationId', 'field', 'purpose']),
   mutate: mutation,
   browser: object({ resource: string, action: enumeration('goto', 'inspect', 'fill', 'click', 'select', 'check', 'wait', 'observe', 'fault', 'clear_fault'),
-    path: string, selector: string, value: {}, subject: map, ready: object({ selector: string, state: enumeration('hidden', 'visible'), attribute: string, value: {}, text: string }, ['selector']),
+    path: string, selector: string, value: {}, subject: map, ready: browserReady, record: domRecord,
     fields: { type: 'object', additionalProperties: object({ selector: string, read: enumeration('text', 'input', 'visible', 'count', 'attribute'), attribute: string }, ['selector', 'read']) },
     operation: string, delayMs: { type: 'number', minimum: 0 }, abort: { type: 'boolean' }, status: { type: 'integer' }, body: {} }, ['resource', 'action']),
   plan: { anyOf: [object({ action: { const: 'inspect' } }, ['action']),
     object({ action: { const: 'process_preflight' }, check: processCheck }, ['action', 'check']),
+    object({ action: { const: 'repair' }, replace: object({ steps: array(string,1), pageStages: array(pageStage), checks: array(check,1),
+      processChecks: array(processCheck) }) }, ['action','replace']),
     object({ identityCorrections: array(object({ checkId: string, subject: map }, ['checkId', 'subject']), 1) }, ['identityCorrections']),
     object({ version: { const: 1 }, steps: array(string, 1), pageStages:array(pageStage), prerequisites: array(object({ objects: string, target_state: string, construction_entry: string,
       unique_identifier: string, verification_method: string, cleanup_method: string }, ['objects', 'target_state', 'construction_entry', 'unique_identifier', 'verification_method', 'cleanup_method'])), checks: array(check, 1), processChecks: array(processCheck) }, ['version', 'steps', 'prerequisites', 'checks'])] },
   measure: { anyOf: [object({ action: { const: 'restart' }, reason: string }, ['action', 'reason']),
-    object({ checkId: string, ...selection }, ['checkId', 'observationId'])] },
+    object({ checkId: string, ...measurementSelection }, ['checkId', 'observationId'])] },
   assert: object({ checkId: string, ...selection }, ['checkId', 'observationId']),
   process: object({ checkId: string, evidenceRefs, sourceRefs: array(string, 1) }, ['checkId', 'evidenceRefs']),
   finish: object({ actual: string, blocker: object({ dependency: string, required_action: string, attempts: array(string, 1) }, ['dependency', 'required_action', 'attempts']),
@@ -78,6 +90,9 @@ export const requirementToolSchemas = {
 
 export function schemaErrors(schema, value, at = '$.args') {
   if (schema.anyOf) {
+    const tagged = schema.anyOf.find(item => item.properties?.action?.const === value?.action && value?.action !== undefined)
+      ?? schema.anyOf.find(item => item.properties?.version && Object.hasOwn(value ?? {}, 'version'));
+    if (tagged) return schemaErrors(tagged, value, at);
     const variants = schema.anyOf.map(item => schemaErrors(item, value, at));
     return variants.some(errors => !errors.length) ? [] : variants.sort((a, b) => a.length - b.length)[0];
   }
@@ -114,7 +129,7 @@ export function validateToolArguments(name, args) {
 export function planCoverageMatrix(lines, plan) {
   return lines.map((originalExpectation,index)=>({line:index+1,originalExpectation,
     business:plan.checks.filter(check=>check.line===index+1).map(check=>({id:check.id,requirement:check.requirement,channel:check.channel,beforeAction:check.beforeAction})),
-    process:(plan.processChecks??[]).filter(check=>check.line===index+1).map(check=>({id:check.id,requirement:check.requirement,kind:check.kind,relatedCheckIds:check.relatedCheckIds??[]}))}));
+    process:(plan.processChecks??[]).filter(check=>check.line===index+1).map(check=>({id:check.id,requirement:check.requirement,kind:check.kind,beforeAction:check.beforeAction,relatedCheckIds:check.relatedCheckIds??[]}))}));
 }
 export function duplicatePlanChecks(plan) {
   const errors=[],canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
@@ -137,4 +152,15 @@ export function pageStageErrors(plan,resources){
     if(!stage||check.channel!=='page'){errors.push('$.checks.'+check.id+'.pageStage must reference a declared page stage for a page check');continue;}
     for(const [dimension,value]of Object.entries(stage.subject))if(!isDeepStrictEqual(check.subject?.[dimension],value)||!check.measurement?.identity?.some(item=>item.dimension===dimension))errors.push('$.checks.'+check.id+' needs matching stage subject and preflight identity path for '+dimension);
   }return errors;
+}
+
+const planRepairs = [
+  [/\bbaselines\b/, 'baselines is derived output. For an independent expected value use test_plan checks[].basis. To capture a prepared scope before a scenario write use processChecks[].beforeAction and baselineChannel, then test_process with a fresh scoped observation.'],
+  [/\b(?:scenarioOperations|registeredReadOperations)\b/, 'Registered operation lists are derived output. Use test_register with source evidence, then reference the operation in the applicable plan contract.'],
+  [/processChecks.*measurement/, 'Process evidence uses test_process evidenceRefs, relative to observation.data. Process baselines use processChecks[].beforeAction and baselineChannel, without a business expected value.'],
+  [/pageStages.*(?:ready|readiness)/, 'Use test_plan pageStages[].ready to declare the condition and test_browser action=observe ready to actually wait for it. Use checks[].pageStage and the DOM identity paths to bind the actual observation.'],
+];
+
+export function planRepair(field) {
+  return planRepairs.find(([pattern]) => pattern.test(field))?.[1];
 }

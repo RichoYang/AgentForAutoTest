@@ -55,3 +55,35 @@ export function compareRequestProof(check, entries) {
   return { scope: check.requestProof.scope, phase: check.requestProof.phase, resource: check.requestProof.resource,
     matches, satisfied: matches.every(item => item.actual === item.expected) };
 }
+
+export function verifyRunnerScope(check, entries) {
+  const { phase, allowed } = check.runnerScope;
+  if (!Array.isArray(entries)) throw agentError('No complete Runner trace for this measurement epoch');
+  const inScope = entries.filter(entry => phase === 'all' || phase === entry.phase);
+  if (inScope.some(entry => entry.outcome === 'pending')) throw agentError('Runner scope has an unresolved transport attempt');
+  const violations = inScope.filter(entry => !allowed.some(route => ['resource', 'transport', 'method', 'path']
+    .every(key => route[key] === entry[key])));
+  return { phase, allowed, entries: inScope, violations, satisfied: !violations.length };
+}
+
+export function runnerScopeHistory(current) {
+  const epochs = [...(current.restarts ?? []), current];
+  if (epochs.some(epoch => epoch.requestTraceVersion !== 2 || !Array.isArray(epoch.requestTrace))) return null;
+  return epochs.flatMap(epoch => epoch.requestTrace);
+}
+
+export function externalCleanupReceipt(response, contract, input, source) {
+  const body = response?.body;
+  if (!(response?.status >= 200 && response.status < 300) || typeof body?.source !== 'string' || !body.source
+    || (source && body.source !== source) || body.actor !== contract.actor || body.correlation !== contract.correlation) {
+    throw agentError('External cleanup receipt source, actor or object differs from the registered contract');
+  }
+  if (input.mode === 'capability') {
+    if (body.available !== true) throw agentError('External cleanup receipt source did not certify lookup capability');
+  } else if (body.verified !== true || !Number.isFinite(Date.parse(input.after))
+    || !(Date.parse(body.completedAt) >= Date.parse(input.after) && Date.parse(body.completedAt) <= Date.now())) {
+    throw agentError('External cleanup has no verified receipt after the declared boundary');
+  }
+  return { source: body.source, actor: body.actor, correlation: body.correlation,
+    ...(input.mode === 'capability' ? { available: true } : { completedAt: body.completedAt, verified: true }) };
+}

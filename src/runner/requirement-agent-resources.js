@@ -12,6 +12,39 @@ import { buildRecordSnapshot } from './requirement-snapshot.js';
 import { credentialField, managementReadAllowed, scopedDatabase } from './requirement-resources.js';
 
 const exec = promisify(execFile);
+// Executed as one synchronous DOM read. No caller-provided code runs in the page.
+function captureDomRecord({ layout, rows: selector, fields, match }) {
+  const names = Object.keys(fields);
+  if (!names.length || !Object.keys(match).length || Object.entries(match).some(([key, value]) =>
+    !Object.hasOwn(fields, key) || typeof value !== 'string' || !value.trim())) return { error: 'DOM record requires exact nonempty string keys declared in fields' };
+  if ((layout === 'rows') !== Boolean(selector)) return { error: 'Only rows layout requires a row selector' };
+  const visible = node => node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
+  const nodes = (root, css) => [...root.querySelectorAll(css)].filter(visible);
+  const read = (node, field) => field.read === 'attribute' ? node.getAttribute(field.attribute) : node.innerText;
+  const fromColumns = columns => columns[0].map((_, index) => Object.fromEntries(names.map((name, col) => [name, columns[col][index]])));
+  let rows, rawColumns;
+  if (layout === 'rows') {
+    rows = nodes(document, selector).map(row => Object.fromEntries(names.map(name => {
+      const field = fields[name], matches = nodes(row, field.selector);
+      return [name, matches.length === 1 ? read(matches[0], field) : null];
+    })));
+  } else {
+    rawColumns = names.map(name => nodes(document, fields[name].selector).map(node => read(node, fields[name])));
+    let columns = rawColumns;
+    if (layout === 'json_parallel') {
+      try { columns = rawColumns.map(column => column.length === 1 ? JSON.parse(column[0]) : null); }
+      catch { return { error: 'Encoded DOM columns must be JSON arrays, not ambiguous delimiter-joined text' }; }
+      if (columns.some(column => !Array.isArray(column))) return { error: 'Each encoded DOM column needs one visible JSON array' };
+    }
+    if (columns.some(column => column.length !== columns[0].length)) return { error: 'Parallel DOM columns have different lengths' };
+    rows = fromColumns(columns);
+  }
+  if (rows.some(row => Object.values(row).some(value => typeof value !== 'string'))) return { error: 'DOM row fields require one visible value per field and row' };
+  const matches = rows.filter(row => Object.entries(match).every(([name, value]) => row[name] === value));
+  if (matches.length > 1) return { error: 'DOM record identity matched multiple visible rows' };
+  return { selected: matches[0] ?? null, matched: matches.length, rows, ...(rawColumns ? { rawColumns } : {}) };
+}
+
 export const agentError = message => Object.assign(new Error(message), { safeMessage: message });
 // mysql2 decoding under connect()'s exact-number/date settings; JSON/binary and
 // unknown wire types deliberately have no inferred scalar representation.
@@ -187,18 +220,18 @@ export function createAgentResources(config, scope) {
     await complete?.({ outcome: 'response', status: transport === 'browser' ? response.status() : response.status });
     return response;
   }
-  async function connect(resource, database) {
+  async function connect(resource, database, name) {
     if (resource.resource_type !== 'mysql') throw agentError('Resource is not MySQL');
-    return mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
+    return send(name, 'CONNECT', { pathname: '/' }, 'database', () => mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
       password: resource.password, database: scopedDatabase(resource, database),
       supportBigNumbers: true, bigNumberStrings: true, decimalNumbers: false, dateStrings: true,
       // We do not use query attributes; early 8.0 implementations interpret
       // the execute attribute flag as a server cursor and never send its rows.
       flags: ['-CLIENT_QUERY_ATTRIBUTES'],
-      multipleStatements: false, connectTimeout: 10000 });
+      multipleStatements: false, connectTimeout: 10000 }));
   }
   async function database(spec, input, resource) {
-    const connection = await connect(resource, spec.database);
+    const connection = await connect(resource, spec.database, spec.resource);
     try {
       if (spec.access === 'read') {
         if (!/^\s*(?:SELECT|SHOW|DESCRIBE|EXPLAIN|WITH)\b/i.test(spec.sql) || /\b(?:INTO\s+(?:OUTFILE|DUMPFILE)|FOR\s+UPDATE|GET_LOCK|RELEASE_LOCK|SLEEP|BENCHMARK)\b/i.test(spec.sql)) {
@@ -397,6 +430,7 @@ export function createAgentResources(config, scope) {
       const session = await browserSession(spec.resource, resource);
       session.pageAction={id:randomUUID(),startedAt:new Date().toISOString(),action:spec.action,
         ...(spec.action==='goto'?{path:resolveRoute(spec.path,input)}:{selector:spec.selector})};
+      session.ready = null;
       const effectPath = resolveRoute(spec.effect.path, input);
       session.effect = { ...spec.effect, path: effectPath, body: resolveInput(spec.effect.body, input) };
       try {
@@ -437,7 +471,7 @@ export function createAgentResources(config, scope) {
     async inspect(resourceName) {
       return scope.useRead(resourceName, async resource => {
         if (resource.resource_type === 'mysql') {
-          const connection = await connect(resource);
+          const connection = await connect(resource, undefined, resourceName);
           try {
             const [[receipt]] = await connection.query('SELECT 1 AS ready, CURRENT_USER() AS principal, DATABASE() AS databaseName');
             const [grants] = await connection.query('SHOW GRANTS FOR CURRENT_USER');
@@ -470,7 +504,7 @@ export function createAgentResources(config, scope) {
     },
     async snapshot(args) {
       return scope.useRead(args.resource, async resource => {
-        const connection = await connect(resource, args.database);
+        const connection = await connect(resource, args.database, args.resource);
         const startedAt = new Date().toISOString();
         try {
           // TIMESTAMP is rendered in the session zone. Fix it before collection
@@ -551,7 +585,7 @@ export function createAgentResources(config, scope) {
     },
     async schema(args) {
       return scope.useRead(args.resource, async resource => {
-        const connection = await connect(resource, args.database);
+        const connection = await connect(resource, args.database, args.resource);
         try {
           if (!args.database) {
             const bound = scopedDatabase(resource);
@@ -598,8 +632,8 @@ export function createAgentResources(config, scope) {
         else if (args.action === 'click') await page.locator(args.selector).click();
         else if (args.action === 'select') await page.locator(args.selector).selectOption(String(args.value));
         else if (args.action === 'check') await page.locator(args.selector).setChecked(args.value);
-        else if (args.action === 'wait') await waitBusinessReady(page, args.ready);
-        else if (!['inspect', 'observe'].includes(args.action)) throw agentError('Unknown browser action');
+        else if (args.action === 'wait' && !args.ready) throw agentError('Browser wait requires ready');
+        else if (!['inspect', 'observe', 'wait'].includes(args.action)) throw agentError('Unknown browser action');
         if (args.ready) { await waitBusinessReady(page, args.ready); session.ready = { condition: args.ready, at: new Date().toISOString() }; }
         const data = { url: page.url(), network: network.splice(0), lifecycle: { actionStartedAt,pageAction:session.pageAction,
           actionCompletedAt: new Date().toISOString(), observationTimestampMeaning: 'saved after this action and its requested readiness wait' },
@@ -607,7 +641,8 @@ export function createAgentResources(config, scope) {
         if (args.action === 'inspect') data.dom = await page.locator('body').ariaSnapshot();
         if (args.action === 'observe') {
           if (!session.ready) throw agentError('Use a business-ready condition before page observation (loading hidden, busy=false, completed revision); not the expected amount');
-          data.ready = session.ready;
+          await waitBusinessReady(page, session.ready.condition);
+          data.ready = { ...session.ready, at: new Date().toISOString() };
           data.values = {};
           data.measurements = {};
           data.dom = await page.locator('body').ariaSnapshot();
@@ -618,6 +653,14 @@ export function createAgentResources(config, scope) {
             data.values[key] = binding.read === 'visible' ? await node.isVisible() : binding.read === 'count' ? matches
               : !matches ? (binding.read === 'input' || binding.read === 'attribute' ? null : [])
                 : binding.read === 'input' ? await node.inputValue() : binding.read === 'attribute' ? await node.getAttribute(binding.attribute) : await node.allTextContents();
+          }
+          if (args.record) {
+            if (Object.hasOwn(data.values, args.record.name)) throw agentError('DOM record name conflicts with an observed field');
+            const capture = await page.evaluate(captureDomRecord, args.record);
+            if (capture.error) throw agentError(capture.error);
+            data.values[args.record.name] = capture.selected;
+            data.measurements[args.record.name] = { record: args.record, count: capture.rows.length, matched: capture.matched };
+            data.domRecords = { [args.record.name]: capture };
           }
           const filename = `page-${digest([scope.item.caseId, scope.attempt, Date.now()]).slice(0, 24)}.png`;
           scope.checkOutput?.(data);
