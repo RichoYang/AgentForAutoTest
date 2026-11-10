@@ -21,15 +21,9 @@ function target(resource, relative, base = resource.base_url ?? resource.managem
 }
 
 async function record(scope, id, data) {
-  const filename = 'runtime-' + digest(id).slice(0, 24) + '.json';
-  await writeJson(path.join(scope.reports, filename), scope.checkOutput(data));
+  const filename = 'runtime-' + digest([scope.attempt ?? 1, id]).slice(0, 24) + '.json';
+  await writeJson(path.join(scope.reports, filename), scope.checkOutput({ ...data, attempt: scope.attempt ?? 1 }));
   return { path: filename, type: '本轮运行证据', sanitized: true };
-}
-
-async function executionBlocked(scope, id, evidence, actual, details) {
-  const entry = await record(scope, id, { actual, ...details });
-  return { status: '阻断', actual, evidence: [...evidence, entry],
-    blocker: { dependency: '执行对象、参数来源或浏览器网络控制', required_action: '核对用例维度和项目操作契约后重试。' } };
 }
 
 async function session(resource, login, run, effect, queries = new Map()) {
@@ -356,7 +350,8 @@ export function createRequirementAdapter(config, options) {
   }
 
   function fixtureKey(scope, index, operation) {
-    return scope.runPrefix + '_' + digest([scope.item.caseId, index, operation]).slice(0, 12);
+    const attempt = scope.attempt > 1 ? [scope.attempt] : [];
+    return scope.runPrefix + '_' + digest([scope.item.caseId, index, operation, ...attempt]).slice(0, 12);
   }
 
   return {
@@ -431,6 +426,37 @@ export function createRequirementAdapter(config, options) {
       const exportValidations = [];
       const fixVerifications = [];
       let ran = false;
+      let executorErrors = 0;
+      const finalize = (blocker, status = ran ? '阻断' : '未执行', details) => {
+        const checks = Array.from({ length: expectedCount }, (_, index) => {
+          const checkId = index + 1;
+          const attempts = observed.filter(check => check.assertion === checkId);
+          const failed = attempts.some(check => check.compared && !check.passed);
+          const passed = attempts.some(check => check.compared && check.passed);
+          return { checkId: String(checkId), attempts: attempts.length,
+            current: failed ? 'failed' : passed ? 'passed' : 'unmeasured', historicalFailure: failed };
+        });
+        const passed = checks.filter(check => check.current === 'passed').length;
+        const failed = checks.filter(check => check.current === 'failed').length;
+        const compared = passed + failed;
+        const actual = observed.filter(check => check.compared).map(check =>
+          '预期 ' + check.assertion + ' 实测 ' + String(check.exactObserved ?? check.observed)
+          + (check.unit ?? '') + '，预期 ' + String(check.exactExpected ?? check.expected) + (check.expectedUnit ?? ''));
+        actual.push(...(details ? [details] : []), '独立检查 ' + compared + '/' + expectedCount + ' 项可比。');
+        return { status: failed ? '失败' : blocker ? status : '通过', actual: actual.join('。'), evidence, assertions: observed,
+          specialty: { code_chains: codeChains, export_validations: exportValidations, fix_verifications: fixVerifications },
+          checkCoverage: { total: expectedCount, compared, passed, failed, historicalAttempts: observed.length, checks },
+          executorErrors, ...(blocker ? { blocker } : {}), ...(failed ? {
+            issue: { severity: '一般', classification: '证据质量', problem_business_impact: '观测值与用例预期不一致，具体归因待核对。',
+              expected_result: scope.row[scope.headers.indexOf('预期结果')] },
+          } : {}) };
+      };
+      const blocked = async (id, actual, details, blocker = {
+        dependency: '执行对象、参数来源或浏览器网络控制', required_action: '核对用例维度和项目操作契约后重试。',
+      }, status = '阻断') => {
+        evidence.push(await record(scope, id, { actual, ...details }));
+        return finalize(blocker, status, actual);
+      };
       for (const [index, step] of steps.entries()) {
         if (gaps.length) break;
         const spec = operations[step.operation];
@@ -449,7 +475,7 @@ export function createRequirementAdapter(config, options) {
         }
         if (spec.kind === 'fixture' && missing.length) continue;
         const binding = bindSubjectInput({ spec, step, input, expected: subject, lineage, index });
-        if (binding.error) return executionBlocked(scope, id, evidence, binding.error, { binding });
+        if (binding.error) return blocked(id, binding.error, { binding });
         let data;
         try {
           const checkpoint = scope.completedSteps?.[index];
@@ -489,30 +515,32 @@ export function createRequirementAdapter(config, options) {
             if (spec.kind !== 'csv') await scope.saveStep?.(index, { inputHash: digest(input), data });
           }
         } catch (error) {
+          executorErrors++;
           if (error instanceof RequirementWait && error.code === 'environment_scope') {
-            const entry = await record(scope, id, { reason: error.message, resource: spec.resource });
-            return { status: '阻断', actual: error.message, evidence: [...evidence, entry],
-              blocker: { dependency: '已授权的非生产资源', required_action: '核对受影响资源的环境归属和操作权限。' } };
+            return blocked(id, error.message, { reason: error.message, resource: spec.resource },
+              { dependency: '已授权的非生产资源', required_action: '核对受影响资源的环境归属和操作权限。' });
           }
-          if (error instanceof RequirementWait || spec.kind === 'fixture') throw error;
+          if ((error instanceof RequirementWait || spec.kind === 'fixture') && !observed.some(check => check.compared && !check.passed)) throw error;
           if (error.network?.length) {
             const actual = error.network.some(item => item.state !== 'response') ? '浏览器请求被拦截或未收到响应。'
               : '服务已经响应，登记的页面观测未完成。';
-            return executionBlocked(scope, id, evidence, actual, { network: error.network, errorClass: error.code ?? error.name });
+            return blocked(id, actual, { network: error.network, errorClass: error.code ?? error.name });
           }
           const actual = '已尝试 ' + step.operation + '，运行环境未返回可核验证据。';
-          evidence.push(await record(scope, id, { actual, errorClass: error.code ?? error.name }));
-          return { status: ran ? '阻断' : '未执行', actual, evidence,
-            blocker: { dependency: step.operation, required_action: '核对后台工具及对应测试资源。' } };
+          return blocked(id, actual, { errorClass: error.code ?? error.name },
+            { dependency: step.operation, required_action: '核对后台工具及对应测试资源，确认前次动作已对账。' }, ran ? '阻断' : '未执行');
         }
         if (data.network?.some(item => item.state !== 'response')) {
-          return executionBlocked(scope, id, evidence, '浏览器请求被拦截或未收到响应。', { network: data.network });
+          executorErrors++;
+          return blocked(id, '浏览器请求被拦截或未收到响应。', { network: data.network });
         }
         let exported;
         if (spec.kind === 'csv') {
-          const filename = 'runtime-' + digest(id).slice(0, 24) + '.csv';
+          const filename = 'runtime-' + digest([scope.attempt ?? 1, id]).slice(0, 24) + '.csv';
           const csv = scope.checkOutput(data.csv);
-          const parsed = csvTable(csv);
+          let parsed;
+          try { parsed = csvTable(csv); }
+          catch (error) { executorErrors++; return blocked(id, '下载的 CSV 无法重开核验。', { errorClass: error.name }); }
           await writeFile(path.join(scope.reports, filename), csv, { encoding: 'utf8', mode: 0o600 });
           data = { ...parsed, status: data.status };
           exported = { path: filename, type: '本轮下载并重开的 CSV', sanitized: true };
@@ -521,7 +549,7 @@ export function createRequirementAdapter(config, options) {
         outputs[index] = data;
         ran = true;
         const identity = verifySubjectOutput(data, binding.entries, spec);
-        if (identity.error) return executionBlocked(scope, id, evidence, identity.error, { binding, identity });
+        if (identity.error) return blocked(id, identity.error, { binding, identity });
         const checks = step.checks.map(rule => evaluateCaseAssertion(data, rule));
         const observation = await record(scope, id, { operation: step.operation, subject: identity.verified, observed: data, checks });
         lineage[index] = { operation: step.operation, subject: identity.verified, data, evidence: observation.path };
@@ -546,26 +574,17 @@ export function createRequirementAdapter(config, options) {
           });
         }
       }
-      const specialty = { code_chains: codeChains, export_validations: exportValidations, fix_verifications: fixVerifications };
       const covered = new Set(observed.filter(check => check.compared && check.evidence?.path).map(check => check.assertion));
-      if (missing.length || covered.size !== expectedCount || observed.some(check => !check.compared)) {
+      if (!expectedCount || missing.length || covered.size !== expectedCount || observed.some(check => !check.compared)) {
         const unavailable = observed.filter(check => !check.compared)
           .map(check => '预期 ' + check.assertion + ' 缺少可比的值、单位或计算输入：' + check.fragment);
         const details = [...new Set([...missing, ...unavailable])];
-        const actual = '已取得 ' + covered.size + '/' + expectedCount + ' 项可比观测。'
-          + (details.length ? details.join('。') + '。' : '未执行的条件步骤缺少本轮观测。');
+        const actual = details.length ? details.join('。') : '未执行的条件步骤缺少本轮观测。';
         evidence.push(await record(scope, [scope.item.caseId, 'plan'], { missing, expectedCount, covered: [...covered] }));
-        return { status: ran ? '阻断' : '未执行', actual, evidence, specialty,
-          assertions: observed, blocker: { dependency: details.length ? details.join('。') : '条件步骤未返回本轮观测',
-            required_action: '按缺项核对项目观测字段、测试条件或确认原始业务口径。' } };
+        return finalize({ dependency: details.length ? details.join('。') : '条件步骤未返回本轮观测',
+          required_action: '按缺项核对项目观测字段、测试条件或确认原始业务口径。' }, undefined, actual);
       }
-      const failures = observed.filter(check => !check.passed);
-      const actual = observed.map(check => '预期 ' + check.assertion + ' 实测 ' + String(check.exactObserved ?? check.observed)
-        + (check.unit ?? '') + '，预期 ' + String(check.exactExpected ?? check.expected) + (check.expectedUnit ?? '')).join('。');
-      return { status: failures.length ? '失败' : '通过', actual, evidence, specialty, assertions: observed, ...(failures.length ? {
-        issue: { severity: '一般', classification: '证据质量', problem_business_impact: '观测值与用例预期不一致，具体归因待核对。',
-          expected_result: scope.row[scope.headers.indexOf('预期结果')] },
-      } : {}) };
+      return finalize();
     },
 
     async reconcile(scope) {
@@ -583,11 +602,17 @@ export function createRequirementAdapter(config, options) {
       for (const mutation of [...scope.mutations].reverse()) {
         const { intent } = mutation;
         const spec = operations[intent.target];
+        const caseScope = { ...scope, attempt: mutation.attempt ?? 1 };
+        if (mutation.cleanup?.verified && mutation.cleanup.record) {
+          records.push(mutation.cleanup.record);
+          evidence.push(...mutation.cleanup.evidence);
+          continue;
+        }
         try {
           const restored = await scope.restore(mutation.key, 'delete', async resource => {
             const before = await lookup(spec, intent.businessKey, resource);
             if (!mutation.cleanup?.before) {
-              const observation = await record(scope, [mutation.key, 'before-cleanup'], before);
+              const observation = await record(caseScope, [mutation.key, 'before-cleanup'], before);
               await scope.saveCleanup?.(mutation.key, { before, beforeEvidence: [observation] });
             }
             if (before.exists) await callResource(resource, spec.remove, fixtureInputs(spec, intent.businessKey), login, undefined, {}, false);
@@ -595,17 +620,18 @@ export function createRequirementAdapter(config, options) {
             if (after.exists || digest(after) !== intent.beforeHash) throw new Error('清理回读与前置快照不同');
             return after;
           });
-          const restoredEvidence = await record(scope, [mutation.key, 'cleanup'], restored);
-          await scope.saveCleanup?.(mutation.key, { verified: true, after: restored, evidence: [restoredEvidence] });
-          evidence.push(restoredEvidence);
-          records.push({ cleanup_id: 'CLEAN-' + digest(mutation.key).slice(0, 16), case_ids: [mutation.caseId],
+          const restoredEvidence = await record(caseScope, [mutation.key, 'cleanup'], restored);
+          const cleanupRecord = { cleanup_id: 'CLEAN-' + digest(mutation.key).slice(0, 16), case_ids: [mutation.caseId],
             target: intent.target, identifier: intent.businessKey, expected_state: '恢复至夹具创建前',
             cleanup_action: intent.cleanupAction, actual_state: '已核验夹具不存在，前后观测摘要一致', status: '已清理',
-            mutationKey: mutation.key, evidence: [restoredEvidence] });
+            mutationKey: mutation.key, evidence: [restoredEvidence] };
+          await scope.saveCleanup?.(mutation.key, { verified: true, after: restored, evidence: [restoredEvidence], record: cleanupRecord });
+          evidence.push(restoredEvidence);
+          records.push(cleanupRecord);
         } catch (error) {
           pending.push(mutation.key);
           const attempt = (mutation.cleanup?.attempts?.length ?? 0) + 1;
-          const entry = await record(scope, [mutation.key, 'cleanup-pending', attempt], {
+          const entry = await record(caseScope, [mutation.key, 'cleanup-pending', attempt], {
             key: intent.businessKey, attempt, verified: false, errorClass: error.code ?? error.name,
           });
           await scope.saveCleanup?.(mutation.key, { attempts: [...(mutation.cleanup?.attempts ?? []), entry] });

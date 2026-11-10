@@ -81,6 +81,12 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
   }
   const specialty = { fix_verifications: [], code_chains: [], export_validations: [] };
   const processNotes = [];
+  const sourceAttempts = Object.values(journal.sourceAttempts ?? {});
+  const reportRepositories = (journal.repositories ?? []).map(({ worktree_commit, worktree_branch, ...repo }) => ({
+    ...repo, branch: worktree_branch ?? repo.branch, commit: worktree_commit ?? repo.commit,
+    notes: [repo.notes, '配置目标 ' + repo.branch + ' · ' + repo.commit,
+      worktree_commit ? '工作树起始 HEAD，文件读取以尝试证据为准。' : '历史记录未核对工作树 HEAD。'].filter(Boolean).join('。'),
+  }));
   const unexecutedReason = requirementCleanupAfterCancellation(job) ? '取消后仅执行清理，本轮未运行此用例。'
     : '本轮未运行此用例。';
   for (const item of index) {
@@ -88,7 +94,16 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
     const process = journal.processFinalization?.[item.caseId];
     const cells = Object.fromEntries(manifest.headers.map((header, col) => [header, manifest.rows[item.row - 2][col]]));
     const processProofs = Object.entries(process?.checks ?? {});
-    let ids = await evidence([...(result?.evidence ?? []), ...processProofs.map(([, check]) => check.evidence).filter(Boolean)], item.caseId);
+    const sources = [];
+    for (const attempt of sourceAttempts.filter(entry => entry.caseId === item.caseId)) {
+      const record = { ...attempt, current: result?.sourceAttempt === attempt.caseId + '@' + attempt.attempt };
+      const filename = 'source-attempt-' + digest(record).slice(0, 24) + '.json';
+      await writeJson(path.join(reportDir, filename), record);
+      sources.push({ path: filename, type: '被测源码来源', sanitized: true,
+        description: '尝试 ' + attempt.attempt + (record.current ? ' · 当前结论' : ' · 历史或未形成结论')
+          + ' · ' + attempt.reads.length + ' 项文件读取或复核记录' });
+    }
+    let ids = await evidence([...(result?.evidence ?? []), ...processProofs.map(([, check]) => check.evidence).filter(Boolean), ...sources], item.caseId);
     if (processProofs.length) {
       const checks = processProofs.map(([id, check]) => id + ' ' + ({ proven: '已证明', deferred: '在报告实际核验阶段登记回执',
         missing_evidence: '缺证据', contradictory_evidence: '证据矛盾', invalid_contract: '契约不合法' })[check.disposition]);
@@ -166,6 +181,8 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
   ]))];
   const start = reportDateParts(journal.startedAt, timeZone);
   const finish = reportDateParts(journal.reportTime, timeZone);
+  const runnerVersion = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version;
+  const reportHistory = (journal.reportHistory ?? []).map(item => item.artifact?.filename).filter(Boolean);
   const payload = {
     schema_version: '1.0',
     meta: {
@@ -176,18 +193,21 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
         scope: '正文及 ' + source.embedded.length + ' 张嵌入表、' + (source.materials?.length ?? 0) + ' 项复杂材料', access_method: 'local Feishu CLI' }],
       test_case_sources: [...(journal.publicationHistory ?? []), journal.publication]
         .map(receipt => ({ name: receipt.title, location: receipt.url, version: receipt.version })),
-      code_baselines: journal.repositories.map(repo => ({ name: repo.name, location: repo.path_or_url,
-        version: repo.commit, scope: repo.service_scope ?? repo.branch })),
+      code_baselines: reportRepositories.map(repo => ({ name: repo.name, location: repo.path_or_url,
+        version: repo.commit, scope: repo.notes })),
       execution_scope: journal.requirements.map(item => item.id + ' · ' + item.rule),
       safety_notes: '已绑定非生产资源。业务运行证据仅来自本轮。',
-      method_notes: [...(releaseNotes.length ? ['发布版本证据：' + releaseNotes.join(' ') + ' 详见证据索引。'] : []), ...processNotes,
+      method_notes: ['AgentOS Runner ' + runnerVersion + '。被测源码记录及服务运行版本分别核验。',
+        ...(sourceAttempts.length ? ['用例各尝试的源码 HEAD、实际文件及摘要见证据索引。'] : []),
+        ...(reportHistory.length ? ['已保留旧报告 ' + reportHistory.join('、') + '。'] : []),
+        ...(releaseNotes.length ? ['发布版本证据：' + releaseNotes.join(' ') + ' 详见证据索引。'] : []), ...processNotes,
         ...Object.entries({ fix_verifications: '修复复测', code_chains: '代码调用链', export_validations: '导出核验' })
         .map(([section, label]) => label + '：' + (specialty[section].length ? '见专项工作表'
           : cases.every(item => item.status === '不适用') ? '本轮所有用例均不适用' : '本轮没有已登记的专项结果，未确认是否适用或完成'))],
       restoration_conclusion: cleanup?.verified === true ? '已核验恢复' : '待恢复',
       skill_version: regression.sha256,
     },
-    cases, issues, blockers, evidence_index: sheetEvidence, repositories: journal.repositories,
+    cases, issues, blockers, evidence_index: sheetEvidence, repositories: reportRepositories,
     ...specialty, retained_data: cleanup?.retainedData ?? [],
     prerequisites: Object.values(journal.preparations ?? {}).flatMap(item => item.prerequisites ?? []),
     mutation_ledger: mutationLedger.length ? mutationLedger : cleanup?.mutationLedger ?? [],
@@ -195,7 +215,7 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
   };
   await writeJson(path.join(workDir, jsonName), payload);
   const report = await runReportBuilder(regression, path.join(workDir, jsonName), workDir, reportDir,
-    finish.year + '-' + finish.month + '-' + finish.day + 'T' + finish.hour + ':' + finish.minute);
+    finish.year + '-' + finish.month + '-' + finish.day + 'T' + finish.hour + ':' + finish.minute, journal.reportSequence ?? reportHistory.length);
   const visualHash = digest(['report-visual-v2', report.previewHashes]);
   if (journal.visualReview?.hash !== visualHash) {
     const filenames = Object.keys(report.previewHashes);
@@ -248,6 +268,7 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
   const filename = path.basename(report.output);
   const output = path.join(registration, filename);
   await copyFile(report.output, output);
+  await writeJson(path.join(registration, journal.reportId + '.manifest.json'), payload);
   const receipt = path.join(registration, journal.reportId + '.verification.json');
   await writeJson(receipt, { version: 1, status: 'verified', kind: 'requirement-xlsx',
     file: { id: journal.reportId, filename, sha256: report.sha256 }, coverage: { rowCount: cases.length },
@@ -285,11 +306,12 @@ async function makeReviewTiles(skill, previewDir, filename) {
   return tiles;
 }
 
-export async function runReportBuilder(skill, input, workDir, reportDir, now) {
+export async function runReportBuilder(skill, input, workDir, reportDir, now, retry = 0) {
   const payload = await readJson(input);
   const clean = value => value.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100);
   const time = now.slice(0, 16).replace('T', '-').replace(':', '-');
-  const filename = clean(payload.meta.test_environment) + '-' + clean(payload.meta.requirement_name) + '-测试报告-' + time + '.xlsx';
+  const filename = clean(payload.meta.test_environment) + '-' + clean(payload.meta.requirement_name) + '-测试报告-' + time
+    + (retry ? '-重试' + retry : '') + '.xlsx';
   const output = path.join(reportDir, filename);
   const previewDir = await privateDirectory(path.join(workDir, 'preview'));
   const builder = path.join(skill.path, 'scripts/build-full-regression-report.mjs');

@@ -100,6 +100,7 @@ export function requirementCompletion(job) {
   const summary = job.result?.requirementSummary;
   if (job.workflow !== 'requirement_test' || job.status !== 'completed' || !summary) return null;
   if (requirementCleanupAfterCancellation(job)) return ['已取消 · 清理与报告完成', 'grey'];
+  if (summary.incompleteFailures) return ['报告已生成 · 有失败且验证未完成', 'red'];
   if (job.requirement?.cleanupOnly && (summary.blocked || summary.notExecuted)) return ['清理与报告完成 · 业务验收未完成', 'orange'];
   if (summary.blocked || summary.notExecuted) return ['报告已生成 · 业务验收未完成', 'orange'];
   if (summary.fail) return ['业务测试完成 · 有失败', 'red'];

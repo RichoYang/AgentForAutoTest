@@ -149,6 +149,7 @@ function requirementCommandText(content, mentions = []) {
 function requirementCommand(text) {
   if (/^(?:请)?重试(?:未执行|未执行用例|未执行的用例)$/.test(text)) return 'retry_unexecuted';
   if (/^(?:请)?重试(?:失败|失败用例|失败的用例)$/.test(text)) return 'retry_failed';
+  if (/^(?:请)?重试(?:阻断|阻断用例|阻断的用例)$/.test(text)) return 'retry_blocked';
   if (/^(?:请)?(?:继续|恢复)(?:测试|任务|执行|运行)?(?:一下|吧)?$/.test(text)) return 'resume';
   if (/^(?:请)?(?:暂停|取消|停止)(?:测试|任务|执行|运行)?(?:一下|吧)?$/.test(text)) return text.includes('暂停') ? 'pause' : 'cancel';
   if (text === '恢复清理' || text === '继续清理') return 'cleanup';
@@ -165,7 +166,8 @@ function requirementStatus(job, reason, settings) {
   const progress = attempt.findLast(event => event.type === 'progress' && event.activity)?.activity;
   const statistics = attempt.findLast(event => event.type === 'progress' && event.activity?.requirement)?.activity;
   const instructions = {
-    requirement_unknown_command: '可回复「当前进度」「当前阻塞」「继续测试」「暂停测试」「取消测试」「恢复清理」「重试未执行」或「重试失败」。',
+    requirement_unknown_command: '可回复「当前进度」「当前阻塞」「继续测试」「暂停测试」「取消测试」「恢复清理」「重试未执行」「重试失败」或「重试阻断」。',
+    requirement_no_blocked_cases: '当前报告没有已落盘的阻断用例。任务级等待解除后可回复「继续测试」。',
     requirement_confirmation_required: '解除阻塞需先回复「确认项目」。',
     requirement_material_confirmation: '请按上面的待确认项回复「确认图示 问题编号 答复」，或回复「恢复清理」。',
     requirement_invalid_transition: '当前状态不允许此操作。暂停或阻塞解除后可回复「继续测试」。已取消的任务有待清理数据时可回复「恢复清理」。',
@@ -174,9 +176,11 @@ function requirementStatus(job, reason, settings) {
   const wait = job.result?.requirementWait;
   const resumeNote = wait === 'deployment_baseline' ? '上次停在发布核验。可回复「继续测试」接续原用例，发布证据缺口随报告记录。'
     : wait === 'execution_adapter' && (settings.execution || settings.adapter) ? '执行入口现已配置，可回复「继续测试」。' : '';
+  const blockedNote = job.status !== 'cancelled' && job.result?.requirementSummary?.blocked
+    ? '解除原因并核验清理后，可回复「重试阻断」，只重试已记录为阻断的用例。' : '';
   return [job.id + ' · ' + (requirementCompletion(job)?.[0] ?? labels[job.status] ?? job.status),
     progress?.current ? '最近阶段 ' + progress.current + (progress.total ? '（' + progress.completed + '/' + progress.total + '）' : '') : '',
     ...(!job.result?.requirementSummary ? requirementProgressLines(statistics) : []),
     resumeNote, job.result?.finalMessage && (resumeNote ? '上次任务回执\n' : '') + job.result.finalMessage,
-    instructions[reason]].filter(Boolean).join('\n');
+    blockedNote, instructions[reason]].filter(Boolean).join('\n');
 }

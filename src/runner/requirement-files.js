@@ -135,6 +135,8 @@ export async function sourceBaseline(project) {
     return {
       repository_id: 'repo-' + (index + 1), name: path.basename(folder), path_or_url: folder,
       branch, commit, remote_baseline: remote || '无本地远端跟踪引用',
+      worktree_commit: await git(['rev-parse', '--verify', 'HEAD^{commit}']),
+      worktree_branch: await git(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => 'detached HEAD'),
       dirty_status: await git(['status', '--porcelain', '--untracked-files=no']).then(value => value ? '存在本机改动' : '无已跟踪文件改动'),
       deployment_verification: '本机源码记录，实际部署由 SIT 部署指纹核验。',
     };

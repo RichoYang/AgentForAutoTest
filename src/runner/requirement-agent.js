@@ -125,7 +125,8 @@ export function createRequirementAgent(config, options) {
       || sourceRefs.some(ref => ["'" + spec.path + "'", '"' + spec.path + '"'].some(literal => state.sources[ref].text.includes(literal)))) ? spec.path : undefined;
     knowledge.operations[name] = { operation: { kind: spec.kind, resource: spec.resource, access: spec.access, method: spec.method,
       table: spec.table, routeTemplate: route }, sources: sourceRefs.map(ref => {
-      const source = state.sources[ref]; return { path: source.path, ref: source.ref, file: source.file, sha256: source.sha256, start: source.start, end: source.end };
+      const source = state.sources[ref]; return { path: source.path, ref: source.ref, file: source.file, sha256: source.sha256,
+        contentSha256: source.contentSha256, origin: source.origin, start: source.start, end: source.end };
     }), reviewedAt: new Date().toISOString(), boundary: state.operationProofs?.[name]?.boundary,
     applicability: 'Source-backed operation discovery only. Revalidate source, schema, resource and identity before use; never reuse object IDs, balances or live states.' };
     await writeJson(config.knowledgeFile, sanitized(knowledge));
@@ -154,14 +155,22 @@ export function createRequirementAgent(config, options) {
     return [{ path: filename, type: '工具与计划诊断归档（gzip JSONL）', sanitized: true }];
   }
   const context = scope => ({ ...scope, state, saveState });
+  async function revalidateSource(scope, old, sourceRef, purpose, failure) {
+    const fresh = await readSource(scope.sourceRoot, { action: old.file ? 'show' : 'read', path: old.path || '.',
+      ...(old.file ? { file: old.file, ref: old.ref } : {}), start: old.start, end: old.end ?? old.start + 199 });
+    const changed = fresh.sha256 !== old.sha256 || old.contentSha256 && fresh.contentSha256 !== old.contentSha256
+      || old.origin && (old.origin.repository !== fresh.origin?.repository || old.origin.file !== fresh.origin?.file);
+    await scope.recordSource?.(sourceRef, fresh, purpose, changed ? 'changed' : 'verified');
+    if (changed) throw agentError(failure);
+    return fresh;
+  }
   async function operationBoundary(scope, runtime, spec, sourceRefs) {
     const sources = [];
     for (const ref of sourceRefs ?? []) {
       const old = state.sources[ref];
       if (!old?.text) throw agentError('Operation proof has no concrete source; read and register again');
-      const fresh = await readSource(scope.sourceRoot, { action: old.file ? 'show' : 'read', path: old.path || '.',
-        ...(old.file ? { file: old.file, ref: old.ref } : {}), start: old.start, end: old.end ?? old.start + 199 });
-      if (fresh.sha256 !== old.sha256) throw agentError('Operation source changed; read the current implementation and re-register the contract');
+      const fresh = await revalidateSource(scope, old, ref, 'operation',
+        'Operation source changed; read the current implementation and re-register the contract');
       sources.push({ path: old.path, file: old.file, ref: old.ref, sha256: fresh.sha256 });
     }
     const schemas = [];
@@ -415,9 +424,8 @@ export function createRequirementAgent(config, options) {
       const verifyPreflight = async (check, preflight) => {
         if (!preflight || preflight.subjectHash !== digest(check.subject ?? {})) throw agentError('Measurement preflight is missing or its subject changed: ' + check.id);
         for (const source of preflight.sources ?? []) {
-          const fresh = await readSource(scope.sourceRoot, { action: source.file ? 'show' : 'read', path: source.path || '.',
-            ...(source.file ? { file: source.file, ref: source.ref } : {}), start: source.start, end: source.end });
-          if (fresh.sha256 !== source.sha256) throw agentError('Measurement source changed; repeat test_measure with current source evidence: ' + check.id);
+          await revalidateSource(scope, source, source.sourceRef, 'measurement',
+            'Measurement source changed; repeat test_measure with current source evidence: ' + check.id);
         }
         for (const saved of preflight.schemas ?? []) {
           const fresh = await runtime.schema({ resource: saved.resource, database: saved.database, table: saved.table });
@@ -495,6 +503,7 @@ export function createRequirementAgent(config, options) {
         if (name === 'source') {
           const result = scope.checkOutput(sanitized(await readSource(scope.sourceRoot, args)));
           const sourceRef = 'SRC-' + digest(result).slice(0, 24);
+          await scope.recordSource?.(sourceRef, result, 'read', 'observed');
           state.sources[sourceRef] = result; await saveState();
           return { sourceRef, ...result };
         }
@@ -925,9 +934,8 @@ export function createRequirementAgent(config, options) {
               url: record.data.url, ready: record.data.ready, lifecycle: record.data.lifecycle,
               identityFields: (args.identity ?? []).map(identity => ({ ...identity, value: observationAt(record.data, identity.field) })) }));
           for (const source of binding.sources) if (scope.sourceRoot && source.path !== undefined) {
-            const fresh = await readSource(scope.sourceRoot, { action: source.file ? 'show' : 'read', path: source.path || '.',
-              ...(source.file ? { file: source.file, ref: source.ref } : {}), start: source.start, end: source.end });
-            if (fresh.sha256 !== source.sha256) throw agentError('Assertion source evidence changed; read current source before semantic review');
+            await revalidateSource(scope, source, source.sourceRef, 'assertion',
+              'Assertion source evidence changed; read current source before semantic review');
           }
           binding.boundary = { resources: Object.fromEntries(scope.resourceNames.map(name => [name,
             scope.resourceIdentity?.(name) ?? digest(scope.resourceCatalog?.[name] ?? name)])),
@@ -1004,6 +1012,8 @@ export function createRequirementAgent(config, options) {
           });
           const sources = (args.sourceRefs ?? []).map(ref => state.sources[ref]);
           if (sources.some(source => !source?.text)) throw agentError('Process sourceRefs require actual source evidence');
+          for (const [index, source] of sources.entries()) await revalidateSource(scope, source, args.sourceRefs[index], 'process',
+            'Process source evidence changed; re-read the file before review');
           let requestProof;
           if (check.requestProof) {
             const { scope: proofScope, phase, resource } = check.requestProof;

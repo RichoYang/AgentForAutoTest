@@ -739,11 +739,15 @@ function routeRequirementJob(state, input) {
     return { ...current(prior.status === 'cancelling' ? 'requirement_stopping' : 'requirement_status'), changed: true };
   }
   const cleanup = command === 'cleanup';
-  const retry = ['retry_unexecuted', 'retry_failed'].includes(command);
+  const retryStatuses = { retry_unexecuted: ['未执行'], retry_failed: ['失败', '未执行'], retry_blocked: ['阻断'] };
+  const retry = Object.hasOwn(retryStatuses, command);
   const canResume = ['awaiting_clarification', 'paused'].includes(prior.status)
     || retry && ['completed', 'failed', 'blocked'].includes(prior.status)
     || cleanup && prior.status === 'cancelled' && prior.events.some(event => event.type === 'cancelled' && event.processesExited);
   if (!canResume) return current('requirement_invalid_transition');
+  if (command === 'retry_blocked' && prior.result?.requirementSummary?.blocked === 0) {
+    return current('requirement_no_blocked_cases');
+  }
   if (prior.result?.requirementWait === 'project_confirmation' && command !== 'confirm' && !cleanup) {
     return current('requirement_confirmation_required');
   }
@@ -769,7 +773,7 @@ function routeRequirementJob(state, input) {
   }
   if (retry) {
     prior.requirement.retryRequest = input.sourceMessageId;
-    prior.requirement.retryStatuses = command === 'retry_failed' ? ['失败', '未执行'] : ['未执行'];
+    prior.requirement.retryStatuses = retryStatuses[command];
   }
   delete prior.requirement.stopMode;
   prior.status = 'queued';

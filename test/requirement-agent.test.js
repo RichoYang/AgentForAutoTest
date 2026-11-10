@@ -262,6 +262,9 @@ test('failed-case retry preserves same Job history and passed results, and refus
       await call('test_finish', { args: { actual: 'Module fixture only', blocker: { dependency: 'fixture', required_action: 'native acceptance', attempts: ['module only'] } } }, 'finish');
       return { text: 'recorded' };
     } }) });
+  job.requirement.retryStatuses = ['阻断'];
+  await assert.rejects(run(), { code: 'cleanup_pending' }); assert.equal(calls, 0);
+  job.requirement.retryStatuses = ['失败', '未执行'];
   await assert.rejects(run(), { code: 'cleanup_pending' }); assert.equal(calls, 0);
   journal.mutations[0].cleanup.verified = true;
   await run();

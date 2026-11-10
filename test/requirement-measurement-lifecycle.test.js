@@ -88,6 +88,7 @@ test('operation reuse rechecks actual source and resource boundaries while live 
   const root = await mkdtemp(path.join(os.tmpdir(), 'aos-operation-proof-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const file = path.join(root, 'service.js'); await writeFile(file, "GET '/value' is a read-only endpoint; amount changes live.");
+  const sourceReceipts = [];
   let reads = 0, resourceVersion = 'first';
   const server = createServer((_request, response) => response.end(JSON.stringify({ amount: ++reads })));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -115,9 +116,14 @@ test('operation reuse rechecks actual source and resource boundaries while live 
       return { text: 'done' };
     } }) });
   await agent.execute({ item: { caseId: 'C1' }, reports: root, sourceRoot: root, resourceNames: ['api'], resourceIdentity: () => resourceVersion,
+    recordSource: (ref, source, purpose, disposition) => sourceReceipts.push({ ref, hash: source.contentSha256, purpose, disposition }),
     useRead: (_, run) => run({ base_url: 'http://127.0.0.1:' + server.address().port }),
     headers: ['预期结果'], row: ['1. Module only'], source: {}, checkOutput: value => value, mutations: [] });
   assert.equal(reviews, 3); assert.equal(reads, 3);
+  const firstRead = sourceReceipts.find(item => item.purpose === 'read');
+  const stale = sourceReceipts.find(item => item.disposition === 'changed');
+  assert.equal(stale.ref, firstRead.ref);
+  assert.notEqual(stale.hash, firstRead.hash);
   const knowledge = JSON.parse(await readFile(path.join(root, 'knowledge.json')));
   assert.equal(knowledge.operations.read_value.operation.routeTemplate, '/value');
   assert.equal(knowledge.operations.read_value.boundary.resource, 'second');

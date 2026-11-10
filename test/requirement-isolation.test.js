@@ -11,15 +11,91 @@ import { ReportDelivery } from '../src/control-plane/report-delivery.js';
 import { handleRequirementMessage, validateRequirementRoutes } from '../src/control-plane/requirement-testing.js';
 import { createRequirementAdapter } from '../src/runner/requirement-adapter.js';
 import { digest, RequirementWait } from '../src/runner/requirement-feishu.js';
-import { command, generatorReferences, readJson, regressionReferences, writeJson } from '../src/runner/requirement-files.js';
+import { command, generatorReferences, readJson, regressionReferences, sourceBaseline, writeJson } from '../src/runner/requirement-files.js';
 import { caseReleaseRequirement, matchesCaseRelease, verifyRequirementRelease } from '../src/runner/requirement-release.js';
 import { versionNames } from '../src/runner/requirement-publication.js';
 import { runRequirementTest } from '../src/runner/requirement-test.js';
+import { readSource } from '../src/runner/requirement-agent-resources.js';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const check = (field, expected, assertion = 1) => ({ field, expected, assertion, operator: 'equals' });
 const budget = { id: 'budget', label: '预算余额', type: 'number', unit: '元', unitField: ['currency'], field: ['balance'] };
 const budgetOutputs = { balance: ['data', 'balance'], currency: ['data', 'currency'], unrelated: ['data', 'unrelated'] };
+
+test('static mixed outcomes preserve compared failures across later missing data and transport failures', async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'agentos-static-mixed-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let balance = 80;
+  let mode = 'missing';
+  const url = await localServer(t, (req, res) => {
+    if (req.url === '/second' && mode === 'network') return req.socket.destroy();
+    const data = req.url === '/first' ? { balance, currency: '元' } : mode === 'missing' ? { currency: '元' } : { balance: 50, currency: '元' };
+    res.end(JSON.stringify({ data }));
+  });
+  const second = { ...budget, id: 'limit', label: '计划限额' };
+  const operation = (route, rule) => ({ kind: 'http', resource: route, path: '/' + route, outputs: budgetOutputs, observations: [rule] });
+  const adapter = createRequirementAdapter({ operations: { first: operation('first', budget), second: operation('second', second) } }, {
+    plan: async () => ({ missing: [], steps: [
+      { operation: 'first', input: {}, checks: [check(['balance'], 100)] },
+      { operation: 'second', input: {}, checks: [check(['balance'], 50, 2)], ...(mode === 'skipped' ? { when: { ref: { from: 0, field: ['balance'] }, equals: 999 } } : {}) },
+    ] }),
+  });
+  const scope = { item: { caseId: 'CASE-mixed' }, row: ['1. 预算余额100元\n2. 计划限额50元'], headers: ['预期结果'], reports: dir,
+    useRead: (resource, run) => {
+      if (resource === 'second' && mode === 'denied') throw new RequirementWait('environment_scope', 'scope revoked');
+      return run({ base_url: url });
+    }, checkOutput: value => value, repositories: [] };
+  const execute = async () => adapter.execute({ ...scope, preparation: await adapter.prepare(scope) });
+  for (mode of ['missing', 'skipped', 'network', 'denied']) {
+    const result = await execute();
+    assert.equal(result.status, '失败', mode);
+    assert.ok(result.issue && result.blocker);
+    assert.equal(result.assertions[0].observed, 80);
+    assert.equal(result.checkCoverage.compared, 1);
+    assert.equal(result.checkCoverage.total, 2);
+  }
+  mode = 'missing'; balance = 100;
+  const partial = await execute();
+  assert.equal(partial.status, '阻断');
+  assert.equal(partial.issue, undefined);
+  assert.equal(partial.checkCoverage.passed, 1);
+});
+
+test('source intake distinguishes configured branch, clean non-target HEAD, dirty bytes and explicit ref', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agentos-source-attempt-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const git = async (...args) => (await command('git', ['-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args])).trim();
+  await git('init', '-b', 'main');
+  await writeFile(path.join(root, 'service.js'), 'main\n');
+  await git('add', '.'); await git('commit', '-m', 'main');
+  const main = await git('rev-parse', 'HEAD');
+  await git('switch', '-c', 'other');
+  await writeFile(path.join(root, 'service.js'), 'other\n');
+  await git('commit', '-am', 'other');
+  const head = await git('rev-parse', 'HEAD');
+  const [baseline] = await sourceBaseline({ repoPath: root, baseBranch: 'main' });
+  assert.equal(baseline.commit, main);
+  assert.equal(baseline.worktree_commit, head);
+  assert.equal(baseline.worktree_branch, 'other');
+  await writeFile(path.join(root, 'service.js'), 'dirty\n');
+  const physical = await readSource(root, { action: 'read', path: 'service.js' });
+  const pinned = await readSource(root, { action: 'show', path: '.', file: 'service.js', ref: 'main' });
+  assert.equal(physical.origin.commit, head);
+  assert.equal(physical.origin.kind, 'worktree');
+  assert.equal(physical.contentSha256, sha('dirty\n'));
+  assert.equal(pinned.origin.commit, main);
+  assert.equal(pinned.origin.kind, 'git');
+  assert.equal(pinned.contentSha256, sha('main\n'));
+  const child = path.join(root, 'component');
+  await git('init', '-b', 'main', child);
+  await writeFile(path.join(child, 'service.js'), 'child\n');
+  await git('-C', child, 'add', '.'); await git('-C', child, 'commit', '-m', 'child');
+  const childRead = await readSource(root, { action: 'read', path: 'component/service.js' });
+  const repos = await sourceBaseline({ repoPath: root, analysisRepositories: [{ path: '.', branch: 'main' }, { path: 'component', branch: 'main' }] });
+  assert.equal(childRead.origin.repository, 'component');
+  assert.equal(childRead.origin.commit, repos[1].worktree_commit);
+  assert.notEqual(childRead.origin.commit, repos[0].worktree_commit);
+});
 
 async function localServer(t, handler) {
   const server = createServer(handler);
@@ -164,6 +240,9 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   const fakeCli = path.join(root, 'no-cli.cmd');
   await writeFile(fakeCli, '@exit /b 94\r\n');
   const requests = [];
+  const fixtures = new Set();
+  let revoked = true;
+  let credential = 'fixture-before-rotation';
   const url = await localServer(t, async (req, res) => {
     const request = new URL(req.url, 'http://localhost');
     requests.push(req.method + ' ' + request.pathname);
@@ -173,17 +252,29 @@ test('an original Feishu job resumes past its legacy release wait and records HT
     } else if (request.pathname === '/runtime-version') {
       res.end('runtime-bundle');
     } else if (request.pathname === '/refresh-fixture') {
-      await writeFile(iniPath, resources('unknown'));
+      if (revoked) await writeFile(iniPath, resources('unknown'));
       res.end('{}');
-    } else if (request.pathname === '/fixture' && req.method === 'GET') {
-      res.end(JSON.stringify({ exists: false, key: request.searchParams.get('code') }));
+    } else if (request.pathname === '/fixture') {
+      let key = request.searchParams.get('code');
+      if (req.method === 'POST') {
+        let raw = ''; for await (const chunk of req) raw += chunk;
+        key = JSON.parse(raw).code;
+        assert.ok(!fixtures.has(key), 'new fixture should be dispatched once');
+        fixtures.add(key);
+      }
+      if (req.method === 'DELETE') fixtures.delete(key);
+      res.end(JSON.stringify({ exists: fixtures.has(key), key }));
+    } else if (request.pathname === '/mismatch') {
+      res.end('{"data":{"balance":80,"currency":"元"}}');
+    } else if (request.pathname === '/limit') {
+      res.writeHead(503).end('{"error":"unavailable"}');
     } else {
       res.end('{"data":{"balance":100,"currency":"元"}}');
     }
   });
   const resources = tier => ['[Sample.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=read_only\nenvironment=Uat',
     '[Sample.Uat.Fixture]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=' + tier]
-    .map(section => section + '\nbase_url=' + url + '\n').join('\n');
+    .map(section => section + '\nbase_url=' + url + '\npassword=' + credential + '\n').join('\n');
   await writeFile(iniPath, resources('Uat'));
   const readBudget = { resource: 'platform', kind: 'http', path: '/budget', outputs: budgetOutputs, observations: [budget] };
   const settings = {
@@ -201,7 +292,8 @@ test('an original Feishu job resumes past its legacy release wait and records HT
       releaseManifest: { resource: 'platform', path: '/releases', components: {
         web: { resource: 'platform', path: '/runtime-version', repository: 'repo' },
       } },
-      operations: { budget: readBudget, pinned: { ...readBudget, path: '/pinned-budget' },
+      operations: { budget: readBudget, pinned: { ...readBudget, path: '/pinned-budget' }, mismatch: { ...readBudget, path: '/mismatch' },
+        limit: { ...readBudget, path: '/limit', observations: [{ ...budget, id: 'limit', label: '计划限额' }] },
         refresh: { resource: 'platform', kind: 'http', path: '/refresh-fixture', outputs: {} },
         fixture: { resource: 'fixture', kind: 'fixture', key: 'code',
           lookup: { kind: 'http', path: '/fixture', outputs: { exists: ['exists'], key: ['key'] } },
@@ -228,6 +320,7 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   const source = { id: 'LocalDoc', revision: 4, title: '发布取证', url: doc, xml: '<h1 id="A1">预算</h1>', embedded: [] };
   client.readRequirement = async () => ({ ...source, hash: digest(source) });
   const rows = ['环境变化时拒绝写入', '指定版本场景', '普通预算读取'].map(name => sampleRow(name, '1. 预算余额100元'));
+  rows.push(sampleRow('已证明失败后服务中断', '1. 预算余额100元\n2. 计划限额50元'));
   rows[1][headers.indexOf('前置条件')] = '1. 发布版本前置：web imageTag=uat-123';
   let generationCount = 0;
   const dependencies = { client, async generate() {
@@ -240,6 +333,9 @@ test('an original Feishu job resumes past its legacy release wait and records HT
       { operation: 'refresh', input: {}, checks: [] }, { operation: 'fixture', input: {}, checks: [] }, read,
     ] };
     if (prompt.includes('指定版本场景')) return { missing: [], steps: [{ ...read, operation: 'pinned' }] };
+    if (prompt.includes('已证明失败后服务中断')) return { missing: [], steps: [
+      { ...read, operation: 'mismatch' }, { ...read, operation: 'limit', checks: [check(['balance'], 50, 2)] },
+    ] };
     return { missing: [], steps: [read] };
   }, async visualModel(_prompt, { images }) {
     return { sheets: images.map(file => ({ filename: path.basename(file), usable: true, issues: [] })) };
@@ -272,6 +368,8 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   assert.equal(completed.outcome, 'ready', completed.finalMessage);
   assert.equal(completed.requirementSummary.pass, 1);
   assert.equal(completed.requirementSummary.blocked, 2);
+  assert.equal(completed.requirementSummary.fail, 1);
+  assert.equal(completed.requirementSummary.incompleteFailures, 1);
   const current = await readJson(journalPath);
   assert.deepEqual(current.publication, old.publication);
   assert.deepEqual(await readFile(path.join(workDir, 'cases.json')), cases);
@@ -284,11 +382,46 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   assert.equal(current.deploymentLastCheck.proof[0].observed, sha('runtime-bundle'));
   // Refresh invalidates the fixture binding, so neither lookup nor mutation is dispatched.
   assert.deepEqual(requests, ['GET /releases', 'GET /runtime-version', 'GET /refresh-fixture',
-    'GET /releases', 'GET /runtime-version', 'GET /budget']);
+    'GET /releases', 'GET /runtime-version', 'GET /budget', 'GET /mismatch', 'GET /limit']);
   const report = await readJson(path.join(workDir, 'normalized-report.json'));
   assert.ok(report.meta.method_notes.some(note => /HTTP 403.*缺少构建号.*缺少镜像标识/.test(note)));
   assert.ok(report.evidence_index.some(entry => entry.type === '发布版本核验'));
-  assert.deepEqual(report.blockers.map(item => item.dependency), ['已授权的非生产资源', '指定发布版本前置']);
+  assert.deepEqual(report.blockers.map(item => item.dependency), ['已授权的非生产资源', '指定发布版本前置', 'limit']);
+  assert.equal(report.issues.length, 1);
+  assert.equal(report.issues[0].case_ids[0], report.blockers.at(-1).case_ids[0]);
+  assert.match(report.issues[0].actual_result, /实测 80元.*独立检查 1\/2/);
+  const oldArtifact = completed.requirementReport;
+  const savedWorkbook = path.join(dataDir, 'exports', jobId, oldArtifact.filename);
+  const oldWorkbook = await readFile(savedWorkbook);
+  const blocked = Object.entries(current.results).filter(([, result]) => result.status === '阻断').map(([caseId]) => caseId);
+  const passed = Object.entries(current.results).find(([, result]) => result.status === '通过')[0];
+  const oldHead = current.sourceAttempts[blocked[0] + '@1'].repositories[0].worktree_commit;
+  await command('git', ['-C', repo, 'switch', '-c', 'repair']);
+  await command('git', ['-C', repo, '-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'Repair']);
+  revoked = false;
+  credential = 'fixture-after-rotation';
+  await writeFile(iniPath, resources('Uat'));
+  assert.equal((await message('retry-blocked', '重试阻断')).jobId, jobId);
+  assert.deepEqual(await message('retry-blocked', '重试阻断'), { duplicate: true });
+  const resumed = await run();
+  assert.equal(resumed.outcome, 'ready', resumed.finalMessage);
+  assert.equal(resumed.requirementSummary.pass, 2);
+  assert.equal(resumed.requirementSummary.blocked, 1);
+  assert.equal(resumed.requirementSummary.fail, 1);
+  assert.equal(requests.filter(request => request === 'GET /mismatch').length, 1);
+  assert.equal(requests.filter(request => request === 'POST /fixture').length, 1);
+  assert.equal(requests.filter(request => request === 'DELETE /fixture').length, 1);
+  assert.equal(fixtures.size, 0);
+  const newer = await readJson(journalPath);
+  assert.equal(newer.executionHistory.at(-1).reason, 'retry_blocked');
+  assert.equal(newer.executionHistory.at(-1).results[blocked[0]].status, '阻断');
+  assert.notEqual(newer.executionResourceBindings.platform, current.executionResourceBindings.platform);
+  assert.deepEqual(newer.results[passed], current.results[passed]);
+  assert.equal(newer.sourceAttempts[blocked[0] + '@1'].repositories[0].worktree_commit, oldHead);
+  assert.notEqual(newer.sourceAttempts[blocked[0] + '@2'].repositories[0].worktree_commit, oldHead);
+  assert.match(resumed.requirementReport.filename, /-重试1\.xlsx$/);
+  assert.deepEqual(await readFile(savedWorkbook), oldWorkbook);
+  assert.equal(newer.reportHistory[0].artifact.id, oldArtifact.id);
 });
 
 test('isolated requirement revision runs real Chromium, HTTP, recovery, workbook and original-topic delivery',
@@ -494,12 +627,13 @@ test('isolated requirement revision runs real Chromium, HTTP, recovery, workbook
   assert.deepEqual(await message('lost_receipt', '继续测试'), { duplicate: true });
   assert.equal((await run()).requirementWait, 'cleanup_pending');
   assert.equal(owned.size, 1);
-  assert.equal((await readJson(journalFile)).mutations[0].reconciled, true);
-  assert.equal((await message('cleanup', '恢复清理')).jobId, jobId);
-  assert.equal((await store.getJob(jobId)).requirement.cleanupAfterCancellation, false);
+  const waitingCleanup = await readJson(journalFile);
+  assert.equal(waitingCleanup.mutations[0].reconciled, true);
+  assert.equal(Object.keys(waitingCleanup.results).length, 1, 'No later independent case runs before verified cleanup');
+  assert.equal((await message('cleanup-and-resume', '继续测试')).jobId, jobId);
   const completed = await run();
   assert.equal(completed.outcome, 'ready', completed.finalMessage);
-  assert.match(completed.finalMessage, /保留已有业务判定/);
+  assert.match(completed.finalMessage, /已核验恢复/);
   assert.equal(createCount, 1);
   assert.equal(deleteCount, 2);
   assert.equal(owned.size, 0);

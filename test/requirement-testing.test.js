@@ -175,6 +175,16 @@ test('two specialists in one group isolate trusted app, project, duplicate event
   await ltx.store.transact(state => { state.jobs[0].status = 'completed'; });
   await follow('retryMissing', '重试未执行');
   assert.deepEqual((await ltx.store.getJob(a.jobId)).requirement.retryStatuses, ['未执行']);
+  await ltx.store.transact(state => {
+    state.jobs[0].status = 'completed';
+    state.jobs[0].result = { requirementSummary: { blocked: 1 } };
+  });
+  assert.equal((await follow('retryBlocked', '重试阻断')).jobId, a.jobId);
+  assert.deepEqual((await ltx.store.getJob(a.jobId)).requirement.retryStatuses, ['阻断']);
+  assert.deepEqual(await follow('retryBlocked', '重试阻断'), { duplicate: true });
+  await ltx.store.transact(state => { state.jobs[0].status = 'cancelled'; });
+  await follow('retryCancelled', '重试阻断');
+  assert.equal((await ltx.store.getJob(a.jobId)).status, 'cancelled');
   assert.equal((await ltx.store.read()).jobs.length, 1);
 });
 

@@ -26,13 +26,16 @@ export async function loadAdapter(spec) {
   return adapter;
 }
 
-export async function executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, dataDir, save, progress, codexBin, plan, project, agentModel, review }) {
+export async function executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, dataDir, save, progress,
+  codexBin, plan, project, agentModel, review, captureRepositories }) {
   // An upgrade must never convert a terminal cancellation into an implicit retry.
   // The explicit cleanup path below remains available without running cases.
   if (job.status === 'cancelled' && !job.requirement?.cleanupOnly) {
     throw new RequirementWait('requirement_cancelled', '任务已取消；版本升级不恢复执行，历史结果和清理记录保持。');
   }
   const environment = settings.environment;
+  const agentMode = !settings.adapter && settings.execution?.mode === 'agent';
+  const staticMode = !settings.adapter && Boolean(settings.execution) && !agentMode;
   const resources = await requirementResources(environment, { allowUnavailable: true, dataDir });
   const adapter = settings.adapter ? await loadAdapter(settings.adapter) : settings.execution
     ? (settings.execution.mode === 'agent' ? createRequirementAgent : createRequirementAdapter)(settings.execution, { workDir, codexBin, plan, agentModel, review }) : await loadAdapter();
@@ -53,23 +56,30 @@ export async function executeCases({ job, settings, journal, source, index, mani
   const lockFile = path.join(lockRoot, environment.lockKey + '.json');
   let lock = await readJson(lockFile);
   const retryRequest = job.requirement.retryRequest;
-  const retry = retryRequest && retryRequest !== journal.lastRetryRequest;
-  const retryStatuses = retry && job.requirement.retryStatuses?.includes('失败') ? ['失败', '未执行'] : ['未执行'];
+  const retry = !job.requirement.cleanupOnly && retryRequest && retryRequest !== journal.lastRetryRequest;
+  const blockedOnly = retry && job.requirement.retryStatuses?.includes('阻断');
+  const retryStatuses = blockedOnly ? ['阻断'] : retry && job.requirement.retryStatuses?.includes('失败') ? ['失败', '未执行'] : ['未执行'];
   const advancedAttempts = new Set();
   if ((migrating || retry) && (lock && (lock.jobId !== job.id || lock.binding !== journal.executionBinding))) {
     throw new RequirementWait('environment_busy', '原任务资源锁身份已变化，不能迁移或重试。');
   }
   if (retry && pendingMutations.length) throw new RequirementWait('cleanup_pending', '重试前须对账并恢复原尝试的变更，台账已保留。');
+  const selected = blockedOnly ? index.filter(item => journal.results?.[item.caseId]?.status === '阻断').map(item => item.caseId) : null;
+  if (selected?.length === 0) {
+    throw new RequirementWait('retry_no_blocked_cases', '原任务没有已落盘的阻断用例。任务级等待解除后请继续测试。');
+  }
   if (migrating || retry) {
     journal.executionHistory ??= [];
     journal.executionHistory.push(structuredClone({ binding: journal.executionBinding, at: new Date().toISOString(),
-      reason: migrating ? 'adapter_upgrade_without_pending_effects' : retryStatuses.includes('失败') ? 'retry_failed' : 'retry_unexecuted',
+      reason: blockedOnly ? 'retry_blocked' : migrating ? 'adapter_upgrade_without_pending_effects'
+        : retryStatuses.includes('失败') ? 'retry_failed' : 'retry_unexecuted',
       retryStatuses, retryRequest: retry ? retryRequest : undefined, results: journal.results,
       preparations: journal.preparations, executionSteps: journal.executionSteps, cleanup: journal.cleanup, mutations: journal.mutations,
-      caseAttempts: journal.caseAttempts, executionCases: journal.executionCases, inFlight: journal.inFlight }));
+      caseAttempts: journal.caseAttempts, executionCases: journal.executionCases, inFlight: journal.inFlight,
+      resourceBindings: journal.executionResourceBindings, repositories: journal.repositories, caseCleanup: journal.caseCleanup }));
     journal.caseAttempts ??= {};
     for (const item of index) {
-      if (!journal.results?.[item.caseId] || retryStatuses.includes(journal.results[item.caseId].status)) {
+      if (selected ? selected.includes(item.caseId) : !journal.results?.[item.caseId] || retryStatuses.includes(journal.results[item.caseId].status)) {
         const checkpoint = journal.executionCases?.[item.caseId];
         const attempted = journal.results?.[item.caseId] || journal.preparations?.[item.caseId]
           || checkpoint && (journal.caseAttempts[item.caseId] === undefined || checkpoint.lastAttempt === journal.caseAttempts[item.caseId]);
@@ -78,11 +88,22 @@ export async function executeCases({ job, settings, journal, source, index, mani
         if (journal.results) delete journal.results[item.caseId];
         if (journal.preparations) delete journal.preparations[item.caseId];
         if (journal.executionSteps) delete journal.executionSteps[item.caseId];
+        if (journal.caseCleanup) delete journal.caseCleanup[item.caseId];
       }
     }
     journal.cleanup = null;
     journal.mutations = [];
+    if (retry) {
+      // Only a new, explicitly requested attempt may bind the current identity.
+      // No previous observations or mutations can cross this boundary.
+      delete journal.executionResourceBindings;
+      journal.retrySelection = selected;
+      journal.inFlight = null;
+    }
     journal.reportHistory ??= [];
+    if (journal.reportId || journal.artifact) {
+      journal.reportSequence = (journal.reportSequence ?? journal.reportHistory.length) + 1;
+    }
     if (journal.artifact) journal.reportHistory.push({ artifact: journal.artifact, reportId: journal.reportId, reportTime: journal.reportTime });
     for (const field of ['artifact', 'reportId', 'reportTime', 'visualReview', 'visualProgress']) delete journal[field];
     journal.executionBinding = binding;
@@ -118,6 +139,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
     throw new RequirementWait('environment_busy', 'SIT 资源正被另一个任务占用或等待清理，释放后可在本话题回复继续。');
   }
   journal.executionBinding = binding;
+  if (!job.requirement.cleanupOnly && captureRepositories) journal.repositories = await captureRepositories();
   if (job.requirement.cleanupOnly && currentBinding !== binding) {
     journal.cleanupExecutorHistory ??= [];
     journal.cleanupExecutorHistory.push({ originalBinding: binding, executorBinding: currentBinding, at: new Date().toISOString(), businessRetry: false });
@@ -218,7 +240,8 @@ export async function executeCases({ job, settings, journal, source, index, mani
       await save();
     },
   });
-  if (settings.execution?.mode === 'agent' && (journal.cleanup || journal.inFlight)) {
+  if (agentMode && (journal.cleanup || journal.inFlight)
+    || staticMode && pendingMutations.length && (!journal.inFlight || job.requirement.cleanupOnly)) {
     // Resume always reconciles recorded effects first, including a crash before a receipt.
     const recovered = resources.checkOutput(await clean(journal.mutations));
     journal.cleanup = recovered; await save();
@@ -237,6 +260,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
   if (!job.requirement.cleanupOnly && !journal.cleanup) {
     await collectRelease();
     for (const item of index) {
+      if (journal.retrySelection && !journal.retrySelection.includes(item.caseId)) continue;
       const row = manifest.rows[item.row - 2];
       const caseVersion = digest([item.caseId, item.requirementIds, row, ...(item.assertions ? [item.assertions] : [])]);
       const checkpoint = journal.executionCases[item.caseId];
@@ -245,8 +269,26 @@ export async function executeCases({ job, settings, journal, source, index, mani
       }
       if (journal.results[item.caseId]) continue;
       journal.executionCases[item.caseId] ??= { caseVersion, publicationVersion: journal.publication.version };
-      journal.executionCases[item.caseId].lastAttempt = journal.caseAttempts?.[item.caseId] ?? 1;
-      const caseInput = { ...scope, item, row, headers: manifest.headers, attempt: journal.caseAttempts?.[item.caseId] ?? 1,
+      const attempt = journal.caseAttempts?.[item.caseId] ?? 1;
+      journal.executionCases[item.caseId].lastAttempt = attempt;
+      const sourceKey = item.caseId + '@' + attempt;
+      let sourceAttempt;
+      if (captureRepositories) {
+        journal.sourceAttempts ??= {};
+        sourceAttempt = journal.sourceAttempts[sourceKey] ??= { caseId: item.caseId, attempt, at: new Date().toISOString(),
+          repositories: await captureRepositories(), reads: [] };
+        await save();
+      }
+      const caseInput = { ...scope, item, row, headers: manifest.headers, attempt,
+        repositories: sourceAttempt?.repositories ?? scope.repositories,
+        async recordSource(sourceRef, file, purpose, disposition) {
+          if (!sourceAttempt || !file.contentSha256) return;
+          const entry = resources.checkOutput({ sourceRef, origin: file.origin, path: file.path, start: file.start, end: file.end,
+            contentSha256: file.contentSha256, purpose, disposition });
+          if (sourceAttempt.reads.some(prior => prior.id === digest(entry))) return;
+          sourceAttempt.reads.push({ ...entry, id: digest(entry), at: new Date().toISOString() });
+          await save();
+        },
         getMutations: () => journal.mutations.filter(record => record.caseId === item.caseId),
         async cleanupCase() {
           const result = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
@@ -262,6 +304,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
           const actual = '无法确认用例要求的发布版本' + (version.component ? '（' + version.component + ' ' + expected + '）' : '') + '。';
           journal.results[item.caseId] = { status: '阻断', actual, evidence: [releaseEvidence],
             blocker: { dependency: '指定发布版本前置', required_action: '核对该用例要求的组件和版本，并补充对应的运行证据。' },
+            ...(sourceAttempt ? { sourceAttempt: sourceKey } : {}),
             at: new Date().toISOString() };
           if (journal.inFlight === item.caseId) journal.inFlight = null;
           await save();
@@ -306,7 +349,8 @@ export async function executeCases({ job, settings, journal, source, index, mani
           if (prior.phase === 'applied') throw new RequirementWait('mutation_uncertain', '此前已生效变更回读不再满足，不能自动重复提交。');
         }
         await confirmWriteTarget(intent.resource, intent.operation);
-        const record = prior ?? { key, caseId: item.caseId, intent: resources.checkOutput(intent), phase: 'prepared', at: new Date().toISOString() };
+        const record = prior ?? { key, caseId: item.caseId, attempt: caseInput.attempt,
+          intent: resources.checkOutput(intent), phase: 'prepared', at: new Date().toISOString() };
         if (!prior) journal.mutations.push(record);
         record.applyAttempts ??= [];
         const application = { at: new Date().toISOString(), status: 'sent' };
@@ -363,20 +407,23 @@ export async function executeCases({ job, settings, journal, source, index, mani
           }
         }
       }
-      journal.results[item.caseId] = { ...result, at: new Date().toISOString() };
+      journal.results[item.caseId] = { ...result, ...(sourceAttempt ? { sourceAttempt: sourceKey } : {}), at: new Date().toISOString() };
       journal.inFlight = null;
       await save();
-      if (settings.execution?.mode === 'agent') {
-        let cleanup = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
-        if (!cleanup.verified) {
+      const caseMutations = journal.mutations.filter(record => record.caseId === item.caseId);
+      if (agentMode || staticMode && caseMutations.length) {
+        let cleanup = resources.checkOutput(await clean(caseMutations));
+        if (agentMode && !cleanup.verified) {
           // A lost response or transient recovery request gets a fresh readback.
           // The adapter compares before/after state before issuing another write.
-          cleanup = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
+          cleanup = resources.checkOutput(await clean(caseMutations));
         }
         journal.caseCleanup ??= {};
         journal.caseCleanup[item.caseId] = cleanup;
         await save();
-        if (!cleanup.verified) throw new RequirementWait('cleanup_pending', '该用例的变更尚未恢复；先处理清理，未启动后续用例。');
+        if (!cleanup.verified || cleanup.pending?.length || caseMutations.some(item => !verifiedMutationCleanup(item))) {
+          throw new RequirementWait('cleanup_pending', '该用例的变更尚未恢复；先处理清理，未启动后续用例。');
+        }
       }
       await progress('用例已结论并完成清理 ' + item.caseId, scope.caseSummary().completed, index.length,
         { caseId: item.caseId, cases: scope.caseSummary(), phase: 'case_complete', elapsedMs: Date.now() - Date.parse(journal.startedAt ?? journal.results[item.caseId].at),

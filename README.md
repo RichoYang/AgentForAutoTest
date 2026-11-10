@@ -2,7 +2,9 @@
 
 新增需求执行链路说明见 [测量、证据与恢复](docs/execution-chain-repair.md)；问题清单见 [修复范围](docs/execution-chain-repair.spec.md)，实际结果与边界见 [验证记录](docs/execution-chain-repair.verification.md)。
 
-**程序版本：v1.56.0** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
+**程序版本：v1.57.0** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
+
+同 Job 阻断重试、静态执行结论和源码追溯见[执行与报告](docs/requirement-testing.md)及[验证记录](docs/execution-retry-source.verification.md)。
 
 执行前业务/过程分类、测量契约与页面阶段绑定见[使用说明](docs/execution-preflight.md)、[问题表](docs/execution-preflight.spec.md)及[验证记录](docs/execution-preflight.verification.md)。
 

@@ -209,7 +209,8 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       await save();
     }
     await executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, dataDir: config.dataDir, save, progress, codexBin: config.codexBin,
-      plan: dependencies.plan, project, agentModel: dependencies.agentModel, review: dependencies.review });
+      plan: dependencies.plan, project, agentModel: dependencies.agentModel, review: dependencies.review,
+      captureRepositories: () => sourceBaseline(project) });
 
     if (!settings.adapter && settings.execution?.mode === 'agent' && Object.values(journal.results ?? {}).some(result => result.checkCoverage?.processTotal)) {
       const resources = await requirementResources(settings.environment, { allowUnavailable: true, dataDir: config.dataDir });
@@ -238,8 +239,10 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         verificationHash: artifact.verificationHash, visualSheets: journal.visualReview.count } });
     }
     const processProven = processChecks.filter(check => check.disposition === 'proven').length;
+    const incompleteFailures = Object.values(journal.results ?? {}).filter(result => result.status === '失败'
+      && result.checkCoverage && (result.blocker || result.checkCoverage.compared < result.checkCoverage.total)).length;
     journal.phase = job.requirement.cleanupOnly ? '清理与报告完成'
-      : summary.notExecuted || summary.blocked ? '报告生成；业务验收未完成' : '业务测试及报告完成';
+      : summary.notExecuted || summary.blocked || incompleteFailures ? '报告生成；业务验收未完成' : '业务测试及报告完成';
     journal.artifact = artifact;
     await save();
     const cleanup = journal.cleanup?.verified === true ? '已核验恢复' : '待恢复';
@@ -249,6 +252,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         ? '本轮已恢复清理，未完成的业务用例保留为未执行。' : '本轮已恢复清理并保留已有业务判定。'] : []),
       '执行统计：' + summary.total + ' 条，' + summary.pass + ' 通过，' + summary.fail + ' 失败，' + summary.blocked + ' 阻断，'
         + summary.notExecuted + ' 未执行，' + summary.notApplicable + ' 不适用。',
+      ...(incompleteFailures ? ['其中 ' + incompleteFailures + ' 条已证明失败仍有未完成检查或执行缺口，分别见缺陷和阻断记录。'] : []),
       '覆盖：' + journal.requirements.length + ' 项已抽取条款都有用例映射。登记 ' + summary.issues + ' 项问题，详情见测试报告。',
       '清理：' + cleanup + '。报告已通过结构与文件校验并生成逐表预览。',
       ...(processChecks.length ? ['当前过程证明 ' + processProven + '/' + processChecks.length
@@ -258,6 +262,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     ].join('\n');
     return { outcome: 'ready', finalMessage, requirementReport: artifact,
       requirementSummary: { ...summary, cleanup, caseUrl: journal.publication.url,
+        ...(incompleteFailures ? { incompleteFailures } : {}),
         ...(processChecks.length ? { process: { total: processChecks.length, proven: processProven } } : {}) } };
   } catch (error) {
     const known = error instanceof RequirementWait;

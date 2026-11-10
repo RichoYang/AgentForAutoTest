@@ -2,7 +2,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import {randomUUID} from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import mysql from 'mysql2/promise';
 import { chromium } from 'playwright';
 import { observationAt } from './requirement-assertions.js';
@@ -76,21 +76,46 @@ export async function readSource(root, args) {
   if (relative.startsWith('..') || path.isAbsolute(relative)) throw agentError('Source path is outside this project');
   const sensitivePath = /(?:^|[\\/])(?:\.git|\.env[^\\/]*|\.npmrc|settings\.xml|requirement-resource-bindings|[^\\/]+\.ini|[^\\/]+\.local\.[^\\/]+)(?:[\\/]|$)/i;
   if (sensitivePath.test(relative) || sensitivePath.test(args.file ?? '')) throw agentError('Credentials and repository internals are not source-tool output');
+  const git = async (folder, argv, encoding = 'utf8') => (await exec('git', ['-C', folder, ...argv],
+    { encoding, windowsHide: true, maxBuffer: 32 * 1024 * 1024 })).stdout;
+  const readGitRoot = async folder => {
+    const top = await git(folder, ['rev-parse', '--show-toplevel']).catch(() => '');
+    if (!top) return null;
+    const gitRoot = await realpath(top.trim());
+    const repoPath = path.relative(actualRoot, gitRoot);
+    return repoPath.startsWith('..') || path.isAbsolute(repoPath) ? null : gitRoot;
+  };
+  const contentSha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+  const head = async folder => (await git(folder, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
+  const listing = (bytes, origin) => {
+    const text = bytes.toString('utf8');
+    const lines = text.split(/\r?\n/), start = args.start ?? 1, end = args.end ?? start + 199;
+    return { sha256: digest(text), contentSha256: contentSha256(bytes), origin, start, end: Math.min(end, lines.length),
+      total: lines.length, text: lines.slice(start - 1, end).map((line, i) => `${start + i}: ${line}`).join('\n') };
+  };
   if (['refs', 'history', 'show'].includes(args.action)) {
     if (args.ref && (!/^[a-zA-Z0-9_./-]+$/.test(args.ref) || args.ref.startsWith('-'))) throw agentError('Invalid Git ref');
     if (args.file && (args.file.startsWith('/') || args.file.includes('..') || args.file.includes(':'))) throw agentError('Invalid repository file');
+    const repo = await readGitRoot(target);
+    if (!repo) throw agentError('Git source reference needs a repository inside this project');
+    const ref = args.ref ?? 'HEAD';
+    const commit = args.action === 'refs' ? null : (await git(repo, ['rev-parse', '--verify', '--end-of-options', ref + '^{commit}'])).trim();
+    const origin = { kind: 'git', repository: path.relative(actualRoot, repo) || '.', ref, commit, file: args.file };
+    if (args.action === 'show') {
+      if (!args.file) throw agentError('Git source show requires a file path');
+      return { path: relative, ref, file: args.file, ...listing(await git(repo, ['cat-file', 'blob', commit + ':' + args.file], 'buffer'), origin) };
+    }
     const argv = args.action === 'refs' ? ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/remotes']
-      : args.action === 'history' ? ['log', '--format=%H %ad %s', '--date=iso-strict', args.ref ?? 'HEAD', '--', args.file ?? '.']
-        : ['show', (args.ref ?? 'HEAD') + ':' + args.file];
-    const { stdout } = await exec('git', ['-C', target, ...argv], { windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
+      : ['log', '--format=%H %ad %s', '--date=iso-strict', commit, '--', args.file ?? '.'];
+    const stdout = await git(repo, argv);
     const lines = stdout.split(/\r?\n/), start = args.start ?? 1, end = args.end ?? start + 199;
-    return { path: relative, ref: args.ref ?? 'HEAD', file: args.file, sha256: digest(stdout), start, total: lines.length,
+    return { path: relative, ref, file: args.file, origin, sha256: digest(stdout), start, total: lines.length,
       text: lines.slice(start - 1, end).map((line, i) => `${start + i}: ${line}`).join('\n') };
   }
   if (args.action === 'search' || args.action === 'files') {
     // Workspace VCS rules often ignore independently versioned business repos.
-    const flags = ['--no-ignore-vcs', '--glob', '!**/node_modules/**', '--glob', '!**/.git/**', '--glob', '!*.local.*', '--glob', '!settings.xml',
-      '--glob', '!*.ini', '--glob', '!*.env*', '--glob', '!.npmrc', '--glob', '!**/requirement-resource-bindings/**'];
+    const flags = ['--no-ignore-vcs', '--glob', '!**/node_modules/**', '--glob', '!**/.git/**', '--iglob', '!*.local.*', '--iglob', '!settings.xml',
+      '--iglob', '!*.ini', '--iglob', '!.env*', '--iglob', '!.npmrc', '--iglob', '!**/requirement-resource-bindings/**'];
     // execFile keeps stdin as a pipe. An explicit path makes rg search the source
     // tree instead of waiting forever for input from that still-open pipe.
     const directory = (await stat(target)).isDirectory();
@@ -106,11 +131,18 @@ export async function readSource(root, args) {
   if (/(?:^|[\\/])(?:\.env[^\\/]*|\.npmrc|settings\.xml|[^\\/]+\.ini|[^\\/]+\.local\.[^\\/]+)$/.test(target)) {
     throw agentError('Credentials are resolved by resource connectors, not source tools');
   }
-  const text = await readFile(target, 'utf8');
-  const lines = text.split(/\r?\n/);
-  const start = args.start ?? 1, end = args.end ?? Math.min(start + 199, lines.length);
-  return { path: relative, sha256: digest(text), start, end: Math.min(end, lines.length), total: lines.length,
-    text: lines.slice(start - 1, end).map((line, i) => `${start + i}: ${line}`).join('\n') };
+  const repo = await readGitRoot(path.dirname(target));
+  const commit = repo ? await head(repo).catch(() => null) : null;
+  const file = repo ? path.relative(repo, target) : relative;
+  const bytes = await readFile(target);
+  let status = 'unverified';
+  if (repo) {
+    const changes = await git(repo, ['status', '--porcelain', '--untracked-files=all', '--', file]);
+    status = changes ? changes.slice(0, 2) : await git(repo, ['ls-files', '--error-unmatch', '--', file])
+      .then(() => 'clean', () => 'untracked or ignored');
+  }
+  if (repo && await head(repo).catch(() => null) !== commit) throw agentError('Source HEAD changed while reading; read the file again');
+  return { path: relative, ...listing(bytes, { kind: 'worktree', repository: repo ? path.relative(actualRoot, repo) || '.' : null, file, commit, status }) };
 }
 
 export function resourceURL(resource, relative) {
