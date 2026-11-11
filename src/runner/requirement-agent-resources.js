@@ -9,7 +9,7 @@ import { observationAt } from './requirement-assertions.js';
 import { waitBusinessReady } from './requirement-adapter.js';
 import { digest } from './requirement-feishu.js';
 import { buildRecordSnapshot } from './requirement-snapshot.js';
-import { credentialField, managementReadAllowed, scopedDatabase } from './requirement-resources.js';
+import { credentialField, databaseTierMatches, managementReadAllowed, scopedDatabase } from './requirement-resources.js';
 
 const exec = promisify(execFile);
 // Executed as one synchronous DOM read. No caller-provided code runs in the page.
@@ -50,6 +50,7 @@ export const agentError = message => Object.assign(new Error(message), { safeMes
 // unknown wire types deliberately have no inferred scalar representation.
 export function mysqlResultColumns(fields=[]) {
   return fields.map(field => ({name:field.name,columnType:field.columnType,flags:field.flags,characterSet:field.characterSet,
+    ...(field.schema && field.orgTable && field.orgName ? { database: field.schema, table: field.orgTable, column: field.orgName } : {}),
     representation:[0,8,246,7,10,11,12,14].includes(field.columnType)?'string'
       :[1,2,3,4,5,9,13].includes(field.columnType)?'number'
       :[15,253,254].includes(field.columnType)&&Number.isInteger(field.characterSet)&&field.characterSet!==63?'string':null}));
@@ -245,10 +246,11 @@ export function createAgentResources(config, scope) {
     await complete?.({ outcome: 'response', status: transport === 'browser' ? response.status() : response.status });
     return response;
   }
-  async function connect(resource, database, name) {
+  async function connect(resource, database, name, options) {
     if (resource.resource_type !== 'mysql') throw agentError('Resource is not MySQL');
+    const selected = scopedDatabase(resource, database, options);
     return send(name, 'CONNECT', { pathname: '/' }, 'database', () => mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
-      password: resource.password, database: scopedDatabase(resource, database),
+      password: resource.password, database: selected,
       supportBigNumbers: true, bigNumberStrings: true, decimalNumbers: false, dateStrings: true,
       // We do not use query attributes; early 8.0 implementations interpret
       // the execute attribute flag as a server cursor and never send its rows.
@@ -264,9 +266,12 @@ export function createAgentResources(config, scope) {
         }
         await connection.query('SET TRANSACTION READ ONLY');
         await connection.beginTransaction();
+        const [[identity]] = await connection.query('SELECT DATABASE() AS databaseName, CURRENT_USER() AS principal');
         const [rows, fields] = await connection.execute({ sql: spec.sql, timeout: 30000 }, mysqlParameters(resolveInput(spec.params ?? [], input)));
         await connection.rollback();
-        return { rows: sanitized(rows), count: rows.length, columns:mysqlResultColumns(fields) };
+        return { rows: sanitized(rows), count: rows.length, columns: mysqlResultColumns(fields),
+          databaseEvidence: { resource: spec.resource, environment: resource.environment ?? null, database: identity.databaseName,
+            principalMatchesConfiguredUser: identity.principal.split('@')[0] === resource.username, checkedAt: new Date().toISOString() } };
       }
       const schema = schemas.get(spec.resource + ':' + spec.database + ':' + spec.table)
         ?? scope.state.schemas?.[spec.resource + ':' + spec.database + ':' + spec.table];
@@ -516,10 +521,10 @@ export function createAgentResources(config, scope) {
       if (!actual || digest(actual.identity) !== digest(expected.identity)) throw agentError('Authenticated identity changed; reconcile the original target before writing or restoring');
     },
     performSpec,
-    async inspect(resourceName) {
+    async inspect(resourceName, database) {
       return scope.useRead(resourceName, async resource => {
         if (resource.resource_type === 'mysql') {
-          const connection = await connect(resource, undefined, resourceName);
+          const connection = await connect(resource, database, resourceName);
           try {
             const [[receipt]] = await connection.query('SELECT 1 AS ready, CURRENT_USER() AS principal, DATABASE() AS databaseName');
             const [grants] = await connection.query('SHOW GRANTS FOR CURRENT_USER');
@@ -530,6 +535,7 @@ export function createAgentResources(config, scope) {
               grantEntries: rules.length };
           } finally { await connection.end(); }
         }
+        if (database !== undefined) throw agentError('The database argument is supported only on MySQL resources');
         if (resource.resource_type === 'rabbitmq') {
           const base = new URL(resource.management_url ?? resource.base_url);
           const prefix = base.pathname.replace(/\/$/, '');
@@ -633,12 +639,14 @@ export function createAgentResources(config, scope) {
     },
     async schema(args) {
       return scope.useRead(args.resource, async resource => {
-        const connection = await connect(resource, args.database, args.resource);
+        if (args.table && !args.database) throw agentError('Supply database when inspecting a table; list schemas first if unknown');
+        const connection = await connect(resource, args.database, args.resource, { discover: !args.database });
         try {
           if (!args.database) {
-            const bound = scopedDatabase(resource);
+            const bound = resource.databaseScope;
             if (bound) return { rows: [{ Database: bound }] };
-            const [rows] = await connection.query('SHOW DATABASES'); return { rows };
+            const [rows] = await connection.query('SHOW DATABASES');
+            return { rows: rows.filter(row => databaseTierMatches(resource, row.Database)) };
           }
           if (!args.table) { const [rows] = await connection.query('SHOW TABLES'); return { rows }; }
           const [columns] = await connection.query('SHOW FULL COLUMNS FROM ' + identifier(args.table));

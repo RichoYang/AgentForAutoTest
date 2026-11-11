@@ -164,3 +164,63 @@ test('real MySQL connector returns identity and selected database metadata and r
     assert.deepEqual(await runtime.schema({ resource: 'db' }), { rows: [{ Database: name }] });
     await assert.rejects(runtime.schema({ resource: 'db', database: 'other' }), { code: 'environment_scope' });
   });
+
+test('MySQL discovers and selects related schemas independently of the configured default', {
+  skip: !process.env.AGENTOS_TEST_MYSQL_PORT,
+}, async t => {
+  const port = Number(process.env.AGENTOS_TEST_MYSQL_PORT);
+  assert.ok(port > 1024);
+  const admin = await mysql.createConnection({ host: '127.0.0.1', port, user: 'root', password: '' });
+  const prefix = 'aos_discovery_' + Date.now();
+  const databases = [prefix + '_sales_sit', prefix + '_stock_sit', prefix + '_stock_prd'];
+  const account = prefix.slice(0, 32);
+  const password = 'synthetic-db-discovery-password';
+  const created = [];
+  let accountCreated = false;
+  t.after(async () => {
+    try {
+      if (accountCreated) await admin.query('DROP USER ?@?', [account, '127.0.0.1']);
+      for (const database of created) await admin.query('DROP DATABASE ??', [database]);
+    } finally { await admin.end(); }
+  });
+  for (const [index, database] of databases.entries()) {
+    await admin.query('CREATE DATABASE ??', [database]);
+    created.push(database);
+    await admin.query('CREATE TABLE ??.stock (code VARCHAR(12) PRIMARY KEY, quantity INT NOT NULL)', [database]);
+    await admin.query('INSERT INTO ??.stock VALUES (?, ?)', [database, 'item-1', index + 7]);
+  }
+  await admin.query('CREATE USER ?@? IDENTIFIED BY ?', [account, '127.0.0.1', password]);
+  accountCreated = true;
+  await admin.query('GRANT SELECT ON *.* TO ?@?', [account, '127.0.0.1']);
+  const mysqlSection = 'resource_type=mysql\nhost=127.0.0.1\nport=' + port + '\nusername=' + account + '\npassword=' + password;
+  const { env } = await fixture(t, section('Demo.Sit.Main', mysqlSection + '\ndatabase_name=' + databases[0])
+    + section('Demo.Sit.Other', mysqlSection), {
+    main: { section: 'Demo.Sit.Main', scope: 'read' },
+    other: { section: 'Demo.Sit.Other', scope: 'read' },
+  });
+  const resources = await requirementResources(env);
+  const runtime = createAgentResources({}, { state: {}, saveState: async () => {},
+    useRead: (key, run) => resources.use(key, 'read', run) });
+  const discovery = (await runtime.schema({ resource: 'main' })).rows.map(row => row.Database);
+  assert.ok(discovery.includes(databases[0]));
+  assert.ok(discovery.includes(databases[1]));
+  assert.ok(!discovery.includes(databases[2]));
+  assert.equal((await runtime.inspect('other')).database, null);
+  assert.equal((await runtime.inspect('main', databases[1])).database, databases[1]);
+  assert.equal((await runtime.inspect('main', databases[1])).globalPrivilege, true);
+  assert.ok((await runtime.schema({ resource: 'main', database: databases[1] })).rows.some(row => Object.values(row).includes('stock')));
+  const query = (resource, database) => resources.use(resource, 'read', connection => runtime.performSpec({
+    kind: 'database', access: 'read', resource, database, sql: 'SELECT code, quantity FROM stock WHERE code=?', params: ['item-1'],
+  }, {}, connection));
+  for (const [index, database] of databases.slice(0, 2).entries()) {
+    const result = await query('main', database);
+    assert.deepEqual(result.rows, [{ code: 'item-1', quantity: index + 7 }]);
+    assert.equal(result.databaseEvidence.database, database);
+    assert.equal(result.databaseEvidence.principalMatchesConfiguredUser, true);
+    assert.equal(result.columns[1].table, 'stock');
+    assert.equal(result.columns[1].database, database);
+    assert.equal(result.columns[1].column, 'quantity');
+  }
+  assert.equal((await query('other', databases[1])).rows[0].quantity, 8);
+  await assert.rejects(query('main', databases[2]), { code: 'environment_scope' });
+});

@@ -65,20 +65,30 @@ test('normal agent rejects a future DECIMAL after-contract from real empty-query
  {skip:!process.env.AGENTOS_TEST_MYSQL_PORT},async t=>{
  const port=Number(process.env.AGENTOS_TEST_MYSQL_PORT);assert.ok(port>1024&&port!==3306);const database='aos_contract_'+randomUUID().replaceAll('-','');
  const root=await mkdtemp(path.join(os.tmpdir(),'aos-mysql-contract-'));t.after(()=>rm(root,{recursive:true,force:true}));
- const resource={resource_type:'mysql',host:'127.0.0.1',port,username:'root',password:''},connection=await mysql.createConnection({host:resource.host,port,user:'root',password:'',flags:['-CLIENT_QUERY_ATTRIBUTES']});let writes=0;
+ const resource={resource_type:'mysql',host:'127.0.0.1',port,username:'root',password:'',database_name:'unrelated_default_sit'},connection=await mysql.createConnection({host:resource.host,port,user:'root',password:'',flags:['-CLIENT_QUERY_ATTRIBUTES']});let writes=0;
  try{
   await connection.query('CREATE DATABASE `'+database+'`');await connection.query('CREATE TABLE `'+database+'`.items(business_key VARCHAR(120) PRIMARY KEY,amount DECIMAL(20,4) NOT NULL)');
   await writeFile(path.join(root,'schema.sql'),'CREATE TABLE items(business_key VARCHAR(120) PRIMARY KEY,amount DECIMAL(20,4) NOT NULL); Test-owned keys can be inserted and deleted by exact primary key. Readback SELECT business_key,amount FROM items WHERE business_key=?.');
-  const agent=createRequirementAgent({}, {workDir:root,review:async()=>({accepted:true,errors:[]}),agentModel:async({call})=>({close:async()=>{},async turn(){
+  let reviewedRead = false;
+  const agent=createRequirementAgent({}, {workDir:root,review:async prompt=>{
+   const review=JSON.parse(prompt.split('\n\n').at(-1));
+   if(review.kind==='operation'&&review.spec.kind==='database'&&review.spec.access==='read'){
+    assert.equal(review.environmentProof.mysql.database_name,resource.database_name);
+    assert.deepEqual(review.databaseTarget,{selected:database,verifiedTables:['items']});
+    reviewedRead=true;
+   }
+   return {accepted:true,errors:[]};
+  },agentModel:async({call})=>({close:async()=>{},async turn(){
    const invoke=(name,args)=>call('test_'+name,{args}),source=await invoke('source',{action:'read',path:'schema.sql'});await invoke('schema',{resource:'mysql',database,table:'items'});
    const register=(name,spec)=>invoke('register',{name,sourceRefs:[source.sourceRef],reason:'actual isolated schema',spec:{resource:'mysql',kind:'database',database,...spec}});
    await register('create_item',{access:'create',table:'items',values:{business_key:{$input:'key'},amount:{$input:'amount'}},expectedRows:1});
-   await register('read_item',{access:'read',sql:'SELECT business_key,amount FROM items WHERE business_key=?',params:[{$input:'key'}]});
+   await register('read_item',{access:'read',channel:'database',sql:'SELECT business_key,amount FROM items WHERE business_key=?',params:[{$input:'key'}]});
    await register('delete_item',{access:'delete',table:'items',where:{business_key:{$input:'key'}},expectedRows:1});
    const key='OWNED_decimal';await assert.rejects(invoke('mutate',{id:'create',purpose:'prepare',operation:'create_item',input:{key,amount:'1.0000'},businessKey:key,ownership:{field:['rows',0,'business_key'],value:key},verify:{operation:'read_item',input:{key},before:[{field:['rows',0],operator:'absent'}],after:[{field:['rows',0,'business_key'],operator:'equals',expected:key},{field:['rows',0,'amount'],operator:'equals',expected:1}]},restore:{operation:'delete_item',input:{key}},cleanupAction:'delete exact owned key'}),/after.*amount.*string/);
    assert.equal(writes,0);const [rows]=await connection.query('SELECT COUNT(*) n FROM `'+database+'`.items');assert.equal(Number(rows[0].n),0);
    await invoke('finish',{actual:'Invalid future contract blocked before write',blocker:{dependency:'module fixture',required_action:'native acceptance separately',attempts:['real empty query metadata and independent zero rows']}});return {text:'done'};
   }})});
-  await agent.execute({jobId:'JOB-module-decimal',projectId:'module',item:{caseId:'C'},runPrefix:'OWNED_',reports:root,sourceRoot:root,headers:['预期结果'],row:['1. amount 1.0000'],source:{},resourceNames:['mysql'],mutations:[],useRead:(_name,run)=>run(resource),checkOutput:value=>value,invoke:async()=>{writes++;throw Error('Unexpected business write');}});
+  await agent.execute({jobId:'JOB-module-decimal',projectId:'module',item:{caseId:'C'},runPrefix:'OWNED_',reports:root,sourceRoot:root,headers:['预期结果'],row:['1. amount 1.0000'],source:{},resourceNames:['mysql'],resourceCatalog:{mysql:{database_name:resource.database_name,databaseSelection:'discover'}},mutations:[],useRead:(_name,run)=>run(resource),checkOutput:value=>value,invoke:async()=>{writes++;throw Error('Unexpected business write');}});
+  assert.equal(reviewedRead,true);
  }finally{await connection.query('DROP DATABASE IF EXISTS `'+database+'`');await connection.end();}
 });

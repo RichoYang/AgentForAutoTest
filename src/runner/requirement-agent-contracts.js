@@ -19,7 +19,7 @@ const selection = { observationId: string, field, identity, calculation, sourceR
     operator: enumeration('equals', 'gt', 'gte', 'lt', 'lte'), expected: {} }, ['observationId', 'field', 'operator', 'expected'])) };
 const pathTemplate = string; // Dynamic segments use /resource/{inputName}, never a whole unvalidated route.
 const spec = object({ resource: string, kind: enumeration('http', 'database', 'browser'), access: enumeration('read', 'create', 'update', 'delete', 'trigger'),
-  path: pathTemplate, method: string, body: {}, query: map, authenticated: { type: 'boolean' }, channel: enumeration('api', 'message', 'job'),
+  path: pathTemplate, method: string, body: {}, query: map, authenticated: { type: 'boolean' }, channel: enumeration('api', 'message', 'job', 'database'),
   queryEvidence: array(string, 1), requestCorrelation: { type: 'boolean' },
   database: string, sql: string, params: array({}), table: string, values: map, where: map, expectedRows: { type: 'integer', minimum: 1 },
   action: enumeration('click', 'goto'), selector: string, effect: object({ path: pathTemplate, method: string, body: {} }, ['path', 'method']) }, ['resource', 'kind', 'access']);
@@ -60,7 +60,7 @@ const mutation = object({ ...invocation, id: string, purpose: enumeration('prepa
   restore: object({ operation: string, input: map }, ['operation']), cleanupAction: string, shared: { type: 'boolean' } },
 ['id', 'purpose', 'operation', 'businessKey', 'ownership', 'verify', 'restore', 'cleanupAction']);
 export const requirementToolSchemas = {
-  connection: object({ resource: string }, ['resource']),
+  connection: object({ resource: string, database: string }, ['resource']),
   source: object({ action: enumeration('files', 'search', 'read', 'refs', 'history', 'show'), path: { type: 'string' }, pattern: string,
     start: { type: 'integer', minimum: 1 }, end: { type: 'integer', minimum: 1 }, ref: string, file: string, ...page }, ['action']),
   schema: object({ resource: string, database: string, table: string }, ['resource']),

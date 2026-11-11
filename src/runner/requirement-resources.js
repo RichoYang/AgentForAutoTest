@@ -22,10 +22,27 @@ export function managementReadAllowed(resource, method, pathname) {
   } catch { return false; }
 }
 
-export function scopedDatabase(resource, requested) {
-  const bound = resource.database_name === 'not_specified' ? undefined : resource.database_name;
-  if (bound && requested && requested !== bound) throw new RequirementWait('environment_scope', '数据库与资源已绑定的库名不一致。');
-  return bound || requested;
+function configuredDatabase(value) {
+  return typeof value === 'string' && value.trim() && !/^not_specified$/i.test(value.trim()) ? value.trim() : undefined;
+}
+
+export function databaseTierMatches(resource, database) {
+  if (!database || !resource.databaseTiers) return true;
+  // A tier label can disqualify a database. Names without a tier still need
+  // source/deployment evidence to establish which service uses them.
+  const tiers = database.toLowerCase().split(/[_-]+/).filter(part =>
+    ['sit', 'uat', 'prd', 'prod', 'production', 'dev', 'perpro', 'preprod'].includes(part));
+  return tiers.every(tier => resource.databaseTiers.includes(tier));
+}
+
+export function scopedDatabase(resource, requested, { discover = false } = {}) {
+  const bound = resource.databaseScope;
+  if (bound && requested && requested !== bound) throw new RequirementWait('environment_scope', '数据库与资源明确绑定的库名不一致。');
+  const selected = bound ?? requested ?? (discover ? undefined : configuredDatabase(resource.database_name));
+  if (!databaseTierMatches(resource, selected)) {
+    throw new RequirementWait('environment_scope', '库名含与本任务环境冲突的标记；请核对 SIT/UAT 数据源配置和元数据后选择。');
+  }
+  return selected;
 }
 
 function parse(text) {
@@ -122,19 +139,21 @@ function inspectBinding(environment, binding, sections) {
     }
     for (const [target, field] of Object.entries(binding.fields)) resource[target] = section[field];
   }
-  if (binding.database !== undefined) {
-    const declared = scopedDatabase(section);
-    if (typeof binding.database !== 'string' || !binding.database.trim() || binding.database === 'not_specified'
-      || declared && declared !== binding.database) {
-      return blocked('database_scope', '显式数据库绑定无效或与 INI 不一致');
-    }
-    resource.database_name = binding.database;
-  }
   if (section.ssh_required === 'true' || section.direct_local_connection_allowed === 'false'
     || section.connection_mode && !['direct', 'direct_tcp'].includes(section.connection_mode)) {
     return blocked('connection_unsupported', '配置要求当前连接器不支持的接入方式');
   }
   const connector = connectors.get(section.resource_type);
+  if (connector === 'mysql') resource.databaseTiers = [...new Set([tier, ...aliases])];
+  if (binding.database !== undefined) {
+    const declared = configuredDatabase(section.database_name);
+    const bound = configuredDatabase(binding.database);
+    if (!bound || declared && declared !== bound || !databaseTierMatches(resource, bound)) {
+      return blocked('database_scope', '显式数据库绑定无效、与 INI 不一致或环境冲突');
+    }
+    resource.databaseScope = bound;
+    resource.database_name = bound;
+  }
   if (section.resource_type && !connector) return blocked('connector_unsupported', '该资源类型无内置需求连接器');
   if (connector === 'mysql' && (!resource.host || !resource.username || !Object.hasOwn(resource, 'password')
     || !/^\d+$/.test(resource.port ?? '') || Number(resource.port) < 1 || Number(resource.port) > 65535)) {
@@ -220,6 +239,7 @@ export async function requirementResources(environment, { allowUnavailable = fal
       section: item.binding.section, scope: item.binding.scope, environment: item.section.environment, resource_type: item.section.resource_type,
       ...(item.endpoint ? { [item.connector === 'rabbitmq_management_http' ? 'management_url' : 'base_url']: item.endpoint } : {}),
       database_name: item.resource.database_name, account_role: item.section.account_role, status: item.section.status, connector: item.connector,
+      ...(item.connector === 'mysql' ? { databaseSelection: item.resource.databaseScope ? 'bound' : 'discover' } : {}),
       ai_access: item.section.ai_access, ai_operation_mode: item.section.ai_operation_mode, allowedOperations: item.allowed,
       databaseWriteAuthorizationRequired: item.section.resource_type === 'mysql' && item.global?.destructive_database_operations === 'explicit_authorization_required',
       reversibleSharedWrites: item.binding.reversibleSharedWrites === true && item.allowed.includes('update'), sharedTargets: item.binding.sharedTargets ?? [],

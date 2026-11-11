@@ -11,7 +11,7 @@ import { observationAt, evaluateCaseAssertion } from './requirement-assertions.j
 import { assertionBinding, compareAgentObservation, pageMethodSample, verifyPageMethodShape, verifyObservationIdentity,verifyPageStage,pageStageContext } from './requirement-agent-assertion-binding.js';
 import { requirementAgentModel } from './requirement-agent-model.js';
 import { agentError, createAgentResources, readSource, resolveInput, sanitized, validateRouteTemplate } from './requirement-agent-resources.js';
-import { credentialField } from './requirement-resources.js';
+import { credentialField, scopedDatabase } from './requirement-resources.js';
 import { requirementToolSchemas, validateToolArguments,operationNameSchema,planCoverageMatrix,duplicatePlanChecks,pageStageErrors,planRepair } from './requirement-agent-contracts.js';
 import { compareRecordSnapshots } from './requirement-snapshot.js';
 import { checkCoverage, finishDiagnostics, recordGap, resolveGaps } from './requirement-agent-progress.js';
@@ -30,10 +30,10 @@ plan 检查按原预期编号逐项列全，UI 断言须 browser.observe 的真�
 可恢复的参数、规划、查询、页面问题持续修正。有新证据时没有整任务时长或轮数上限。真实外部阻塞须说明具体资源、操作、已尝试替代路径及解除条件。最终用 finish 提交事实摘要；没有 finish 回执不得宣布用例完成。程序依据实际断言和台账判定，并负责清理与回读。`;
 
 const descriptions = {
-  connection: '核验资源目录中的已绑定资源。args:{resource}。读取连接、已配置登录的公开身份或有限 MySQL/管理接口元数据。不读取业务对象、不触发任务、不暴露凭据。入口、账号和连接策略由绑定提供。',
+  connection: '核验资源目录中的已绑定资源。args:{resource,database?}，仅 MySQL 可带 database 核验选定的库。读取连接、已配置登录的公开身份或有限 MySQL/管理接口元数据。不读取业务对象、不触发任务、不暴露凭据。入口、账号和连接策略由绑定提供。',
   source: '读取本项目源码。args: {action:"files"|"search"|"read"|"refs"|"history"|"show",path:"相对项目根目录",pattern?,start?,end?,offset?,limit?,ref?,file?}。refs/history/show 的 path 为子仓目录，show 使用 ref 和仓内 file，原样读取指定分支而不切换或覆盖用户文件。返回 sourceRef；register 必须引用已读取的源码。先读适用 AGENTS.md。可分页，不限总调查轮数。',
-  schema: '读取授权 MySQL 的数据库、表、列、索引及建表定义。args:{resource,database?,table?}。数据库写入前必须调用本工具。',
-  read_sql: '执行只读事务 SQL，结果完整落盘，模型按 offset/limit 取页。args:{resource,database,sql,params:[],offset?,limit?}，仅 SELECT/SHOW/DESCRIBE/EXPLAIN/WITH；禁止文件、锁或延时函数。返回 observationId。',
+  schema: '读取授权 MySQL 的数据库、表、列、索引及建表定义。args:{resource,database?,table?}。仅 resource 时发现可见库；结合需求、源码和数据源配置选择库，不能只凭同名表或连接成功。给定 table 时须填写 database。跨库核对分别选库，使用同一业务键取证。数据库写入前必须调用本工具。',
+  read_sql: '执行只读事务 SQL，结果完整落盘，模型按 offset/limit 取页。args:{resource,database,sql,params:[],subject?,offset?,limit?}，仅 SELECT/SHOW/DESCRIBE/EXPLAIN/WITH；禁止文件、锁或延时函数。使用已确认的库和业务键。返回 observationId、实际连接库及驱动提供的原始库表列。',
   register: '登记从源码发现的操作，经独立源码审查后可用。args:{name,sourceRefs:[sourceRef],reason,spec:{resource,kind:"http"|"database"|"browser",access:"read"|"create"|"update"|"delete"|"trigger",...}}。http:{path(支持/{id}参数),method,body?,query?,authenticated?}；database read:{database,sql,params}；database writes:{database,table,values?,where?,expectedRows}；browser writes:{action:"click",selector,effect:{path,method,body?}}或{action:"goto",path:"/页面路径",effect:{path,method,body?}}。导航触发的写入同样必须mutate并回读恢复。值用 {$input:"参数名"} 从调用 input 取。禁止存密钥；名字不可改变含义；读 POST 必须由源码证实，消息/调度入口也走 http 并记账。',
   observe: '调用登记的只读操作并保留完整响应。args:{operation,input:{},subject:{别名或维度:真实值},offset?,limit?}。返回 observationId 和 evidence，后续断言只能引用实际记录。',
   evidence: '分页回读本 Job 证据。args:{observationId,field?:[路径],offset?,limit?}。旧尝试带 historical=true，只作调查参考；断言/别名/前置基线仍须本次新观测。不会重新查业务或改写历史时间。',
@@ -221,6 +221,7 @@ export function createRequirementAgent(config, options) {
       kind === 'plan' ? 'processChecks是执行过程要求的独立映射，Runner后续用真实台账/证据另行核验，不是自报通过。允许它们覆盖源码调查、原值保留、回执对账、就绪、清理与报告要求；不能替代业务指标的checks，复合原句须结合relatedCheckIds及其他业务检查审查完整性。' : '',
       ['plan', 'process', 'mutation', 'process_preflight'].includes(kind) ? '证明范围遵循源需求及用例原步骤。诸如“准备只调用一次组合入口，不分别调用创建接口”约束本Runner发出的准备请求，除非原文明确要求服务端独立记录或其他调用者。不要扩大成全服务流量。Runner的变更台账是意图/对账记录，不能单独证明发送次数。' : '',
       kind === 'plan' ? '原文约束确切次数时用 requestProof；要求仅允许若干入口或渠道时用 runnerScope 的封闭白名单。核实主体和范围，不能只列几个未调用的写入口代替完整限制，也不能将仅针对场景的约束扩大到准备或外部回收。' : '',
+      ['plan', 'process'].includes(kind) ? 'Runner 的数据库传输台账记为 database / CONNECT / 路径“/”。库发现、表结构和 SQL 各自经过此连接入口；该台账证明资源连接范围。具体库、表、查询和只读要求用实际数据库观测、资源操作权限与变更台账核对。' : '',
       kind === 'plan' ? 'requestPreflights 是主机已经核验的真实只读取证能力回执，包含check.id、阶段、资源、任务关联键、来源及时间。计划中的同一requestProof已由程序与该回执比对。预检只证明取得证据的能力，不要求计划阶段已有未来场景日志。准备阶段独立审计窗口由主机在冻结计划前收口，以排除随后的场景动作。' : '',
       kind === 'process_preflight' ? '只核对该过程取证契约是否来自所给原始用例，是否确实要求独立服务请求记录，读入口是否由服务端独立采集、以任务相关键过滤，并能准确认证窗口及完整性。先判断取证能力，不能要求尚未执行的动作或实际日志条目提前存在。' : '',
       ['process_preflight','process','plan'].includes(kind) ? 'requestProof.scope=service区分证据来源。audit.matchRunner=true表示程序将独立服务记录限定到本Runner当前阶段实际发送的请求ID、参数及其响应观测；原文只限制本Runner调用时，该来源选择不扩大为全服务所有调用者。请求ID可将审计请求对应到连接器实际响应观测，原文未明确要求独立响应副本时，不要求审计另外保存整份响应。结构化query约束及matched关联仍须完整，缺失、重复和错对象不能通过文字声明补足。' : '',
@@ -228,7 +229,7 @@ export function createRequirementAgent(config, options) {
       kind === 'mutation' ? 'preActionEvidence 是程序已核对当前冻结检查、动作输入、测量轮次和先后时点后传入的实际前态。process 是已经审查通过的过程基线，含已保存的实际观测和取值路径。原条款只要求集合 API 快照时，用该观测核对范围和完整性。requestPreflights 只用于原文明确要求的独立服务审计。' : '',
       kind === 'process' ? 'requestProof 是程序核对同一尝试/轮次、资源、阶段、实际请求及次数的结果。scope=runner仅覆盖Runner负责的HTTP和浏览器传输。scope=service表示来自独立只读审计，程序核验相关键、来源及完整窗口；audit.matchRunner=true时还逐条匹配本Runner实际请求ID、参数和观测归属，不要求统计其他调用者。matched中的observationIds指向连接器保存的实际响应观测，原文未要求独立保存响应内容时，无需审计重复保存整份响应。预检只核验取证能力，不要求未来业务请求及响应提前存在。核对列举的入口、约束、对象与原要求的语义映射。已证明该范围且同一对象创建结果可由台账/回读与源码核实时，无需模型额外调用取日志。不要把意图数等同发送次数，也不要把发送尝试等同服务端已接收。' : '',
       kind === 'process' ? '本次仅审执行过程要求：证据来自Runner真实台账和当前观测。确认源码/入口、原始类型/精度、先冻结后动作/取证、回执丢失后先对账、就绪条件、恢复范围与回查是否满足该条原要求。业务金额/状态/数量必须有相关程序比较，不能因过程材料存在而判业务通过。没有触发的丢回执分支如实标注未发生，不凭空要求该正常分支制造故障；若本用例明确要求制造丢回执，则需真实丢失与对账证据。report由Runner在所有清理后按已固定15表契约生成并另行验证，当前只审作为报告输入的恢复台账，不能宣称报告已生成。' : '',
-      kind === 'operation' && payload.spec?.kind === 'database' ? '这是授权数据库上的直接核对或准备操作，不要求业务仓存在完全相同的SQL入口。以所给实际schemas、实体/业务规则和SQL本身核实表、字段、只读语义或结构化CRUD；不要要求为临时快照查询先在产品源码新增接口。' : '',
+      kind === 'operation' && payload.spec?.kind === 'database' ? '这是授权数据库上的直接核对或准备操作，不要求业务仓存在完全相同的SQL入口。databaseTarget.selected 是程序根据资源约束和 spec.database 解析的实际选库参数；databaseTarget.verifiedTables 是本次已用对应连接回查结构的表。environmentProof 中 discover 模式的 database_name 只是默认库。用已选库、实际 schemas、源码业务规则及 SQL 核对库表和字段；不要求显式选库等于默认库。若 SQL 实际指向不同库或缺表结构证据，仍须指出。' : '',
       kind === 'process' ? 'related.compared及assertionEvidence是程序已完成独立业务比较的证明；业务是否通过由该比较单独判定，本次accepted仅代表check指定的过程被证明。产品失败与正确取证/等待/清理可以同时成立，不得因产品实际值不符合预期而拒绝已满足的过程要求。时间顺序区分purpose=prepare与purpose=scenario：准备动作及其原始回读发生在plan前是正常步骤；只有场景动作必须在plan和测量预检后。' : '',
       kind === 'process' ? 'currentMutationKeys 标记当前尝试及测量轮次的变更。此前轮次的台账仅用于了解恢复历史。cleanup.actionReceipts 是实际恢复响应，cleanup.restoration=reconciled-readback 表示程序通过原快照与回读确认恢复且无可用动作响应。按原条款判断是否还需要动作证据，不因丢失回执要求重发已核实生效的动作。' : '',
       kind === 'process' && payload.phase === 'post_cleanup' ? 'cleanupObservations 是原尝试、同一测量轮次中实际采集并且晚于最后恢复动作回执的保存观测。结合实际查询、对象范围及结果判断是否覆盖原清理要求。观察结果不能补造缺失的中间恢复回执，也不能取代不同对象或范围的回查。' : '',
@@ -587,13 +588,14 @@ export function createRequirementAgent(config, options) {
           return pageData(await observe('database', await lookup(runtime, scope, spec, {}), args, args.subject ?? {}, undefined, readPhase), args);
         }
         if (name === 'connection') {
-          const receipt = scope.checkOutput(await runtime.inspect(args.resource));
+          const receipt = scope.checkOutput(await runtime.inspect(args.resource, args.database));
           return { ...receipt, evidence: await evidence(scope, '资源连接与身份回执', { resource: args.resource, receipt }) };
         }
         if (name === 'register') {
           const spec = args.spec;
           if (!new RegExp(operationNameSchema.pattern).test(args.name ?? '') || !['http', 'database', 'browser'].includes(spec?.kind)
             || !['read', 'create', 'update', 'delete', 'trigger'].includes(spec.access) || !scope.resourceNames.includes(spec.resource)) throw agentError('Invalid operation name, kind, access or resource');
+          if (spec.channel === 'database' && spec.kind !== 'database') throw agentError('$.spec.channel database requires $.spec.kind database');
           if (state.operations[args.name]) {
             if (digest(state.operations[args.name]) !== digest(spec)) throw agentError('Use a new name for a different operation contract');
           }
@@ -609,7 +611,11 @@ export function createRequirementAgent(config, options) {
           if (spec.kind === 'database' && spec.access !== 'read' && !state.schemas[spec.resource + ':' + spec.database + ':' + spec.table]) throw agentError('Inspect database schema first');
           const boundary = await operationBoundary(scope, runtime, spec, args.sourceRefs);
           if (state.operationProofs?.[args.name] && digest(state.operationProofs[args.name].boundary) === digest(boundary)) return { registered: args.name, reused: true, boundary };
-          await review(scope, 'operation', { spec, reason: args.reason, sources,
+          const databaseTarget = spec.kind === 'database' ? {
+            selected: await scope.useRead(spec.resource, resource => scopedDatabase(resource, spec.database)) ?? null,
+            verifiedTables: boundary.schemas.map(schema => schema.table),
+          } : undefined;
+          await review(scope, 'operation', { spec, reason: args.reason, sources, databaseTarget,
             schema: state.schemas[spec.resource + ':' + spec.database + ':' + spec.table],
             schemas: spec.kind === 'database' ? Object.values(state.schemas).filter(schema => schema.resource === spec.resource
               && schema.database === spec.database && (spec.table ? schema.table === spec.table : new RegExp('\\b' + schema.table + '\\b', 'i').test(spec.sql ?? ''))) : undefined });
@@ -948,7 +954,8 @@ export function createRequirementAgent(config, options) {
             externalPreflights: current.externalPreflights,
             requestPreflights: Object.values(current.requestPreflights ?? {}).filter(proof => proof.evidence),
             scenarioOperations: Object.entries(state.operations).filter(([, operation]) => operation.access !== 'read').map(([name, operation]) => ({ name, ...operation })),
-            registeredReadOperations: Object.entries(state.operations).filter(([, operation]) => operation.access === 'read').map(([name, operation]) => ({ name, ...operation })),
+            registeredReadOperations: Object.entries(state.operations).filter(([, operation]) => operation.access === 'read')
+              .map(([name, operation]) => ({ name, ...operation, channel: evidenceChannel(operation) })),
             sourceEvidence: Object.values(state.sources).filter(item => item.text),
             measurementSamples: args.checks.filter(check => check.measurement).map(check => {
               const sample = knownObservation(check.measurement.observationId);
