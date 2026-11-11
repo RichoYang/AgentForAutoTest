@@ -20,6 +20,7 @@ const selection = { observationId: string, field, identity, calculation, sourceR
 const pathTemplate = string; // Dynamic segments use /resource/{inputName}, never a whole unvalidated route.
 const spec = object({ resource: string, kind: enumeration('http', 'database', 'browser'), access: enumeration('read', 'create', 'update', 'delete', 'trigger'),
   path: pathTemplate, method: string, body: {}, query: map, authenticated: { type: 'boolean' }, channel: enumeration('api', 'message', 'job'),
+  queryEvidence: array(string, 1), requestCorrelation: { type: 'boolean' },
   database: string, sql: string, params: array({}), table: string, values: map, where: map, expectedRows: { type: 'integer', minimum: 1 },
   action: enumeration('click', 'goto'), selector: string, effect: object({ path: pathTemplate, method: string, body: {} }, ['path', 'method']) }, ['resource', 'kind', 'access']);
 const measurementSelection = { ...selection, sampleSubject: map };
@@ -35,14 +36,19 @@ const check = object({ id: string, line: { type: 'integer', minimum: 1 }, requir
   operator: enumeration('equals', 'contains', 'gt', 'gte', 'lt', 'lte'), type: enumeration('number', 'text', 'boolean', 'null'), unit: { type: 'string' },
   basis: object({ quote: string, observationId: string, field, explanation: string }), measurement },
 ['id', 'line', 'requirement', 'channel', 'expected', 'operator', 'type', 'basis']);
+const requestFields = {
+  query: { type: 'object', additionalProperties: array({ type: 'string' }) },
+  queryInput: map,
+  exactQuery: { type: 'boolean' },
+};
 const requestProof = object({ scope: enumeration('runner', 'service'), phase: enumeration('prepare', 'scenario'), resource: string,
-  requests: array(object({ method: string, path: string, count: integer }, ['method', 'path', 'count']), 1),
-  audit: object({ operation: string, correlation: string }, ['operation', 'correlation']) }, ['scope', 'phase', 'resource', 'requests']);
+  requests: array(object({ method: string, path: string, count: integer, ...requestFields }, ['method', 'path', 'count']), 1),
+  audit: object({ operation: string, correlation: string, matchRunner: { type: 'boolean' } }, ['operation', 'correlation']) }, ['scope', 'phase', 'resource', 'requests']);
 const processCheck = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string,
   kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup', 'report', 'external_cleanup'), relatedCheckIds: array(string),
   requestProof, beforeAction, baselineChannel: enumeration('page','api','database','message','job'),
   runnerScope: object({ phase: enumeration('prepare','scenario','all'), allowed: array(object({ resource: string,
-    transport: enumeration('http','browser','database'), method: string, path: string }, ['resource','transport','method','path']), 1) }, ['phase','allowed']),
+    transport: enumeration('http','browser','database'), method: string, path: string, ...requestFields }, ['resource','transport','method','path']), 1) }, ['phase','allowed']),
   externalReceipt: object({ operation: operationNameSchema, actor: string, correlation: string,
     after: enumeration('business_checks','job_end') }, ['actor','correlation','after']) }, ['id', 'line', 'requirement', 'kind']);
 const pageStage=object({id:string,step:{type:'integer',minimum:1},resource:string,action:enumeration('goto','click','select'),path:string,selector:string,value:{},subject:map,ready:browserReady},['id','step','resource','action','subject']);

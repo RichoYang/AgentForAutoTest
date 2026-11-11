@@ -11,10 +11,11 @@ import { observationAt, evaluateCaseAssertion } from './requirement-assertions.j
 import { assertionBinding, compareAgentObservation, pageMethodSample, verifyPageMethodShape, verifyObservationIdentity,verifyPageStage,pageStageContext } from './requirement-agent-assertion-binding.js';
 import { requirementAgentModel } from './requirement-agent-model.js';
 import { agentError, createAgentResources, readSource, resolveInput, sanitized, validateRouteTemplate } from './requirement-agent-resources.js';
+import { credentialField } from './requirement-resources.js';
 import { requirementToolSchemas, validateToolArguments,operationNameSchema,planCoverageMatrix,duplicatePlanChecks,pageStageErrors,planRepair } from './requirement-agent-contracts.js';
 import { compareRecordSnapshots } from './requirement-snapshot.js';
 import { checkCoverage, finishDiagnostics, recordGap, resolveGaps } from './requirement-agent-progress.js';
-import { auditWindow, compareRequestProof, validateRequestProof, verifyRunnerScope, runnerScopeHistory, externalCleanupReceipt } from './requirement-agent-request-proof.js';
+import { auditWindow, compareRequestProof, correlateRequestAudit, validateRequestProof, verifyRunnerScope, runnerScopeHistory, externalCleanupReceipt } from './requirement-agent-request-proof.js';
 import { mutationReadbackHash, validateMutationReadback, repairHttpEnvelope, verifiedMutationCleanup } from './requirement-mutation-measurement.js';
 
 const instructions = `你是项目需求测试专员。你必须亲自使用工具调查、构造、执行、取证和清理，不得用计划或报告冒充完成。
@@ -71,6 +72,10 @@ descriptions.plan += ' 仅允许指定调用使用 execution_evidence.runnerScop
 descriptions.browser += ' observe 可用 record:{name,layout:"rows"|"parallel"|"json_parallel",rows?:行选择器,fields:{字段:{selector,read:"text"|"attribute",attribute?}},match:{身份字段:完整真实键}}。rows 为同一 DOM 行，parallel 要求源码证明各列可见节点同序，json_parallel 要求可逆 JSON 数组；不猜拆普通拼接文本。目标唯一时从 ["values",name,字段] 读取身份和值，同一条记录内绑定。';
 descriptions.plan += ' 如果目标行须在场景动作后才可见，先在相同页面阶段观察同范围中已有的另一条真实 DOM 记录。检查 subject 仍填写待测键，measurement.sampleSubject 填写样本键并提供样本观测、字段和身份路径。样本只证明读取方法。实际比较须重新观察待测键并使用相同记录布局和字段。';
 descriptions.process += ' processChecks[].beforeAction 必须在对应动作前提供冻结后本次独立读取的证据。external_cleanup 回执必须由原合同中真实只读入口取得，不用 Runner 台账代替外部人员回执。';
+descriptions.register += ' queryEvidence:[业务查询参数名] 才保留这些实际参数的证据。requestCorrelation:true 只在源码确认服务端保存 x-agentos-request-id 时使用。';
+descriptions.plan += ' 入口有参数限制时，runnerScope.allowed 或 requestProof.requests 可填写 query:{key:["完整值"]}，数组按线上的同名参数顺序，[]表示缺失。queryInput 可约束直接HTTP的原始类型，exactQuery:true要求没有未记录参数。先为入口登记 queryEvidence。独立审计以 audit.matchRunner:true 按实际 x-agentos-request-id 逐条对应。';
+descriptions.plan += ' 外部回收只读入口可用的输入为 mode、correlation、after、jobId、caseId、attempt、epoch，通过 spec.query 的 $input 传入。预检和实际回执需回显该尝试身份，实际回执另需 receiptId、completedAt 和 verified。';
+descriptions.plan += ' requestProof.scope=service 表示证据来自独立服务审计。audit.matchRunner=true 将该审计逐条限定到本 Runner 的实际请求ID，不扩大为全服务其他调用者；请求次数与独立审计可以分别对应同一原预期。审计的请求ID经程序关联到已保存响应观测，原文未要求独立保存响应内容时无需审计重复保存整份响应。';
 export const requirementAgentTools = Object.entries(descriptions).map(([name, description]) => ({ name: 'test_' + name, description,
   inputSchema: { type: 'object', properties: { args: requirementToolSchemas[name] }, required: ['args'], additionalProperties: false } }));
 
@@ -218,9 +223,10 @@ export function createRequirementAgent(config, options) {
       kind === 'plan' ? '原文约束确切次数时用 requestProof；要求仅允许若干入口或渠道时用 runnerScope 的封闭白名单。核实主体和范围，不能只列几个未调用的写入口代替完整限制，也不能将仅针对场景的约束扩大到准备或外部回收。' : '',
       kind === 'plan' ? 'requestPreflights 是主机已经核验的真实只读取证能力回执，包含check.id、阶段、资源、任务关联键、来源及时间。计划中的同一requestProof已由程序与该回执比对。预检只证明取得证据的能力，不要求计划阶段已有未来场景日志。准备阶段独立审计窗口由主机在冻结计划前收口，以排除随后的场景动作。' : '',
       kind === 'process_preflight' ? '只核对该过程取证契约是否来自所给原始用例，是否确实要求独立服务请求记录，读入口是否由服务端独立采集、以任务相关键过滤，并能准确认证窗口及完整性。先判断取证能力，不能要求尚未执行的动作或实际日志条目提前存在。' : '',
+      ['process_preflight','process','plan'].includes(kind) ? 'requestProof.scope=service区分证据来源。audit.matchRunner=true表示程序将独立服务记录限定到本Runner当前阶段实际发送的请求ID、参数及其响应观测；原文只限制本Runner调用时，该来源选择不扩大为全服务所有调用者。请求ID可将审计请求对应到连接器实际响应观测，原文未明确要求独立响应副本时，不要求审计另外保存整份响应。结构化query约束及matched关联仍须完整，缺失、重复和错对象不能通过文字声明补足。' : '',
       kind === 'mutation' ? '若原始用例明确要求独立服务请求记录，且此写入属于相应阶段和业务对象，必须先有requestPreflights中同一阶段、资源及对象的成功取证探测。缺失时拒绝此写入，指出需要先登记受限只读审计操作并调用test_plan action=process_preflight。本Runner自身调用限制可直接由实际传输记录取证，无需独立服务探测。' : '',
       kind === 'mutation' ? 'preActionEvidence 是程序已核对当前冻结检查、动作输入、测量轮次和先后时点后传入的实际前态。process 是已经审查通过的过程基线，含已保存的实际观测和取值路径。原条款只要求集合 API 快照时，用该观测核对范围和完整性。requestPreflights 只用于原文明确要求的独立服务审计。' : '',
-      kind === 'process' ? 'requestProof 是程序核对同一尝试/轮次、资源、阶段、实际请求及次数的结果。scope=runner仅覆盖Runner负责的HTTP和浏览器传输。scope=service来自独立只读审计，程序核验相关键、来源及完整窗口。核对列举的入口、约束、对象与原要求的语义映射。已证明该范围且同一对象创建结果可由台账/回读与源码核实时，无需模型额外调用取日志。不要把意图数等同发送次数，也不要把发送尝试等同服务端已接收。' : '',
+      kind === 'process' ? 'requestProof 是程序核对同一尝试/轮次、资源、阶段、实际请求及次数的结果。scope=runner仅覆盖Runner负责的HTTP和浏览器传输。scope=service表示来自独立只读审计，程序核验相关键、来源及完整窗口；audit.matchRunner=true时还逐条匹配本Runner实际请求ID、参数和观测归属，不要求统计其他调用者。matched中的observationIds指向连接器保存的实际响应观测，原文未要求独立保存响应内容时，无需审计重复保存整份响应。预检只核验取证能力，不要求未来业务请求及响应提前存在。核对列举的入口、约束、对象与原要求的语义映射。已证明该范围且同一对象创建结果可由台账/回读与源码核实时，无需模型额外调用取日志。不要把意图数等同发送次数，也不要把发送尝试等同服务端已接收。' : '',
       kind === 'process' ? '本次仅审执行过程要求：证据来自Runner真实台账和当前观测。确认源码/入口、原始类型/精度、先冻结后动作/取证、回执丢失后先对账、就绪条件、恢复范围与回查是否满足该条原要求。业务金额/状态/数量必须有相关程序比较，不能因过程材料存在而判业务通过。没有触发的丢回执分支如实标注未发生，不凭空要求该正常分支制造故障；若本用例明确要求制造丢回执，则需真实丢失与对账证据。report由Runner在所有清理后按已固定15表契约生成并另行验证，当前只审作为报告输入的恢复台账，不能宣称报告已生成。' : '',
       kind === 'operation' && payload.spec?.kind === 'database' ? '这是授权数据库上的直接核对或准备操作，不要求业务仓存在完全相同的SQL入口。以所给实际schemas、实体/业务规则和SQL本身核实表、字段、只读语义或结构化CRUD；不要要求为临时快照查询先在产品源码新增接口。' : '',
       kind === 'process' ? 'related.compared及assertionEvidence是程序已完成独立业务比较的证明；业务是否通过由该比较单独判定，本次accepted仅代表check指定的过程被证明。产品失败与正确取证/等待/清理可以同时成立，不得因产品实际值不符合预期而拒绝已满足的过程要求。时间顺序区分purpose=prepare与purpose=scenario：准备动作及其原始回读发生在plan前是正常步骤；只有场景动作必须在plan和测量预检后。' : '',
@@ -362,7 +368,11 @@ export function createRequirementAgent(config, options) {
             data: record.data.contract ? { contract: record.data.contract, proof: record.data.proof, hash: record.data.hash } : record.data })) : [];
         for (const check of checks) {
           const saved = result.processChecks?.[check.id];
-          if (saved?.proven) { entry.checks[check.id] = { kind: check.kind, disposition: 'proven', phase: 'execution' }; continue; }
+          if (saved?.proven) {
+            entry.checks[check.id] = { kind: check.kind, disposition: 'proven', phase: saved.receipt ? 'business_checks' : 'execution',
+              ...(saved.receipt ? { receipt: saved.receipt, evidence: saved.evidence } : {}) };
+            continue;
+          }
           if (check.kind === 'external_cleanup') {
             const { actor, correlation, after, operation } = check.externalReceipt;
             entry.checks[check.id] = { kind: check.kind, disposition: 'missing_evidence', phase: after, actor, correlation,
@@ -418,10 +428,16 @@ export function createRequirementAgent(config, options) {
       if (!current.requestTrace && !current.plan && !current.lastPreparationAt
         && !priorMutations.some(item => item.intent?.id?.startsWith(mutationPrefix()))) {
         current.requestTrace = [];
-        current.requestTraceVersion = 2;
+        current.requestTraceVersion = 3;
       }
       const startRequest = async (request, phase = current.plan ? 'scenario' : 'prepare') => {
         if (!current.requestTrace) return;
+        const attribution = !request.correlationSent && current.plan?.processChecks?.find(({ requestProof: proof }) =>
+          proof?.audit?.matchRunner && proof.phase === phase && proof.resource === request.resource
+          && proof.requests.some(route => route.count > 0 && route.method === request.method && route.path === request.path));
+        if (attribution) throw Object.assign(agentError('Register and use the verified operation with requestCorrelation:true before dispatch: ' + attribution.id),
+          { code: 'request_correlation_required', gapDetails: { checkId: attribution.id, operation: request.operation,
+            resource: request.resource, phase, method: request.method, path: request.path } });
         if (phase !== 'cleanup') {
           const outside = current.plan?.processChecks?.find(check => check.runnerScope
             && !verifyRunnerScope(check, [{ ...request, phase, outcome: 'response' }]).satisfied);
@@ -430,7 +446,8 @@ export function createRequirementAgent(config, options) {
               transport: request.transport, method: request.method, path: request.path } });
         }
         const attempt = { ...scope.checkOutput(sanitized(request)), id: randomUUID(), at: new Date().toISOString(),
-          phase, outcome: 'pending' };
+          caseKey: key, epoch: current.epoch ?? 0,
+          resourceIdentity: scope.resourceIdentity?.(request.resource), phase, outcome: 'pending' };
         current.requestTrace.push(attempt);
         for (const check of current.plan?.processChecks ?? []) {
           const proof = current.processProofs?.[check.id], contract = check.requestProof;
@@ -442,7 +459,7 @@ export function createRequirementAgent(config, options) {
           }
         }
         await saveState();
-        return async outcome => { Object.assign(attempt, outcome); await saveState(); };
+        return Object.assign(async outcome => { Object.assign(attempt, outcome); await saveState(); }, { id: attempt.id });
       };
       const runtime = createAgentResources(config, { ...context(scope), startRequest });
       const cleanupCurrent = () => scope.cleanupCase(request => startRequest(request, 'cleanup'));
@@ -468,11 +485,16 @@ export function createRequirementAgent(config, options) {
         }
       };
       let finished, candidatePlan, candidatePreflights;
-      const observe = async (channel, data, input, subject, measurement, lifecycle) => {
-        const entry = await evidence(scope, channel + '运行观测', { channel, data, input, subject, measurement, lifecycle });
+      const observe = async (channel, data, input, subject, measurement, lifecycle, transportIds = []) => {
+        const requests = new Set([data.requestId, ...transportIds,
+          ...(Array.isArray(data.network) ? data.network.map(item => item.requestId) : [])].filter(Boolean));
+        const linked = (current.requestTrace ?? []).filter(request => requests.has(request.id));
+        const requestIds = linked.map(item => item.id);
+        const entry = await evidence(scope, channel + '运行观测', { channel, data, input, subject, measurement, lifecycle, requestIds });
         const observationId = entry.path.replace('.json', '');
         const record = scope.checkOutput({ observationId, caseKey: key, channel, data: sanitized(data), input, subject,
-          at: new Date().toISOString(), evidence: entry, measurement, lifecycle, epoch: current.epoch ?? 0 });
+          at: new Date().toISOString(), evidence: entry, measurement, lifecycle, epoch: current.epoch ?? 0, requestIds });
+        for (const request of linked) (request.observationIds ??= []).push(observationId);
         state.observations[observationId] = record;
         current.observations.push(observationId);
         await saveState();
@@ -494,7 +516,10 @@ export function createRequirementAgent(config, options) {
           throw agentError('Independent proof needs a registered read-only HTTP GET on its scoped resource: ' + check.id);
         }
         const input = { mode, from, through, correlation: audit.correlation };
-        return auditWindow(await lookup(runtime, scope, spec, input), input, check.id, source);
+        const fields = check.requestProof.audit.matchRunner
+          ? entry => Object.keys(current.requestTrace?.find(item => item.id === entry.requestId)?.query ?? {})
+          : [...new Set(check.requestProof.requests.flatMap(route => Object.keys(route.query ?? {})))];
+        return auditWindow(await lookup(runtime, scope, spec, input), input, check.id, source, fields);
       }
       async function collectAudit(check, from, through) {
         const preflight = current.requestPreflights?.[check.id];
@@ -512,7 +537,8 @@ export function createRequirementAgent(config, options) {
         }
         const boundary = digest(state.operationProofs[contract.operation].boundary);
         if (prior && boundary !== prior.boundary) throw agentError('External cleanup receipt boundary changed after preflight');
-        const input = { mode, correlation: contract.correlation, after: after ?? current.startedAt };
+        const input = { mode, correlation: contract.correlation, after: after ?? current.startedAt,
+          jobId: scope.jobId, caseId: scope.item.caseId, attempt: scope.attempt ?? 1, epoch: current.epoch ?? 0 };
         const receipt = externalCleanupReceipt(await lookup(runtime, scope, spec, input), contract, input, prior?.source);
         return { ...receipt, boundary };
       }
@@ -576,6 +602,10 @@ export function createRequirementAgent(config, options) {
           if (spec.kind === 'http' && (!spec.path?.startsWith('/') || spec.path.startsWith('//'))) throw agentError('HTTP operation needs a resource-relative path');
           if (spec.kind === 'http' || spec.kind === 'browser' && spec.action === 'goto') validateRouteTemplate(spec.path, '$.spec.path');
           if (spec.kind === 'browser') validateRouteTemplate(spec.effect?.path, '$.spec.effect.path');
+          if (spec.queryEvidence?.some(name => credentialField.test(name))
+            || (spec.queryEvidence || spec.requestCorrelation) && spec.kind !== 'http') {
+            throw agentError('Only registered HTTP operations may declare non-credential query evidence or correlation');
+          }
           if (spec.kind === 'database' && spec.access !== 'read' && !state.schemas[spec.resource + ':' + spec.database + ':' + spec.table]) throw agentError('Inspect database schema first');
           const boundary = await operationBoundary(scope, runtime, spec, args.sourceRefs);
           if (state.operationProofs?.[args.name] && digest(state.operationProofs[args.name].boundary) === digest(boundary)) return { registered: args.name, reused: true, boundary };
@@ -718,20 +748,21 @@ export function createRequirementAgent(config, options) {
             const response = await runtime.performSpec(spec, intent.input, resource);
             const readinessEvidence = [];
             const after = await settledReadback(runtime, scope, intent, 'after_write', readinessEvidence);
-            const entry = await evidence(scope, '业务变更与回读', { intent, response, observed: after });
+            const requestIds = [response.requestId, after.requestId].filter(Boolean);
+            const entry = await evidence(scope, '业务变更与回读', { intent, response, observed: after, requestIds });
             if (!conditions(after, intent.after) || spec.access !== 'delete' && !sameValue(observationAt(after, intent.ownership.field), intent.businessKey)) {
               const fields = conditionErrors(after, intent.after, '$.verify.after');
               if (!sameValue(observationAt(after, intent.ownership.field), intent.businessKey)) fields.push('$.ownership.field does not prove the business key');
               throw Object.assign(new RequirementWait('mutation_uncertain', '变更已发出但状态或归属未核实，先对账并恢复。' + fields.join('; ')), { fields });
             }
-            return { observed: after, response, evidence: [entry, ...readinessEvidence] };
+            return { observed: after, response, requestIds, evidence: [entry, ...readinessEvidence] };
           });
           if (args.purpose === 'prepare') {
             current.lastPreparationAt = new Date().toISOString();
             current.preparationVersion = (current.preparationVersion ?? 0) + 1;
           }
           return pageData(await observe(evidenceChannel(verifySpec), receipt.observed, { ...intent.verifyInput, resource: verifySpec.resource },
-            args.subject ?? {}, undefined, { role: 'mutation_readback', purpose: args.purpose }), args);
+            args.subject ?? {}, undefined, { role: 'mutation_readback', purpose: args.purpose }, receipt.requestIds), args);
         }
         if (name === 'plan') {
           if (args.action === 'process_preflight') {
@@ -757,11 +788,20 @@ export function createRequirementAgent(config, options) {
             const { operation } = check.requestProof.audit;
             const spec = await ensureOperation(operation);
             const proof = state.operationProofs[operation];
-            await review(scope, 'process_preflight', { check, originalExpectation: originalLines[check.line - 1], row: scope.row, headers: scope.headers,
-              source: scope.source, auditOperation: spec, sources: proof.sourceRefs.map(ref => state.sources[ref]) });
             const at = new Date().toISOString();
+            const collectionPolicy = {
+              capabilityInput: { mode: 'capability', correlation: check.requestProof.audit.correlation, from: at, through: at },
+              collectInput: { mode: 'collect', correlation: check.requestProof.audit.correlation,
+                from: check.requestProof.phase === 'prepare' ? 'capability preflight timestamp' : 'frozen plan timestamp',
+                through: check.requestProof.phase === 'prepare' ? 'preparation closure before plan freeze' : 'collection start timestamp' },
+              hostResponseValidation: { sameSourceAsCapability: true, exactCorrelation: true, coversRequestedWindow: true,
+                complete: true, uniqueEntryIds: true, everyEntryHasCorrelation: true, matchRunner: check.requestProof.audit.matchRunner === true },
+              requiresFutureBusinessRowsDuringPreflight: false,
+            };
+            await review(scope, 'process_preflight', { check, originalExpectation: originalLines[check.line - 1], row: scope.row, headers: scope.headers,
+              source: scope.source, auditOperation: spec, collectionPolicy, sources: proof.sourceRefs.map(ref => state.sources[ref]) });
             current.requestPreflights ??= {};
-            const preflight = { check, at, boundary: digest(proof.boundary) };
+            const preflight = { check, at, collectionPolicy, boundary: digest(proof.boundary) };
             current.requestPreflights[check.id] = preflight;
             await saveState();
             const audit = await readAudit(check, 'capability', at, at);
@@ -957,7 +997,7 @@ export function createRequirementAgent(config, options) {
           current.epoch = (current.epoch ?? 0) + 1;
           for (const gap of Object.values(current.gaps ?? {})) if (!gap.resolved) { gap.resolved = true; gap.supersededByEpoch = current.epoch; }
           current.startedAt = new Date().toISOString(); current.assertions = {}; current.observations = []; current.aliases = {}; current.requestTrace = [];
-          current.requestTraceVersion = 2;
+          current.requestTraceVersion = 3;
           delete current.externalPreflights;
           delete current.businessCompletedAt;
           delete current.planCandidate;
@@ -1134,7 +1174,7 @@ export function createRequirementAgent(config, options) {
             }
             const entry = await evidence(scope, '外部准备者回收回执', { check, receipt, businessCompletedAt: current.businessCompletedAt });
             current.processProofs ??= {};
-            current.processProofs[check.id] = { proven: true, evidence: entry, mutationVersion: mutationVersion(check.kind) };
+            current.processProofs[check.id] = { proven: true, receipt, evidence: entry, mutationVersion: mutationVersion(check.kind) };
             await saveState();
             return { proven: true, checkId: check.id, evidence: entry };
           }
@@ -1191,8 +1231,14 @@ export function createRequirementAgent(config, options) {
               if (!independent) throw agentError('The independent audit for the closed preparation window is missing: ' + check.id);
             }
             if (!independent && !current.requestTrace) throw agentError('No complete Runner request trace for this measurement epoch: ' + check.id);
-            const entries = independent?.entries ?? current.requestTrace.filter(attempt => attempt.phase === phase && attempt.resource === resource);
-            requestProof = { ...compareRequestProof(check, entries), window: independent && { from: independent.from, through: independent.through,
+            const local = current.requestTrace.filter(attempt => attempt.phase === phase && attempt.resource === resource);
+            const matchRunner = check.requestProof.audit?.matchRunner;
+            const scoped = matchRunner ? local.filter(entry => check.requestProof.requests.some(route =>
+              route.method === entry.method && route.path === entry.path)) : undefined;
+            if (scoped?.some(entry => !entry.correlationSent)) throw agentError('An in-scope request was sent without the audit correlation header');
+            const matched = matchRunner ? correlateRequestAudit(scoped, independent.entries) : undefined;
+            const entries = matchRunner ? local : independent?.entries ?? local;
+            requestProof = { ...compareRequestProof(check, entries), matched, window: independent && { from: independent.from, through: independent.through,
               source: independent.source, correlation: independent.correlation }, preflight: preflight?.evidence, receipt: preparation?.receipt };
             if (!requestProof.satisfied) {
               const entry = await evidence(scope, '过程请求次数矛盾', { checkId: check.id, requestProof });

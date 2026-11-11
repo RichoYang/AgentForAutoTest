@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { notifyJobEvent } from './server.js';
 import { requirementCompletion, requirementProgressLines } from './message-cards.js';
 import { requirementOptions, requirementTopicFingerprint, resolveRequirementOptions } from '../shared/requirement-options.js';
+import { verifyExternalCleanupAfterJob } from '../runner/requirement-external-receipts.js';
 
 export const REQUIREMENT_TEST = 'requirement_test';
 const openId = /^ou_[a-zA-Z0-9]+$/;
@@ -94,6 +95,23 @@ export async function handleRequirementMessage(context, event) {
     return { ignored: true, reason: 'requirement_topic_scope' };
   }
   if (links.length > 1) return reply('每个话题只接受一份需求，请在单独话题中发起。');
+  if (text === '核验外部回收') {
+    if (!ids.has(bot.openId) || links.length) return { ignored: true, reason: 'external_receipt_unaddressed' };
+    const state = await context.store.snapshot();
+    const prior = state.jobs.findLast(job => job.workflow === REQUIREMENT_TEST && job.projectId === projectId
+      && job.chatId === event.chat_id && job.agentProfile === bot.profile && job.requirement?.root === root);
+    if (!prior || prior.senderId !== event.sender_id) return reply('请由原任务发起人在原话题核验外部回收。');
+    try {
+      const { receipts, pending } = await verifyExternalCleanupAfterJob(prior, project, context.config.dataDir);
+      if (!receipts.length && !pending.length) return reply(prior.id + ' 没有已登记的结束后回收入口。');
+      const lines = receipts.map(({ record, duplicate }) =>
+        `${record.caseId} 第${record.attempt}次尝试 ${record.checkIds.join('、')} ${duplicate ? '已归档' : '已核验并追加'}，回收时间 ${record.receipt.completedAt}，原报告 ${record.report.id}。`);
+      lines.push(...pending.map(item => `${item.caseId} ${item.checkId} 待核验。 ${item.reason}`));
+      return reply(prior.id + ' 外部回收\n' + lines.join('\n'));
+    } catch {
+      return reply(prior.id + ' 的原报告、完成状态或回收入口未满足核验条件。');
+    }
+  }
   let options;
   if (links.length && ids.has(bot.openId)) {
     try {

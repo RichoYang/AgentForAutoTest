@@ -1,6 +1,16 @@
+import { isDeepStrictEqual } from 'node:util';
 import { agentError } from './requirement-agent-resources.js';
 
-const routeKey = ({ method, path }) => method + ' ' + path;
+const orderedFields = fields => Object.entries(fields ?? {}).sort(([left], [right]) => left.localeCompare(right));
+const routeKey = ({ method, path, query, queryInput, exactQuery }) =>
+  JSON.stringify([method, path, orderedFields(query), orderedFields(queryInput), exactQuery === true]);
+
+function hasParameterProof(expected, entry) {
+  return (!expected.exactQuery || Number.isInteger(entry.unrecordedQuery) && entry.unrecordedQuery === 0)
+    && [ ['query', expected.query], ['queryInput', expected.queryInput] ].every(([property, fields]) =>
+      Object.entries(fields ?? {}).every(([name, value]) => entry[property] && Object.hasOwn(entry[property], name)
+        && isDeepStrictEqual(entry[property][name], value)));
+}
 
 export function validateRequestProof(check, scope) {
   const proof = check.requestProof;
@@ -16,9 +26,12 @@ export function validateRequestProof(check, scope) {
     throw agentError('Independent request proof needs an audit operation and a task-owned correlation key: ' + check.id);
   }
   if (proof.scope === 'runner' && proof.audit) throw agentError('Runner request proof does not take an independent audit operation: ' + check.id);
+  if (proof.scope === 'service' && !proof.audit.matchRunner && proof.requests.some(route => route.queryInput)) {
+    throw agentError('Typed inputs require Runner attribution and cannot be inferred from a service audit');
+  }
 }
 
-export function auditWindow(response, request, checkId, source) {
+export function auditWindow(response, request, checkId, source, fields = []) {
   const report = response.body;
   const at = value => typeof value === 'string' ? Date.parse(value) : NaN;
   const from = at(request.from), through = at(request.through);
@@ -40,15 +53,47 @@ export function auditWindow(response, request, checkId, source) {
   }
   return { source: report.source, correlation: report.correlation, from: report.from, through: report.through, complete: true,
     entries: report.entries.filter(entry => at(entry.at) >= from && at(entry.at) <= through)
-      .map(({ id, at, method, path }) => ({ id, at, method, path })) };
+      .map(entry => {
+        const { id, at, method, path, requestId, query, unrecordedQuery } = entry;
+        const names = typeof fields === 'function' ? fields(entry) : fields;
+        return { id, at, method, path, ...(typeof requestId === 'string' ? { requestId } : {}),
+          ...(query && typeof query === 'object' && names.length ? { query: Object.fromEntries(names.filter(name =>
+            Object.hasOwn(query, name) && Array.isArray(query[name]) && query[name].every(value => typeof value === 'string'))
+            .map(name => [name, query[name]])) } : {}),
+          ...(Number.isSafeInteger(unrecordedQuery) && unrecordedQuery >= 0 ? { unrecordedQuery } : {}),
+        };
+      }) };
+}
+
+export function correlateRequestAudit(runnerEntries, auditEntries) {
+  const runner = new Map(runnerEntries.map(entry => [entry.id, entry]));
+  const seen = new Set();
+  const matches = auditEntries.map(entry => {
+    const actual = runner.get(entry.requestId);
+    if (!actual || seen.has(entry.requestId) || !actual.correlationSent || actual.method !== entry.method
+      || actual.path !== entry.path || !isDeepStrictEqual(actual.query, entry.query)
+      || actual.unrecordedQuery !== entry.unrecordedQuery) {
+      throw Object.assign(agentError('Independent audit contains a duplicate, foreign, or contradictory request receipt'),
+        { code: 'request_proof_attribution' });
+    }
+    seen.add(entry.requestId);
+    return { auditId: entry.id, requestId: actual.id, observationIds: actual.observationIds ?? [],
+      phase: actual.phase, caseKey: actual.caseKey, epoch: actual.epoch, outcome: actual.outcome };
+  });
+  if (seen.size !== runner.size) {
+    throw Object.assign(agentError('Independent audit is missing a receipt for a Runner request'), { code: 'request_proof_missing' });
+  }
+  return matches;
 }
 
 export function compareRequestProof(check, entries) {
-  const matches = check.requestProof.requests.map(({ method, path, count }) => {
-    const attempts = entries.filter(entry => entry.method === method && entry.path === path);
+  const matches = check.requestProof.requests.map(contract => {
+    const { method, path, count } = contract;
+    const attempts = entries.filter(entry => entry.method === method && entry.path === path && hasParameterProof(contract, entry));
     return { method, path, expected: count, actual: attempts.length, attempts };
   });
-  if (matches.some(item => item.attempts.some(attempt => attempt.outcome === 'pending'))) {
+  if (entries.some(entry => entry.outcome === 'pending'
+    && check.requestProof.requests.some(route => route.method === entry.method && route.path === entry.path))) {
     throw Object.assign(agentError('Request proof ' + check.id + ': a transport attempt has no durable disposition after interruption'),
       { code: 'request_proof_missing', fields: ['$.requestProof.requests'] });
   }
@@ -62,13 +107,13 @@ export function verifyRunnerScope(check, entries) {
   const inScope = entries.filter(entry => phase === 'all' || phase === entry.phase);
   if (inScope.some(entry => entry.outcome === 'pending')) throw agentError('Runner scope has an unresolved transport attempt');
   const violations = inScope.filter(entry => !allowed.some(route => ['resource', 'transport', 'method', 'path']
-    .every(key => route[key] === entry[key])));
+    .every(key => route[key] === entry[key]) && hasParameterProof(route, entry)));
   return { phase, allowed, entries: inScope, violations, satisfied: !violations.length };
 }
 
 export function runnerScopeHistory(current) {
   const epochs = [...(current.restarts ?? []), current];
-  if (epochs.some(epoch => epoch.requestTraceVersion !== 2 || !Array.isArray(epoch.requestTrace))) return null;
+  if (epochs.some(epoch => ![2, 3].includes(epoch.requestTraceVersion) || !Array.isArray(epoch.requestTrace))) return null;
   return epochs.flatMap(epoch => epoch.requestTrace);
 }
 
@@ -84,6 +129,12 @@ export function externalCleanupReceipt(response, contract, input, source) {
     || !(Date.parse(body.completedAt) >= Date.parse(input.after) && Date.parse(body.completedAt) <= Date.now())) {
     throw agentError('External cleanup has no verified receipt after the declared boundary');
   }
-  return { source: body.source, actor: body.actor, correlation: body.correlation,
-    ...(input.mode === 'capability' ? { available: true } : { completedAt: body.completedAt, verified: true }) };
+  const binding = input.jobId ? { jobId: input.jobId, caseId: input.caseId, attempt: input.attempt, epoch: input.epoch } : null;
+  if (binding && (Object.entries(binding).some(([field, value]) => !isDeepStrictEqual(body[field], value))
+    || input.mode !== 'capability' && (typeof body.receiptId !== 'string' || !body.receiptId))) {
+    throw agentError('External cleanup receipt must identify this Job, case, attempt and measurement epoch');
+  }
+  return { source: body.source, actor: body.actor, correlation: body.correlation, ...binding,
+    ...(input.mode === 'capability' ? { available: true } : { completedAt: body.completedAt, verified: true,
+      ...(binding ? { receiptId: body.receiptId } : {}) }) };
 }

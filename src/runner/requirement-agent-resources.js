@@ -1,7 +1,7 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import mysql from 'mysql2/promise';
 import { chromium } from 'playwright';
@@ -201,6 +201,7 @@ export function createAgentResources(config, scope) {
   const sessions = new Map();
   const authentication = new Map();
   const schemas = new Map();
+  const responseIds = new WeakMap();
   const operations = () => scope.state.operations;
   const loginFor = resource => config.logins?.[resource] ?? (resource === (config.login?.resource ?? 'platform') ? config.login : undefined);
   const identityFrom = (body, fields, token) => Object.fromEntries(Object.entries(fields ?? {}).map(([key, field]) => {
@@ -212,11 +213,35 @@ export function createAgentResources(config, scope) {
     scope.checkOutput?.(String(value));
     return [key, String(value)];
   }));
-  async function send(resource, method, url, transport, dispatch) {
-    const complete = await scope.startRequest?.({ resource, method, path: url.pathname, transport });
+  function queryEvidence(url, names = [], input = {}) {
+    const query = {}, queryInput = {};
+    let recorded = 0;
+    for (const name of new Set(names)) {
+      if (credentialField.test(name)) continue;
+      const values = url.searchParams.getAll(name);
+      try {
+        const field = { values, input: input[name] };
+        if (!isDeepStrictEqual(field, sanitized(field))) continue;
+        scope.checkOutput?.({ [name]: field });
+        Object.defineProperty(query, name, { value: values, enumerable: true });
+        if (Object.hasOwn(input, name) && input[name] !== undefined) {
+          Object.defineProperty(queryInput, name, { value: input[name], enumerable: true });
+        }
+        recorded += values.length;
+      } catch { /* Credential-bearing values are omitted and cannot prove a constraint. */ }
+    }
+    return { query, queryInput, unrecordedQuery: [...url.searchParams].length - recorded };
+  }
+  async function send(resource, method, url, transport, dispatch, options = {}) {
+    const { fields, input, correlation, operation } = options;
+    const detail = fields?.length ? queryEvidence(url, fields, input) : undefined;
+    const correlated = correlation === true && Boolean(scope.startRequest);
+    const complete = await scope.startRequest?.({ resource, method, path: url.pathname, transport,
+      ...detail, ...(operation ? { operation } : {}), ...(correlated ? { correlationSent: true } : {}) });
     let response;
-    try { response = await dispatch(); }
+    try { response = await dispatch(correlated ? complete?.id : undefined); }
     catch (error) { await complete?.({ outcome: 'no_response' }); throw error; }
+    if (complete?.id) responseIds.set(response, complete.id);
     await complete?.({ outcome: 'response', status: transport === 'browser' ? response.status() : response.status });
     return response;
   }
@@ -330,12 +355,19 @@ export function createAgentResources(config, scope) {
             state.effect = null;
           }
         }
-        const response = await send(resourceName, method, url, 'browser', () => route.fetch({ maxRedirects: 0, maxRetries: 0 }));
+        const contracts = Object.entries(operations()).filter(([, op]) => op.kind === 'http' && op.access === 'read'
+          && op.resource === resourceName && (op.method ?? 'GET') === method && op.path === url.pathname);
+        const [operation, single] = contracts.length === 1 ? contracts[0] : [];
+        const fields = contracts.flatMap(([, op]) => op.queryEvidence ?? []);
+        const response = await send(resourceName, method, url, 'browser', id => route.fetch({ maxRedirects: 0, maxRetries: 0,
+          ...(id ? { headers: { ...request.headers(), 'x-agentos-request-id': id } } : {}),
+        }), { fields, operation, correlation: single?.requestCorrelation });
         if (response.status() >= 300 && response.status() < 400) throw agentError('Redirect requires a separately verified endpoint');
         if (['xhr', 'fetch'].includes(request.resourceType()) && !(state.login && url.pathname === login?.path)) {
           let body;
           try { body = await response.json(); } catch { body = null; }
-          state.network.push({ path: url.pathname, method, status: response.status(), body: sanitized(body) });
+          state.network.push({ path: url.pathname, method, status: response.status(), body: sanitized(body),
+            ...(responseIds.has(response) ? { requestId: responseIds.get(response) } : {}) });
         }
         await route.fulfill({ response });
       } catch (error) {
@@ -378,7 +410,16 @@ export function createAgentResources(config, scope) {
     const route = resolveRoute(spec.path, input);
     const url = resourceURL(resource, route);
     const query = resolveInput(spec.query ?? {}, input);
-    for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
+    for (const [key, value] of Object.entries(query)) {
+      if (!spec.queryEvidence?.includes(key)) { url.searchParams.set(key, String(value)); continue; }
+      const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
+      if (values.some(item => !['string', 'boolean', 'number'].includes(typeof item) && item !== null
+        || typeof item === 'number' && (!Number.isFinite(item) || Number.isInteger(item) && !Number.isSafeInteger(item)))) {
+        throw agentError('Evidence query input needs scalars or an array of scalars. Use decimal text for large integers.');
+      }
+      url.searchParams.delete(key);
+      for (const item of values) url.searchParams.append(key, String(item));
+    }
     const headers = { accept: 'application/json' };
     const method = (spec.method ?? 'GET').toUpperCase();
     if (spec.access === 'read' && (!['GET', 'HEAD', 'OPTIONS', 'POST'].includes(method)
@@ -413,14 +454,21 @@ export function createAgentResources(config, scope) {
     }
     if (resource.resource_type === 'rabbitmq') headers.authorization = 'Basic ' + Buffer.from(resource.username + ':' + resource.password).toString('base64');
     const body = resolveInput(spec.body, input);
-    const response = await send(spec.resource, method, url, 'http', () => fetch(url, {
-      method, headers: { ...headers, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(spec.timeoutMs ?? 30000) }));
+    const operation = Object.keys(operations()).find(name => operations()[name] === spec);
+    const response = await send(spec.resource, method, url, 'http', id => fetch(url, {
+      method, headers: { ...headers, ...(id ? { 'x-agentos-request-id': id } : {}), ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(spec.timeoutMs ?? 30000) }),
+    { fields: spec.queryEvidence, input: query, correlation: spec.requestCorrelation, operation });
     for (const value of response.headers.getSetCookie()) scope.rememberSecret?.(value.split(';')[0].split('=').slice(1).join('='));
     const text = await response.text();
     let data; try { data = JSON.parse(text); } catch { data = text; }
-    return { status: response.status, body: sanitized(data), path: url.pathname, method,
-      request: { query: sanitized(Object.fromEntries(url.searchParams)), ...(body !== undefined ? { body: sanitized(body) } : {}) } };
+    const detail = spec.queryEvidence ? queryEvidence(url, spec.queryEvidence, query) : undefined;
+    const publicQuery = detail ? Object.fromEntries([...url.searchParams].filter(([key]) => Object.hasOwn(detail.query, key))) : Object.fromEntries(url.searchParams);
+    const result = { status: response.status, body: sanitized(data), path: url.pathname, method,
+      request: { query: sanitized(publicQuery), ...(detail ? { queryEvidence: detail } : {}),
+        ...(body !== undefined ? { body: sanitized(body) } : {}) } };
+    if (responseIds.has(response)) Object.defineProperty(result, 'requestId', { value: responseIds.get(response) });
+    return result;
   }
 
   async function performSpec(spec, input, resource) {

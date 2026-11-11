@@ -40,6 +40,18 @@ async function runProof(t, mode, execute) {
   const original = '1. count equals 1\n2. prepare exactly once without calling the revision endpoint\n3. verify the 15-sheet report';
   const agent = createRequirementAgent({}, { workDir: root, review: async prompt => {
     const payload = JSON.parse(prompt.slice(prompt.lastIndexOf('\n\n') + 2));
+    if (['process_preflight', 'process', 'plan'].includes(payload.kind)) {
+      assert.match(prompt, /audit\.matchRunner=true/);
+      assert.match(prompt, /不扩大为全服务所有调用者/);
+      assert.match(prompt, /不要求审计另外保存整份响应/);
+    }
+    if (payload.kind === 'process_preflight') {
+      assert.equal(payload.collectionPolicy.requiresFutureBusinessRowsDuringPreflight, false);
+      assert.equal(payload.collectionPolicy.collectInput.from, 'capability preflight timestamp');
+      assert.equal(payload.collectionPolicy.hostResponseValidation.complete, true);
+      assert.equal(payload.collectionPolicy.hostResponseValidation.coversRequestedWindow, true);
+      assert.equal(payload.collectionPolicy.capabilityInput.from, payload.collectionPolicy.capabilityInput.through);
+    }
     if (payload.kind === 'process') audits.push(payload);
     if (payload.kind === 'plan' && payload.plan.processChecks[0].requestProof.scope === 'service') {
       assert.equal(payload.requestPreflights[0].check.id, 'P01');

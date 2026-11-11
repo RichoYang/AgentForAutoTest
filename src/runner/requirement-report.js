@@ -108,7 +108,9 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
       const checks = processProofs.map(([id, check]) => id + ' ' + ({ proven: '已证明', deferred: '在报告实际核验阶段登记回执',
         missing_evidence: '缺证据', contradictory_evidence: '证据矛盾', invalid_contract: '契约不合法' })[check.disposition]
         + (check.kind === 'external_cleanup' && check.requiredAction ? '（外部回收方 ' + check.actor + '，对象 ' + check.correlation
-          + '，边界 ' + check.phase + '。' + check.requiredAction + '）' : ''));
+          + '，边界 ' + check.phase + '。' + check.requiredAction + '）' : '')
+        + (check.receipt ? '（外部回收方 ' + check.receipt.actor + '，对象 ' + check.receipt.correlation
+          + '，回执 ' + check.receipt.receiptId + '，回收时间 ' + check.receipt.completedAt + '）' : ''));
       processNotes.push(item.caseId + ' 尝试 ' + process.attempt + ' 的原过程证明 ' + process.historicalProven + '/' + processProofs.length
         + '。本报告构建时的逐项状态为 ' + checks.join('、') + '。');
     }
