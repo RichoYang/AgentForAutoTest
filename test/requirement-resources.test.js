@@ -159,9 +159,14 @@ test('real MySQL connector returns identity and selected database metadata and r
     { db: { section: 'Demo.Sit.Db', scope: 'read', database: name } });
     const resources = await requirementResources(env);
     const runtime = createAgentResources({}, { state: { operations: {} }, useRead: (key, run) => resources.use(key, 'read', run) });
-    assert.deepEqual(await runtime.inspect('db'), { connector: 'mysql', connected: true, principalMatchesConfiguredUser: true,
-      database: name, globalPrivilege: false, grantEntries: 2 });
-    assert.deepEqual(await runtime.schema({ resource: 'db' }), { rows: [{ Database: name }] });
+    const { databaseEvidence, ...identity } = await runtime.inspect('db');
+    assert.deepEqual(identity, { connector: 'mysql', connected: true, principalMatchesConfiguredUser: true,
+      database: name, resource: 'db', environment: 'Sit', requestId: undefined, globalPrivilege: false, grantEntries: 2 });
+    assert.equal(databaseEvidence.selection, 'fixed_binding');
+    assert.equal(databaseEvidence.database, name);
+    assert.equal(databaseEvidence.currentDatabaseExpression, 'DATABASE()');
+    assert.equal((await runtime.inspect('db', name, true)).databaseEvidence.selection, 'explicit');
+    assert.deepEqual(await runtime.schema({ resource: 'db' }), { rows: [{ Database: name }], requestId: undefined });
     await assert.rejects(runtime.schema({ resource: 'db', database: 'other' }), { code: 'environment_scope' });
   });
 

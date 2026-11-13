@@ -120,6 +120,8 @@ test('Runner-only process proof counts actual transports and permits the report 
     });
     await flow.compare(); await flow.process(); await flow.finish();
     assert.equal(flow.audits[0].requestProof.scope, 'runner');
+    assert.ok(flow.audits[0].runnerRequests.some(item => item.phase === 'prepare' && item.method === 'POST' && item.path === '/bundle'));
+    assert.ok(flow.audits[0].runnerRequests.some(item => item.phase === 'scenario' && item.method === 'GET' && item.path === '/read'));
     assert.equal(flow.audits[0].registeredOperations.find(operation => operation.name === 'bundle').spec.path, '/bundle');
   });
   assert.equal(result.status, '通过');

@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { agentError } from './requirement-agent-resources.js';
+import { digest } from './requirement-feishu.js';
 
 const orderedFields = fields => Object.entries(fields ?? {}).sort(([left], [right]) => left.localeCompare(right));
 const routeKey = ({ method, path, query, queryInput, exactQuery }) =>
@@ -106,8 +107,15 @@ export function verifyRunnerScope(check, entries) {
   if (!Array.isArray(entries)) throw agentError('No complete Runner trace for this measurement epoch');
   const inScope = entries.filter(entry => phase === 'all' || phase === entry.phase);
   if (inScope.some(entry => entry.outcome === 'pending')) throw agentError('Runner scope has an unresolved transport attempt');
-  const violations = inScope.filter(entry => !allowed.some(route => ['resource', 'transport', 'method', 'path']
-    .every(key => route[key] === entry[key]) && hasParameterProof(route, entry)));
+  const violations = inScope.filter(entry => {
+    const routes = allowed.filter(route => ['resource', 'transport', 'method', 'path'].every(key => route[key] === entry[key]));
+    const scoped = routes.some(route => route.databaseCall);
+    return !routes.some(route => hasParameterProof(route, entry) && (!scoped || route.databaseCall
+      && Object.entries(route.databaseCall).every(([field, value]) =>
+        entry.databaseCall && (field === 'params' ? entry.databaseCall.parameterHash === digest(value)
+          : isDeepStrictEqual(entry.databaseCall[field], value)))
+      && (entry.beforeDispatch === true || Array.isArray(entry.statementReceipts))));
+  });
   return { phase, allowed, entries: inScope, violations, satisfied: !violations.length };
 }
 

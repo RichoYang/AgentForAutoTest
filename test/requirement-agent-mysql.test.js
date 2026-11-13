@@ -5,6 +5,9 @@ import mysql from 'mysql2/promise';
 import { createAgentResources, mysqlParameters } from '../src/runner/requirement-agent-resources.js';
 import {validateMutationReadback} from '../src/runner/requirement-mutation-measurement.js';
 import {createRequirementAgent} from '../src/runner/requirement-agent.js';
+import {verifyRunnerScope} from '../src/runner/requirement-agent-request-proof.js';
+import {compareAgentObservation} from '../src/runner/requirement-agent-assertion-binding.js';
+import {validateToolArguments} from '../src/runner/requirement-agent-contracts.js';
 import {mkdtemp,writeFile,rm} from 'node:fs/promises';import path from 'node:path';import os from 'node:os';
 
 test('SQL parameters preserve exact integer/decimal text and reject already-rounded numbers', () => {
@@ -14,6 +17,72 @@ test('SQL parameters preserve exact integer/decimal text and reject already-roun
     assert.throws(() => mysqlParameters([value]), /original decimal or integer as a string/);
   }
 });
+
+test('real MySQL links scoped probes and exposes complete composite keys without SQL aggregation',
+  { skip: !process.env.AGENTOS_TEST_MYSQL_PORT }, async () => {
+    const port = Number(process.env.AGENTOS_TEST_MYSQL_PORT);
+    assert.ok(port > 1024 && port !== 3306);
+    const resource = { resource_type: 'mysql', host: '127.0.0.1', port, username: 'root', password: '' };
+    const connection = await mysql.createConnection({ host: resource.host, port, user: 'root', password: '' });
+    const database = 'aos_scope_' + randomUUID().replaceAll('-', '');
+    const requests = [];
+    const runtime = createAgentResources({}, { state: {}, saveState: async () => {}, useRead: (_name, run) => run(resource),
+      startRequest: async request => {
+        const entry = { ...request, id: randomUUID(), phase: 'prepare' };
+        requests.push(entry);
+        return Object.assign(async outcome => Object.assign(entry, outcome), { id: entry.id });
+      } });
+    try {
+      await connection.query('CREATE DATABASE `' + database + '`');
+      await connection.query('CREATE TABLE `' + database + '`.fixture (id INT, tenant INT, PRIMARY KEY (id,tenant))');
+      const identity = await runtime.inspect('mysql', undefined, true);
+      assert.equal(identity.database, null);
+      assert.equal(identity.databaseEvidence.selection, 'connector_default');
+      assert.equal(identity.databaseEvidence.database, null);
+      assert.match(identity.databaseEvidence.sql, /DATABASE\(\) AS databaseName/);
+      assert.deepEqual(identity.databaseEvidence.currentDatabaseField, ['database']);
+      assert.equal(identity.requestId, requests[0].id);
+      assert.equal(requests[0].statementReceipts.length, 1);
+      assert.match(requests[0].statementReceipts[0].statement, /CURRENT_USER/);
+      const schema = await runtime.schema({ resource:'mysql', database, table:'fixture' });
+      assert.equal(schema.databaseEvidence.database,database);
+      assert.equal(schema.databaseEvidence.currentDatabaseExpression,'DATABASE()');
+      assert.deepEqual(schema.databaseEvidence.currentDatabaseField,['databaseEvidence','database']);
+      assert.equal(schema.requestId,requests[1].id);
+      assert.deepEqual(schema.primaryKey, { columns:['id','tenant'], count:2, complete:true });
+      const observation = { channel:'database', data:schema };
+      const compare = expected => compareAgentObservation({ type:'list', expected }, observation, {field:['primaryKey','columns']});
+      assert.equal(compare(['id']).compared,true);
+      assert.equal(compare(['id']).passed,false);
+      assert.equal(compare(['id','tenant']).passed,true);
+      const route = databaseCall => ({resource:'mysql', transport:'database', method:'CONNECT', path:'/', databaseCall});
+      const check = {runnerScope:{phase:'all',allowed:[route({action:'identity',database:null}),route({action:'schema',database,table:'fixture'})]}};
+      assert.doesNotThrow(() => validateToolArguments('plan',{action:'process_preflight',check:{...check,id:'scope',line:1,
+        kind:'execution_evidence',requirement:'Full scope'}}));
+      assert.equal(verifyRunnerScope(check,requests).satisfied,true);
+      assert.equal(verifyRunnerScope(check,[{...requests[0],statementReceipts:undefined}]).satisfied,false);
+      await runtime.inspect('mysql',database);
+      assert.deepEqual(verifyRunnerScope(check,requests).violations,[requests[2]]);
+      assert.match(requests[2].statementReceipts[1].statement,/SHOW GRANTS/);
+      const metadata = await runtime.schema({ resource:'mysql', database:'information_schema',
+        connectionDatabase:database, table:'KEY_COLUMN_USAGE' });
+      assert.equal(metadata.database,'information_schema');
+      assert.equal(metadata.databaseEvidence.database,database);
+      assert.ok(metadata.columns.some(column=>column.Field==='COLUMN_NAME'));
+      const read = await runtime.performSpec({kind:'database',access:'read',resource:'mysql',database,operationName:'read_key',
+        sql:'SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND CONSTRAINT_NAME=? ORDER BY ORDINAL_POSITION',
+        params:[database,'fixture','PRIMARY']},{},resource);
+      assert.equal(read.count,2);
+      assert.equal(read.requestId,requests[4].id);
+      const parameterRoute = route({action:'read',database,operation:'read_key',params:[database,'fixture','PRIMARY']});
+      assert.equal(verifyRunnerScope({runnerScope:{phase:'all',allowed:[parameterRoute]}},[requests[4]]).satisfied,true);
+      assert.equal(verifyRunnerScope({runnerScope:{phase:'all',allowed:[{...parameterRoute,databaseCall:{...parameterRoute.databaseCall,params:[]}}]}},[requests[4]]).satisfied,false);
+    } finally {
+      await runtime.close();
+      await connection.query('DROP DATABASE IF EXISTS `' + database + '`');
+      await connection.end();
+    }
+  });
 
 // Explicit opt-in to a dedicated loopback database server; never uses project credentials.
 test('real MySQL preserves BIGINT targeting, numeric amounts, rollback and restoration',

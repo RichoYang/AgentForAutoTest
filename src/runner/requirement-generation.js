@@ -34,6 +34,7 @@ export async function generateCases({ source, template, skill, expectedProject, 
     '按 materials 中有 filename 的顺序读取附图。图中独有的规则须使用对应 anchor 并映射用例。看不清且影响验收时返回 unreadMaterials（对应锚点数组）。',
     '可参考 assertionVocabulary 中项目登记的业务名称。保持自然语言和全部原始条件，复合要求可拆成分别可观察的预期。未知或不可观察的条件不得改写为容易通过的断言。',
     '原文已经明确写出可观测的公式、状态或包含／排除条件时，优先逐项保留原句，不自行增加示例数据、条件分支或新的等价推导。取证方法放入操作步骤。',
+    '区分普通只读、只核对指定业务对象、以及要求证明整个调用窗口只允许指定读取。前两类不自行增加全调用审计。原文明确限制全过程、指定调用次数或要求独立服务记录时保留原范围，不将其改成单次读取验证。',
     skill.files['SKILL.md'], skill.files['references/case-schema.md'],
     JSON.stringify({ expectedProject, otherProjects, anchors: requirementAnchors(source), source, template, repair, assertionVocabulary }),
   ].join('\n\n');

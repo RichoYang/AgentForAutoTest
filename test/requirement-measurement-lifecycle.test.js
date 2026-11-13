@@ -44,8 +44,12 @@ test('original baseline can receive completeness evidence; post-action replaceme
       await assert.rejects(invoke('measure', { ...selection, observationId: 'later' }), /Post-action/);
       await assert.rejects(invoke('measure', { ...selection, evidenceRefs: [{ observationId: 'later', fields: [['rows', 0, 'count']] }] }), /later queries/);
       await assert.rejects(invoke('plan', { ...plan, checks: [{ ...plan.checks[0], expected: 'new value' }] }), /Frozen expectations/);
-      await assert.rejects(invoke('measure', { action: 'restart', reason: 'Cannot prove original collection scope' }), { code: 'cleanup_pending' });
-      const restarted = await invoke('measure', { action: 'restart', reason: 'Cannot prove original collection scope' });
+      const reason = 'Cannot prove original collection scope';
+      await assert.rejects(invoke('measure', { action: 'restart', reason }), { code: 'restart_evidence_missing' });
+      const restart = { action: 'restart', reason, change: 'Restore the original snapshot before taking an independent new baseline',
+        evidenceRefs: [{ observationId: 'original', fields: [['rows', 0, 'count']] }] };
+      await assert.rejects(invoke('measure', restart), { code: 'cleanup_pending' });
+      const restarted = await invoke('measure', restart);
       assert.equal(restarted.epoch, 1);
       const history = await invoke('evidence', { observationId: 'original' });
       assert.equal(history.historical, true); assert.equal(history.usableForCurrentAssertion, false);

@@ -1,3 +1,7 @@
+## 2026-11-13 · AgentOS 1.61.0 · 数据库证据衔接
+
+MySQL 回执关联实际连接库、操作分类和语句尝试，显式全程范围使用结构化白名单。表结构观测提供完整主键列，区分业务表、实际 SQL 来源和分页元数据。重启测量保留未解决缺口和已发生的调用。见[执行说明](requirement-agent.md)和[验证记录](database-discovery.verification.md)。
+
 ## 2026-11-11 · AgentOS 1.60.0 · 按需求自主发现和选择数据库
 
 MySQL 默认库可为空。Runner 通过已授权连接发现库，结合实际数据源选择多个相关库，记录连接身份和列来源。保留显式固定库、配置撤权和数据操作权限。审查同时收到有效选库、实际结构和运行渠道。见[数据库接入](controlled-ini.md)和[验证记录](database-discovery.verification.md)。

@@ -94,3 +94,15 @@ Runner 复用 Codex app-server，通过任务专属动态工具读取本项目�
 报告仍先运行原 Skill 版本化构建器，再只适配表体行高并重新渲染，固定 15 表、内容与公式保持。视觉检查、重开计数与摘要均针对最终文件。清理或报告未核验时不能交付为完成。
 
 本机隔离验收：配置 `AGENTOS_REQUIREMENT_SKILLS_ROOT`、本机 Codex 配置及需要的 `AGENTOS_REQUIREMENT_POWERSHELL`，运行 `node scripts/verify-requirement-agent.mjs <独立输出目录>`。`AGENTOS_ACCEPTANCE_MODE` 支持 `positive`、`wrong-page`、`multi-object`、`lost-receipt`、`cleanup-retry`、`retry-native`、`navigation-state`、`authenticated-navigation`。真实模型、浏览器、HTTP 和正常 Runner 实际运行，飞书传输与来源是隔离输入；这些结果不能替代项目环境验收。Windows 与其他平台的部署验证需分别记录。
+
+## 数据库观测和全程调用范围
+
+普通只读或指定对象的需求约束业务查询和操作权限。只有源需求明确要求覆盖所有调用时，才为对应阶段登记封闭的 `runnerScope`。涉及其他调用者或独立服务证明时，沿用独立审计入口及能力预检。
+
+MySQL 的 `test_connection` 可设置 `identityOnly: true`，保存当前库和主体匹配结果。连接观测中的 `databaseEvidence` 记录同一连接的 `DATABASE()` 表达式、取值路径、时点和选库方式。固定绑定要以未传入数据库参数的连接回读为据。常规连接检查还读取授权。无默认库时当前库可为 `null`。`test_schema` 保存实际连接身份与表结构，其中 `primaryKey.columns` 是按索引顺序回读的完整主键列。使用 `type: "list"` 和 `operator: "equals"` 比较整个数组。`data.count` 是 SQL 实际返回行数，外层 `total` 只用于分页显示。
+
+全程范围中的 MySQL 路由使用 `transport: "database"`、`method: "CONNECT"`、`path: "/"`，并以 `databaseCall` 声明允许的调用类别和实际连接库。表结构范围可限定表名。自定义读查询需要指定审核过的操作名及规范化的参数值。连接器在派发前检查冻结范围，并将实际命令回执挂到同一连接和保存观测。过程审查以同一份台账核对逐次回执、跨阶段边界和已关联观测，即使该检查没有另行声明白名单。旧连接回执仅能证明连接。表结构观测可以在冻结后独立重读。
+
+参数化 SQL 的 `spec.tables` 分别声明实际 SQL 来源 `role: "query"` 和业务验证对象 `role: "subject"`。先读取各项真实结构。通过固定业务库连接读取 `INFORMATION_SCHEMA` 的列定义时，可在 `test_schema` 传入 `connectionDatabase`。声明用于结构证据关联，查询参数及业务范围仍按实际证据独立审查。
+
+过去轮次的调用范围和缺口仍保留。重复补证未产生新事实时，使用当前缺口说明、已知事实和清理记录收尾。需要重启测量时，说明实际变化并提供来源或观测证据，保留原冻结预期与已发生调用。

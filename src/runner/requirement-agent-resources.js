@@ -246,30 +246,73 @@ export function createAgentResources(config, scope) {
     await complete?.({ outcome: 'response', status: transport === 'browser' ? response.status() : response.status });
     return response;
   }
-  async function connect(resource, database, name, options) {
+  async function connect(resource, database, name, options, call) {
     if (resource.resource_type !== 'mysql') throw agentError('Resource is not MySQL');
     const selected = scopedDatabase(resource, database, options);
-    return send(name, 'CONNECT', { pathname: '/' }, 'database', () => mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
+    const databaseCall = { ...call, database: selected ?? null };
+    const complete = await scope.startRequest?.({ resource: name, method: 'CONNECT', path: '/', transport: 'database', databaseCall });
+    let connection;
+    try {
+      connection = await mysql.createConnection({ host: resource.host, port: Number(resource.port) || 3306, user: resource.username,
       password: resource.password, database: selected,
       supportBigNumbers: true, bigNumberStrings: true, decimalNumbers: false, dateStrings: true,
       // We do not use query attributes; early 8.0 implementations interpret
       // the execute attribute flag as a server cursor and never send its rows.
       flags: ['-CLIENT_QUERY_ATTRIBUTES'],
-      multipleStatements: false, connectTimeout: 10000 }));
+        multipleStatements: false, connectTimeout: 10000 });
+    } catch (error) {
+      await complete?.({ outcome: 'no_response' });
+      throw error;
+    }
+    const statementReceipts = [];
+    const run = async (method, command, parameters) => {
+      const sql = typeof command === 'string' ? command : command?.sql;
+      const fixed = call.action !== 'write' && !(call.action === 'read' && method === 'execute')
+        && !(call.action === 'snapshot' && method === 'execute');
+      const receipt = { method, ...(fixed && sql ? { statement: sql } : sql ? { sqlHash: digest(sql) } : {}),
+        ...(parameters ? { parameterHash: digest(parameters) } : {}), outcome: 'pending' };
+      statementReceipts.push(receipt);
+      await complete?.({ outcome: 'pending', statementReceipts });
+      try {
+        const result = await connection[method](...(command === undefined ? [] : parameters === undefined ? [command] : [command, parameters]));
+        receipt.outcome = 'response';
+        return result;
+      } catch (error) {
+        receipt.outcome = 'error';
+        throw error;
+      } finally {
+        await complete?.({ outcome: 'pending', statementReceipts });
+      }
+    };
+    return {
+      id: complete?.id, query: (sql) => run('query', sql), execute: (sql, parameters) => run('execute', sql, parameters),
+      beginTransaction: () => run('beginTransaction'), rollback: () => run('rollback'), commit: () => run('commit'),
+      async end() {
+        try { await connection.end(); }
+        finally { await complete?.({ outcome: 'response', statementReceipts }); }
+      },
+    };
   }
   async function database(spec, input, resource) {
-    const connection = await connect(resource, spec.database, spec.resource);
+    const reading = spec.access === 'read';
+    if (reading && (!/^\s*(?:SELECT|SHOW|DESCRIBE|EXPLAIN|WITH)\b/i.test(spec.sql) || /\b(?:INTO\s+(?:OUTFILE|DUMPFILE)|FOR\s+UPDATE|GET_LOCK|RELEASE_LOCK|SLEEP|BENCHMARK)\b/i.test(spec.sql))) {
+      throw agentError('Use a read-only SQL query without locks or file output');
+    }
+    const parameters = reading ? mysqlParameters(resolveInput(spec.params ?? [], input)) : undefined;
+    const connection = await connect(resource, spec.database, spec.resource, undefined, reading ? {
+      action: 'read', operation: spec.operationName, statements: ['SET TRANSACTION READ ONLY', 'START TRANSACTION',
+        'SELECT DATABASE(), CURRENT_USER()', 'parameterized SQL', 'ROLLBACK'],
+      sqlHash: digest(spec.sql), parameterHash: digest(parameters),
+    } : { action: 'write', table: spec.table, operation: spec.operationName });
     try {
-      if (spec.access === 'read') {
-        if (!/^\s*(?:SELECT|SHOW|DESCRIBE|EXPLAIN|WITH)\b/i.test(spec.sql) || /\b(?:INTO\s+(?:OUTFILE|DUMPFILE)|FOR\s+UPDATE|GET_LOCK|RELEASE_LOCK|SLEEP|BENCHMARK)\b/i.test(spec.sql)) {
-          throw agentError('Use a read-only SQL query without locks or file output');
-        }
+      if (reading) {
         await connection.query('SET TRANSACTION READ ONLY');
         await connection.beginTransaction();
         const [[identity]] = await connection.query('SELECT DATABASE() AS databaseName, CURRENT_USER() AS principal');
-        const [rows, fields] = await connection.execute({ sql: spec.sql, timeout: 30000 }, mysqlParameters(resolveInput(spec.params ?? [], input)));
+        const [rows, fields] = await connection.execute({ sql: spec.sql, timeout: 30000 }, parameters);
         await connection.rollback();
         return { rows: sanitized(rows), count: rows.length, columns: mysqlResultColumns(fields),
+          requestId: connection.id,
           databaseEvidence: { resource: spec.resource, environment: resource.environment ?? null, database: identity.databaseName,
             principalMatchesConfiguredUser: identity.principal.split('@')[0] === resource.username, checkedAt: new Date().toISOString() } };
       }
@@ -521,16 +564,27 @@ export function createAgentResources(config, scope) {
       if (!actual || digest(actual.identity) !== digest(expected.identity)) throw agentError('Authenticated identity changed; reconcile the original target before writing or restoring');
     },
     performSpec,
-    async inspect(resourceName, database) {
+    async inspect(resourceName, database, identityOnly = false) {
       return scope.useRead(resourceName, async resource => {
         if (resource.resource_type === 'mysql') {
-          const connection = await connect(resource, database, resourceName);
+          const connection = await connect(resource, database, resourceName, undefined, {
+            action: identityOnly ? 'identity' : 'inspect', statements: ['SELECT 1, CURRENT_USER(), DATABASE()',
+              ...(identityOnly ? [] : ['SHOW GRANTS FOR CURRENT_USER'])],
+          });
           try {
-            const [[receipt]] = await connection.query('SELECT 1 AS ready, CURRENT_USER() AS principal, DATABASE() AS databaseName');
+            const sql = 'SELECT 1 AS ready, CURRENT_USER() AS principal, DATABASE() AS databaseName';
+            const [[receipt]] = await connection.query(sql);
+            const identity = { connector: 'mysql', connected: String(receipt.ready) === '1',
+              principalMatchesConfiguredUser: receipt.principal.split('@')[0] === resource.username, database: receipt.databaseName,
+              resource: resourceName, environment: resource.environment ?? null, requestId: connection.id };
+            identity.databaseEvidence = { resource: resourceName, environment: identity.environment, database: receipt.databaseName,
+              principalMatchesConfiguredUser: identity.principalMatchesConfiguredUser, checkedAt: new Date().toISOString(),
+              selection: database === undefined ? (resource.databaseScope ? 'fixed_binding' : 'connector_default') : 'explicit',
+              currentDatabaseField: ['database'], currentDatabaseExpression: 'DATABASE()', sql };
+            if (identityOnly) return identity;
             const [grants] = await connection.query('SHOW GRANTS FOR CURRENT_USER');
             const rules = grants.flatMap(row => Object.values(row));
-            return { connector: 'mysql', connected: String(receipt.ready) === '1',
-              principalMatchesConfiguredUser: receipt.principal.split('@')[0] === resource.username, database: receipt.databaseName,
+            return { ...identity,
               globalPrivilege: rules.some(rule => !/^GRANT USAGE ON /i.test(rule) && /\bON \*\.\*/i.test(rule)),
               grantEntries: rules.length };
           } finally { await connection.end(); }
@@ -558,7 +612,7 @@ export function createAgentResources(config, scope) {
     },
     async snapshot(args) {
       return scope.useRead(args.resource, async resource => {
-        const connection = await connect(resource, args.database, args.resource);
+        const connection = await connect(resource, args.database, args.resource, undefined, { action: 'snapshot', table: args.table });
         const startedAt = new Date().toISOString();
         try {
           // TIMESTAMP is rendered in the session zone. Fix it before collection
@@ -640,24 +694,43 @@ export function createAgentResources(config, scope) {
     async schema(args) {
       return scope.useRead(args.resource, async resource => {
         if (args.table && !args.database) throw agentError('Supply database when inspecting a table; list schemas first if unknown');
-        const connection = await connect(resource, args.database, args.resource, { discover: !args.database });
+        const metadata = args.table && args.database.toLowerCase() === 'information_schema';
+        if (args.connectionDatabase && !metadata) throw agentError('connectionDatabase is only used when inspecting an INFORMATION_SCHEMA table');
+        const selected = metadata ? args.connectionDatabase : args.database;
+        const table = args.table ? (metadata ? 'information_schema.' : '') + identifier(args.table) : undefined;
+        const statements = table ? ['SHOW FULL COLUMNS FROM ' + table,
+          ...(metadata ? [] : ['SHOW INDEX FROM ' + table, 'SHOW CREATE TABLE ' + table])]
+          : args.database ? ['SHOW TABLES'] : resource.databaseScope ? [] : ['SHOW DATABASES'];
+        const connection = await connect(resource, selected, args.resource, { discover: !selected }, {
+          action: table ? 'schema' : args.database ? 'tables' : 'discover', table: args.table,
+          ...(metadata ? { metadataDatabase: 'information_schema' } : {}), statements: table
+            ? ['SELECT DATABASE(), CURRENT_USER()', ...statements] : statements,
+        });
+        const requestId = connection.id;
         try {
           if (!args.database) {
             const bound = resource.databaseScope;
-            if (bound) return { rows: [{ Database: bound }] };
+            if (bound) return { rows: [{ Database: bound }], requestId };
             const [rows] = await connection.query('SHOW DATABASES');
-            return { rows: rows.filter(row => databaseTierMatches(resource, row.Database)) };
+            return { rows: rows.filter(row => databaseTierMatches(resource, row.Database)), requestId };
           }
-          if (!args.table) { const [rows] = await connection.query('SHOW TABLES'); return { rows }; }
-          const [columns] = await connection.query('SHOW FULL COLUMNS FROM ' + identifier(args.table));
-          const [indexes] = await connection.query('SHOW INDEX FROM ' + identifier(args.table));
-          const [create] = await connection.query('SHOW CREATE TABLE ' + identifier(args.table));
+          if (!table) { const [rows] = await connection.query('SHOW TABLES'); return { rows, requestId }; }
+          const [[identity]] = await connection.query('SELECT DATABASE() AS databaseName, CURRENT_USER() AS principal');
+          const [columns] = await connection.query(statements[0]);
+          const [indexes] = metadata ? [[]] : await connection.query(statements[1]);
+          const [create] = metadata ? [[]] : await connection.query(statements[2]);
           const schema = { resource: args.resource, database: args.database, table: args.table, columns, indexes, create };
           schemas.set(args.resource + ':' + args.database + ':' + args.table, schema);
           scope.state.schemas ??= {};
           scope.state.schemas[args.resource + ':' + args.database + ':' + args.table] = schema;
           await scope.saveState();
-          return schema;
+          const primaryKey = metadata ? undefined : indexes.filter(row => row.Key_name === 'PRIMARY')
+            .sort((left, right) => Number(left.Seq_in_index) - Number(right.Seq_in_index)).map(row => row.Column_name);
+          return { ...schema, requestId, databaseEvidence: { resource: args.resource, environment: resource.environment ?? null,
+            database: identity.databaseName, principalMatchesConfiguredUser: identity.principal.split('@')[0] === resource.username,
+            checkedAt: new Date().toISOString(), currentDatabaseField: ['databaseEvidence', 'database'],
+            currentDatabaseExpression: 'DATABASE()', selection: selected === undefined ? (resource.databaseScope ? 'fixed_binding' : 'connector_default') : 'explicit' },
+            ...(primaryKey ? { primaryKey: { columns: primaryKey, count: primaryKey.length, complete: true } } : {}) };
         } finally { await connection.end(); }
       });
     },

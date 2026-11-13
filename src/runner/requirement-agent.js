@@ -76,6 +76,14 @@ descriptions.register += ' queryEvidence:[业务查询参数名] 才保留这些
 descriptions.plan += ' 入口有参数限制时，runnerScope.allowed 或 requestProof.requests 可填写 query:{key:["完整值"]}，数组按线上的同名参数顺序，[]表示缺失。queryInput 可约束直接HTTP的原始类型，exactQuery:true要求没有未记录参数。先为入口登记 queryEvidence。独立审计以 audit.matchRunner:true 按实际 x-agentos-request-id 逐条对应。';
 descriptions.plan += ' 外部回收只读入口可用的输入为 mode、correlation、after、jobId、caseId、attempt、epoch，通过 spec.query 的 $input 传入。预检和实际回执需回显该尝试身份，实际回执另需 receiptId、completedAt 和 verified。';
 descriptions.plan += ' requestProof.scope=service 表示证据来自独立服务审计。audit.matchRunner=true 将该审计逐条限定到本 Runner 的实际请求ID，不扩大为全服务其他调用者；请求次数与独立审计可以分别对应同一原预期。审计的请求ID经程序关联到已保存响应观测，原文未要求独立保存响应内容时无需审计重复保存整份响应。';
+descriptions.schema += ' data.primaryKey.columns is the complete ordered primary key. Compare it with type=list, operator=equals and an independent array. For INFORMATION_SCHEMA table structure, use database="information_schema" and optional connectionDatabase for the actual session.';
+descriptions.connection += ' MySQL identityOnly:true reads current identity and selected database without SHOW GRANTS. The saved observation exposes ["database"] (null if unselected).';
+descriptions.register += ' spec.tables:[{database,table,role:"query"|"subject"}] separates actual SQL sources from measured business tables. Read each using test_schema before registering.';
+descriptions.evidence += ' Top-level total/nextOffset is display pagination, not an observation field. data.count counts returned SQL rows; primaryKey.count covers the complete key.';
+descriptions.plan += ' Plain read-only or specified objects do not require a whole-run audit. If the source explicitly limits all calls, add runnerScope.allowed database CONNECT / routes with databaseCall:{action:"identity"|"schema"|"discover"|"inspect"|"tables"|"read",database:null or actual schema,table?,metadataDatabase?,operation?}. Use identityOnly and direct target schema if only current identity/schema are permitted. inspect reads grants; discover enumerates databases. Use the registered operation name for read.';
+descriptions.measure += ' Restart with unresolved gaps needs a change plus new sourceRefs or evidenceRefs. Restart cannot erase an earlier scope violation.';
+descriptions.plan += ' For a databaseCall action=read supply params with the exact normalized strings/null (or [] when there are none), together with the registered operation name.';
+descriptions.plan += ' For a schema-only case, use test_connection identityOnly and test_schema directly. Those are supported independent reads before and after plan freeze. Use type:list for primaryKey.columns. A check of the actual database or table must not use that same expected value to filter the observation.';
 export const requirementAgentTools = Object.entries(descriptions).map(([name, description]) => ({ name: 'test_' + name, description,
   inputSchema: { type: 'object', properties: { args: requirementToolSchemas[name] }, required: ['args'], additionalProperties: false } }));
 
@@ -99,8 +107,10 @@ const snapshotHash = mutationReadbackHash;
 const evidenceChannel = spec => spec.kind === 'database' ? 'database' : spec.kind === 'browser' ? 'page' : spec.channel ?? 'api';
 function missingObservationField(record,field,label){
   const parent=field.length>1?observationAt(record.data,field.slice(0,-1)):record.data;
-  return agentError(label+' field is absent: '+JSON.stringify(field)+'; actual root fields: '+Object.keys(record.data??{}).join(', ')
-    +'; actual parent fields: '+(parent&&typeof parent==='object'?Object.keys(parent).join(', '):'(not an object)')+'. Read the saved observation; do not invent or relabel metadata.');
+  return Object.assign(agentError(label+' field is absent: '+JSON.stringify(field)+'; actual root fields: '+Object.keys(record.data??{}).join(', ')
+    +'; actual parent fields: '+(parent&&typeof parent==='object'?Object.keys(parent).join(', '):'(not an object)')
+    + (field[0] === 'total' ? '. total is display pagination metadata; use data.count for returned SQL rows, or primaryKey.count for a complete key.' : '. Read the saved observation.')),
+  { code: 'observation_field_missing', fields: [JSON.stringify(field)] });
 }
 
 function changedFields(before, after, prefix = '$') {
@@ -185,15 +195,25 @@ export function createRequirementAgent(config, options) {
       sources.push({ path: old.path, file: old.file, ref: old.ref, sha256: fresh.sha256 });
     }
     const schemas = [];
-    if (spec.kind === 'database') for (const schema of Object.values(state.schemas ?? {}).filter(schema => schema.resource === spec.resource
-      && schema.database === spec.database && (spec.table === schema.table || new RegExp('\\b' + schema.table + '\\b', 'i').test(spec.sql ?? '')))) {
-      const fresh = await runtime.schema({ resource: schema.resource, database: schema.database, table: schema.table });
-      schemas.push({ table: fresh.table, hash: digest([fresh.columns, fresh.indexes]) });
+    if (spec.kind === 'database') for (const schema of databaseReviewSchemas(spec)) {
+      const fresh = await runtime.schema({ resource: spec.resource, database: schema.database, table: schema.table,
+        ...(schema.database === 'information_schema' ? { connectionDatabase: spec.database } : {}) });
+      schemas.push({ database: fresh.database, table: fresh.table, role: schema.role, hash: digest([fresh.columns, fresh.indexes]) });
     }
     const authentication = ['http', 'browser'].includes(spec.kind) && spec.authenticated !== false
       ? await scope.useRead(spec.resource, resource => runtime.authenticationEvidence(spec.resource, resource)) : null;
     return { resource: scope.resourceIdentity?.(spec.resource) ?? digest(scope.resourceCatalog?.[spec.resource] ?? spec.resource),
       sources, schemas, identity: authentication?.identity ?? null, sourceRoot: scope.sourceRoot };
+  }
+  function databaseReviewSchemas(spec) {
+    if (spec.tables) return spec.tables.map(({ database, table, role }) => {
+      const schema = state.schemas[spec.resource + ':' + database + ':' + table];
+      if (!schema) throw Object.assign(agentError('Read the actual schema with test_schema before registering: ' + database + '.' + table),
+        { code: 'operation_schema_missing', fields: ['$.spec.tables.' + role + ':' + database + '.' + table] });
+      return { ...schema, role };
+    });
+    return Object.values(state.schemas).filter(schema => schema.resource === spec.resource && schema.database === spec.database
+      && (spec.table === schema.table || /^[A-Za-z0-9_]+$/.test(schema.table) && new RegExp('\\b' + schema.table + '\\b', 'i').test(spec.sql ?? '')));
   }
   async function review(scope, kind, payload) {
     scope.checkOutput(payload);
@@ -242,6 +262,12 @@ export function createRequirementAgent(config, options) {
       kind==='assertion_binding'?'pageStageProof是主机按冻结阶段、真实动作、DOM身份、业务就绪、epoch及场景边界核验的关联证明。可复用同阶段保存的正确历史观测，不必为每个字段再次导航；不能使用另一阶段或预检观测。仍须核验选择器的业务职责及独立预期，不由阶段证明推断产品值应正确。':'',
       kind==='plan'?'measurementSamples.fields与字段审查共用取值描述。representation.encoding=decimal-text且exact=true证明原始数值字符串可精确比较，不要求转成JS number；availability=empty_collection/null_ancestor只表示未来路径尚无实值，结合真实queryColumn/完整快照及源码/schema预检，不要求提前造出业务结果。':'',
       kind==='process'?'pageStages/pageTimeline是主机保存的当前尝试/epoch真实动作和就绪观测关联，related.comparedObservations给已比较观测ID与实际时点。可直接核验这些原始metadata，不要求模型在业务data里构造at字段。仍须结合mutations核对业务动作与各页面阶段的因果先后，页面顺序证明不代表所有业务步骤已经正确执行。':'',
+      ['plan', 'process'].includes(kind) ? 'Use original scope; a general read-only constraint does not imply an exhaustive audit. A databaseCall classifies the connector call; statementReceipts show actual attempts. Built-in identity/schema calls have program-verified commands. Use linked receipts without asking the model to restate all probes. Old CONNECT without receipts proves only connection. Require an independent source only when the original expectation asks for it.' : '',
+      ['plan', 'assertion_binding', 'measurement'].includes(kind) ? 'For primaryKey.columns use list equality on the complete, ordered, unfiltered key. No SQL aggregate or first-row shortcut. SQL count is returned rows only; top-level display pagination total is not a saved field.' : '',
+      ['plan', 'assertion_binding', 'measurement'].includes(kind) ? 'For a built-in MySQL connection observation, databaseEvidence identifies the actual selected field from the same session SELECT DATABASE() and how the database was chosen. selection=fixed_binding means no database argument overrode the resource binding. The SQL and currentDatabaseField are connector facts; do not ask for a duplicate SQL query merely to verify the origin of that field. An explicit database argument cannot prove the default binding.' : '',
+      ['plan', 'assertion_binding', 'measurement'].includes(kind) ? 'When the original expectation asks the Runner to choose a database using source evidence, an explicit selection followed by the same session DATABASE() is the requested observation. A resource without a default database has no independent default to confirm. Only require a no-override observation when the original expectation specifically asks about the default or fixed binding.' : '',
+      kind === 'process' ? 'runnerRequests contains host-captured connection and statement receipts from the whole case, including previous measurement epochs. Use each entry id and databaseCall/statementReceipts to check explicit trace requirements; compared observation requestIds link the same actual calls. A local trace does not satisfy a separately required independent audit. Use runnerScope for the program-checked whitelist and require it where the frozen check declares it.' : '',
+      kind === 'operation' ? 'spec.tables role=query identifies actual SQL sources; role=subject identifies the measured business table. Cross-check SQL and parameters separately. databaseTarget.selected is the actual connection database, which can differ from INFORMATION_SCHEMA.' : '',
       JSON.stringify({ kind, ...payload, environmentProof: scope.resourceCatalog }),
     ].join('\n\n'), { cwd: options.workDir, codexBin: options.codexBin,
       onOutput: raw => evidence(scope, kind + '-review-raw', { raw }) });
@@ -441,7 +467,7 @@ export function createRequirementAgent(config, options) {
             resource: request.resource, phase, method: request.method, path: request.path } });
         if (phase !== 'cleanup') {
           const outside = current.plan?.processChecks?.find(check => check.runnerScope
-            && !verifyRunnerScope(check, [{ ...request, phase, outcome: 'response' }]).satisfied);
+            && !verifyRunnerScope(check, [{ ...request, phase, outcome: 'response', beforeDispatch: true }]).satisfied);
           if (outside) throw Object.assign(agentError('Transport blocked before dispatch by frozen Runner scope: ' + outside.id),
             { code: 'runner_scope_guard', gapDetails: { checkId: outside.id, phase, resource: request.resource,
               transport: request.transport, method: request.method, path: request.path } });
@@ -478,7 +504,8 @@ export function createRequirementAgent(config, options) {
             'Measurement source changed; repeat test_measure with current source evidence: ' + check.id);
         }
         for (const saved of preflight.schemas ?? []) {
-          const fresh = await runtime.schema({ resource: saved.resource, database: saved.database, table: saved.table });
+          const fresh = await runtime.schema({ resource: saved.resource, database: saved.database, table: saved.table,
+            connectionDatabase: saved.connectionDatabase });
           if (digest([fresh.columns, fresh.indexes]) !== saved.hash) throw agentError('Measurement schema changed; restore and restart the affected baseline: ' + check.id);
         }
         for (const [name, identity] of Object.entries(preflight.resources ?? {})) {
@@ -574,11 +601,17 @@ export function createRequirementAgent(config, options) {
         if (name === 'source') {
           const result = scope.checkOutput(sanitized(await readSource(scope.sourceRoot, args)));
           const sourceRef = 'SRC-' + digest(result).slice(0, 24);
+          result.readAt = state.sources[sourceRef]?.readAt ?? new Date().toISOString();
           await scope.recordSource?.(sourceRef, result, 'read', 'observed');
           state.sources[sourceRef] = result; await saveState();
           return { sourceRef, ...result };
         }
-        if (name === 'schema') return pageData(await observe('database', await runtime.schema(args), args, {}), args);
+        if (name === 'schema') {
+          const data = await runtime.schema(args);
+          const method = { resource: args.resource, database: data.databaseEvidence?.database,
+            table: args.table, probe: args.table ? 'table_structure' : args.database ? 'table_directory' : 'database_directory' };
+          return pageData(await observe('database', data, args, {}, method), args);
+        }
         if (name === 'snapshot') {
           const data = await runtime.snapshot(args);
           return pageData(await observe('database', data, args, data.contract.scope, { snapshot: data.contract }, readPhase), args);
@@ -588,7 +621,12 @@ export function createRequirementAgent(config, options) {
           return pageData(await observe('database', await lookup(runtime, scope, spec, {}), args, args.subject ?? {}, undefined, readPhase), args);
         }
         if (name === 'connection') {
-          const receipt = scope.checkOutput(await runtime.inspect(args.resource, args.database));
+          const receipt = scope.checkOutput(await runtime.inspect(args.resource, args.database, args.identityOnly));
+          if (receipt.connector === 'mysql') {
+            const saved = await observe('database', receipt, args, {}, { resource: args.resource,
+              database: receipt.database, probe: args.identityOnly ? 'current_identity' : 'identity_and_grants' });
+            return { ...receipt, observationId: saved.observationId, evidence: saved.evidence };
+          }
           return { ...receipt, evidence: await evidence(scope, '资源连接与身份回执', { resource: args.resource, receipt }) };
         }
         if (name === 'register') {
@@ -609,16 +647,17 @@ export function createRequirementAgent(config, options) {
             throw agentError('Only registered HTTP operations may declare non-credential query evidence or correlation');
           }
           if (spec.kind === 'database' && spec.access !== 'read' && !state.schemas[spec.resource + ':' + spec.database + ':' + spec.table]) throw agentError('Inspect database schema first');
+          if (spec.tables && (spec.kind !== 'database' || spec.access !== 'read')) throw agentError('$.spec.tables is only for read-only database review');
           const boundary = await operationBoundary(scope, runtime, spec, args.sourceRefs);
           if (state.operationProofs?.[args.name] && digest(state.operationProofs[args.name].boundary) === digest(boundary)) return { registered: args.name, reused: true, boundary };
           const databaseTarget = spec.kind === 'database' ? {
             selected: await scope.useRead(spec.resource, resource => scopedDatabase(resource, spec.database)) ?? null,
             verifiedTables: boundary.schemas.map(schema => schema.table),
+            ...(spec.tables ? { referencedSchemas: boundary.schemas } : {}),
           } : undefined;
           await review(scope, 'operation', { spec, reason: args.reason, sources, databaseTarget,
             schema: state.schemas[spec.resource + ':' + spec.database + ':' + spec.table],
-            schemas: spec.kind === 'database' ? Object.values(state.schemas).filter(schema => schema.resource === spec.resource
-              && schema.database === spec.database && (spec.table ? schema.table === spec.table : new RegExp('\\b' + schema.table + '\\b', 'i').test(spec.sql ?? ''))) : undefined });
+            schemas: spec.kind === 'database' ? databaseReviewSchemas(spec) : undefined });
           state.operations[args.name] = scope.checkOutput(spec);
           state.operationProofs ??= {}; state.operationProofs[args.name] = { boundary, sourceRefs: args.sourceRefs, at: new Date().toISOString() }; await saveState();
           await rememberOperation(args.name, spec, args.sourceRefs);
@@ -627,9 +666,9 @@ export function createRequirementAgent(config, options) {
         if (name === 'observe') {
           const spec = await ensureOperation(args.operation);
           if (!spec) throw agentError('Register operation first');
-          const query = spec.kind === 'database' ? { resource: spec.resource, database: spec.database, sql: spec.sql,
+          const query = spec.kind === 'database' ? { resource: spec.resource, database: spec.database, sql: spec.sql, tables: spec.tables,
             params: resolveInput(spec.params ?? [], args.input ?? {}) } : undefined;
-          const data = await lookup(runtime, scope, spec, args.input ?? {});
+          const data = await lookup(runtime, scope, { ...spec, operationName: args.operation }, args.input ?? {});
           const proof = state.operationProofs[args.operation];
           return pageData(await observe(evidenceChannel(spec), data, { operation: args.operation, resource: spec.resource, input: args.input ?? {} }, args.subject ?? {},
             query ?? { resource: spec.resource, path: data.path, method: data.method, request: data.request },
@@ -817,6 +856,12 @@ export function createRequirementAgent(config, options) {
             return { accepted: true, checkId: check.id, phase: check.requestProof.phase, evidence: entry };
           }
           if (args.action === 'inspect') return { plan: current.plan ?? null, candidate: current.plan ? undefined : current.planCandidate,
+            recordedDatabaseRoutes: [...new Map((runnerScopeHistory(current) ?? []).filter(item => item.databaseCall)
+              .map(({ resource, transport, method, path, databaseCall }) => {
+                const { action, database, table, metadataDatabase, operation } = databaseCall;
+                const route = { resource, transport, method, path, databaseCall: { action, database, table, metadataDatabase, operation } };
+                return [digest(route), route];
+              })).values()],
             assertions: current.assertions, revisions: current.planRevisions ?? [],
             actionBoundaries: current.actionBoundaries ?? {},
             requestPreflights: current.requestPreflights ?? {},
@@ -881,7 +926,9 @@ export function createRequirementAgent(config, options) {
             if (!check.id || ids.has(check.id)) errors.push(`$.checks[${index}].id must be unique`); ids.add(check.id);
             if (!Number.isInteger(check.line) || check.line < 1) errors.push(`$.checks[${index}].line must be a 1-based integer, not a string`);
             if (!lines[check.line - 1] || !check.requirement || !['page', 'api', 'database', 'message', 'job'].includes(check.channel)) errors.push(`$.checks[${index}] needs original line, requirement and channel`);
-            if (!['number', 'text', 'boolean', 'null'].includes(check.type) || !['equals', 'contains', 'gt', 'gte', 'lt', 'lte'].includes(check.operator)
+            if (!['number', 'text', 'boolean', 'null', 'list'].includes(check.type) || !['equals', 'contains', 'gt', 'gte', 'lt', 'lte'].includes(check.operator)
+              || check.type === 'list' && (check.channel !== 'database' || check.operator !== 'equals'
+                || !Array.isArray(check.expected) || check.expected.some(item => typeof item !== 'string'))
               || check.type === 'null' && (check.expected !== null || check.operator !== 'equals')) errors.push(`$.checks[${index}] has invalid type/operator`);
             if (!Object.hasOwn(check, 'expected') || !check.basis) errors.push(`$.checks[${index}] needs independent expected and basis`);
             if (check.type === 'boolean' && typeof check.expected !== 'boolean'
@@ -921,6 +968,14 @@ export function createRequirementAgent(config, options) {
                 || !/^[A-Z]+$/.test(route.method) || !/^\/(?!\/)[^?#{}\\\s]*$/.test(route.path)))) {
               errors.push('$.processChecks.' + check.id + '.runnerScope requires a complete current attempt trace and exact authorized routes');
             }
+            if (check.runnerScope?.allowed.some(route => route.databaseCall
+              && (route.transport !== 'database' || route.method !== 'CONNECT' || route.path !== '/'
+                || route.databaseCall.action === 'read' && (!route.databaseCall.operation || !route.databaseCall.params
+                  || state.operations[route.databaseCall.operation]?.kind !== 'database'
+                  || state.operations[route.databaseCall.operation]?.access !== 'read'
+                  || state.operations[route.databaseCall.operation]?.resource !== route.resource)))) {
+              errors.push('$.processChecks.' + check.id + '.runnerScope.allowed.databaseCall needs a concrete database route; read needs a registered read operation and exact params as strings/null');
+            }
             if (check.kind === 'external_cleanup' || check.externalReceipt) {
               const preflight = current.externalPreflights?.[check.id]?.check;
               if (check.kind !== 'external_cleanup' || !check.externalReceipt || check.beforeAction || check.runnerScope || check.requestProof
@@ -948,6 +1003,16 @@ export function createRequirementAgent(config, options) {
             if(sample.channel!==check.channel)throw agentError('Measurement channel differs before freezing '+check.id);
             verifyObservationIdentity(pageMethodSample(check,sample,check.measurement,args.pageStages?.find(stage=>stage.id===check.pageStage)),sample,check.measurement);
           }
+          for (const check of args.processChecks ?? []) {
+            if (!check.runnerScope?.allowed.some(route => route.databaseCall)) continue;
+            const proof = verifyRunnerScope(check, runnerScopeHistory(current));
+            if (!proof.satisfied) {
+              const entry = await evidence(scope, '执行调用超出冻结范围', { checkId: check.id, runnerScope: proof });
+              throw Object.assign(agentError('The proposed Runner scope conflicts with saved calls; report the recorded gap. Restart cannot remove past calls.'),
+                { code: 'runner_scope_contradiction', fields: ['$.processChecks.' + check.id + '.runnerScope'],
+                  gapDetails: { evidence: entry, runnerScope: proof } });
+            }
+          }
           const planReview=await review(scope, 'plan', { headers: scope.headers, row: scope.row, source: scope.source, plan: args, aliases: current.aliases,
             coverageMatrix: planCoverageMatrix(lines,args),
             toolContracts: { plan: requirementToolSchemas.plan, browser: requirementToolSchemas.browser, process: requirementToolSchemas.process },
@@ -957,12 +1022,15 @@ export function createRequirementAgent(config, options) {
             registeredReadOperations: Object.entries(state.operations).filter(([, operation]) => operation.access === 'read')
               .map(([name, operation]) => ({ name, ...operation, channel: evidenceChannel(operation) })),
             sourceEvidence: Object.values(state.sources).filter(item => item.text),
+            runnerRequests: args.processChecks?.some(check => check.runnerScope) ? runnerScopeHistory(current) : undefined,
             measurementSamples: args.checks.filter(check => check.measurement).map(check => {
               const sample = knownObservation(check.measurement.observationId);
               return { checkId: check.id, role: 'pre-action method sample, not scenario result', observationId: sample.observationId,
                 at: sample.at, channel: sample.channel, query: measurement(sample), request: sample.input,
                 snapshot: sample.data.contract ? { contract: sample.data.contract, proof: sample.data.proof } : undefined,
                 fields: assertionBinding(check,sample,check.measurement.snapshot?{...check.measurement,field:['hash']}:check.measurement,state.sources,{schemas:state.schemas}).selected,
+                databaseEvidence: sample.data.databaseEvidence,
+                primaryKey: sample.data.primaryKey,
                 page: sample.channel === 'page' ? { measurements: sample.data.measurements, ready: sample.data.ready, dom: sample.data.dom } : undefined };
             }),
             baselines: args.checks.filter(check => check.basis.observationId).map(check => knownObservation(check.basis.observationId)) });
@@ -994,15 +1062,40 @@ export function createRequirementAgent(config, options) {
           return { accepted: true, checks: args.checks.length, measurementPending: args.checks.filter(check => !current.preflights?.[check.id]).map(check => check.id) };
         }
         if (name === 'measure' && args.action === 'restart') {
+          const unresolved = Object.values(current.gaps ?? {}).filter(gap => !gap.resolved);
+          if (unresolved.some(gap => gap.codes.includes('runner_scope_contradiction'))) {
+            throw Object.assign(agentError('Restart cannot remove a recorded Runner-scope contradiction; report it and continue independent cases.'),
+              { code: 'runner_scope_contradiction' });
+          }
+          if (unresolved.length && (!args.change || !args.sourceRefs?.length && !args.evidenceRefs?.length)) {
+            throw Object.assign(agentError('Restart with unresolved gaps requires change and new sourceRefs or evidenceRefs; otherwise report the saved gap.'),
+              { code: 'restart_evidence_missing', fields: ['$.change', '$.sourceRefs or $.evidenceRefs'] });
+          }
+          const restartFacts = (args.evidenceRefs ?? []).map(ref => {
+            const observation = knownObservation(ref.observationId);
+            return ref.fields.map(field => {
+              const value = observationAt(observation.data, field);
+              if (value === undefined) throw missingObservationField(observation, field, 'Restart evidence');
+              return { field, value };
+            });
+          });
+          const restartSources = (args.sourceRefs ?? []).map(ref => state.sources[ref]?.sha256);
+          if (restartSources.some(value => !value)) throw agentError('Restart sourceRefs need actual source evidence');
+          const restartBasis = digest([restartFacts, restartSources]);
+          if (current.restarts?.some(item => item.restartBasis === restartBasis)) {
+            throw Object.assign(agentError('The cited facts already supported a restart; report the unresolved gap or supply materially different evidence.'),
+              { code: 'restart_evidence_unchanged' });
+          }
           const cleanup = await cleanupCurrent();
           if (!cleanup.verified) throw new RequirementWait('cleanup_pending', '原测量范围未恢复回查，不能重建基线。');
           current.restarts ??= [];
-          current.restarts.push({ reason: args.reason, at: new Date().toISOString(), epoch: current.epoch ?? 0,
+          current.restarts.push({ reason: args.reason, change: args.change, restartBasis, sourceRefs: args.sourceRefs,
+            evidenceRefs: args.evidenceRefs, unresolvedGaps: unresolved.map(gap => gap.id),
+            at: new Date().toISOString(), epoch: current.epoch ?? 0,
             plan: current.plan, planReview:current.planReview, assertions: current.assertions, processProofs: current.processProofs, observations: current.observations, aliases: current.aliases, preflights: current.preflights,
             requestTrace: current.requestTrace, requestTraceVersion: current.requestTraceVersion, requestPreflights: current.requestPreflights,
             externalPreflights: current.externalPreflights, preparationAudits: current.preparationAudits, cleanup });
           current.epoch = (current.epoch ?? 0) + 1;
-          for (const gap of Object.values(current.gaps ?? {})) if (!gap.resolved) { gap.resolved = true; gap.supersededByEpoch = current.epoch; }
           current.startedAt = new Date().toISOString(); current.assertions = {}; current.observations = []; current.aliases = {}; current.requestTrace = [];
           current.requestTraceVersion = 3;
           delete current.externalPreflights;
@@ -1142,7 +1235,10 @@ export function createRequirementAgent(config, options) {
               ...(binding.pageMethodSample ? { pageMethodSample: binding.pageMethodSample } : {}),
               resources: binding.boundary.resources,
               schemas: Object.values(state.schemas).filter(schema => schema.resource === (observation.input?.resource ?? observation.measurement?.resource ?? observation.measurement?.snapshot?.resource))
-                .map(schema => ({ resource: schema.resource, database: schema.database, table: schema.table, hash: digest([schema.columns, schema.indexes]) })),
+                .filter(schema => !observation.data.primaryKey || schema.database === observation.data.database && schema.table === observation.data.table)
+                .map(schema => ({ resource: schema.resource, database: schema.database, table: schema.table,
+                  ...(schema.database === 'information_schema' ? { connectionDatabase: observation.data.databaseEvidence?.database ?? undefined } : {}),
+                  hash: digest([schema.columns, schema.indexes]) })),
               evidence: await evidence(scope, '测量预检', { checkId: check.id, binding, baseline: check.basis }) };
             if(!candidatePlan)await saveState(); return { proven: true, checkId: check.id, evidence: preflights[check.id].evidence };
           }
@@ -1256,15 +1352,24 @@ export function createRequirementAgent(config, options) {
           }
           // The assertion engine owns business verdicts. Correct evidence,
           // readiness and cleanup remain provable when the product fails.
+          const runnerRequests = check.kind === 'execution_evidence' ? runnerScopeHistory(current) : undefined;
           const payload = { check,
             originalExpectation: scope.row[scope.headers.indexOf('预期结果')].split(/\r?\n/).filter(line => line.trim())[check.line - 1],
             related: related.map(item => ({ checkId: item.check.id, requirement: item.check.requirement,
               compared: true,pageStage:item.check.pageStage,
-              comparedObservations:item.attempts.filter(attempt=>attempt.compared).map(attempt=>({observationId:attempt.observationId,at:state.observations[attempt.observationId]?.at})),
+              comparedObservations:item.attempts.filter(attempt=>attempt.compared).map(attempt=>{
+                const record=state.observations[attempt.observationId];
+                return { observationId:attempt.observationId,at:record?.at,requestIds:record?.requestIds,
+                  databaseEvidence:record?.data.databaseEvidence,query:record && measurement(record),
+                  schema:record?.data.primaryKey ? { database:record.data.database,table:record.data.table } : undefined };
+              }),
               assertionEvidence: item.attempts.filter(attempt => attempt.compared).map(attempt => attempt.evidence) })),
             pageStages:(current.plan.pageStages??[]).map(stage=>{const check=current.plan.checks.find(item=>item.pageStage===stage.id);return check?pageStageContext(current.plan,check,current,state.observations):{stageId:stage.id};}),
             pageTimeline:current.observations.map(id=>state.observations[id]).filter(record=>record.channel==='page').map(record=>({observationId:record.observationId,at:record.at,epoch:record.epoch??0,resource:record.input?.resource,action:record.input?.action,lifecycle:record.data.lifecycle,ready:record.data.ready,url:record.data.url})),
-            observed, sources, requestProof, runnerScope, planReview:current.planReview,
+            observed, sources, requestProof, runnerScope, runnerRequests, planReview:current.planReview,
+            ...(runnerScope || runnerRequests ? { runnerDatabaseOperations: Object.fromEntries((runnerScope?.entries ?? runnerRequests)
+              .filter(entry => entry.databaseCall?.operation)
+              .map(entry => [entry.databaseCall.operation, state.operations[entry.databaseCall.operation]])) } : {}),
             registeredOperations: Object.entries(state.operations).filter(([, spec]) => spec.resource === check.requestProof?.resource)
               .map(([name, spec]) => ({ name, spec, evidence: state.operationProofs[name]?.evidence })),
             planAt: current.planAt, scenarioStartedAt: current.scenarioStartedAt, preflights: current.preflights,

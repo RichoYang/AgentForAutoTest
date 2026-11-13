@@ -95,7 +95,8 @@ export function recordGap(current, { tool, args, error, evidenceVersion }) {
 }
 
 export function resolveGaps(current, tool, args) {
-  if (tool === 'test_plan' && args.action === 'inspect') return;
+  if (tool === 'test_plan' && ['inspect','process_preflight'].includes(args.action)
+    || tool === 'test_measure' && args.action === 'restart') return;
   const target = gapTarget(tool, args);
   const stage=current.plan?.checks.find(check=>check.id===args.checkId)?.pageStage;
   for (const gap of Object.values(current.gaps ?? {})) {

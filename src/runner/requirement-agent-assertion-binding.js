@@ -165,21 +165,31 @@ export function assertionBinding(check, observation, args, sources, context = {}
       .map(([sourceRef, source]) => ({ sourceRef, ...source })) : [];
   const query = observation.measurement ?? (observation.input?.sql ? observation.input : undefined);
   const databaseSchemas = query?.sql ? Object.values(context.schemas ?? {}).filter(schema => schema.resource === query.resource
-    && schema.database === query.database && /^[A-Za-z0-9_]+$/.test(schema.table)
-    && new RegExp('\\b' + schema.table + '\\b', 'i').test(query.sql)) : undefined;
+    && (query.tables?.some(table => table.database === schema.database && table.table === schema.table)
+      || !query.tables && schema.database === query.database && /^[A-Za-z0-9_]+$/.test(schema.table)
+      && new RegExp('\\b' + schema.table + '\\b', 'i').test(query.sql))) : undefined;
   return { requirement: check.requirement, channel: check.channel, type: check.type, unit: check.unit,
     subject: check.subject, selected, calculation: args.calculation,
     verifiedIdentity: context.verifiedIdentity, planContext: context.planContext, supportingEvidence: context.supportingEvidence,
     request: observation.channel === 'api' ? { path: observation.data.path, method: observation.data.method, status: observation.data.status, request: observation.data.request } : undefined,
     responseOutcome: observation.channel === 'api' && observation.data.body && !Array.isArray(observation.data.body)
       ? Object.fromEntries(Object.entries(observation.data.body).filter(([key]) => /^(?:success|ok|code|error|errorCode|message)$/.test(key))) : undefined,
-    query, databaseSchemas,
+    query, databaseSchemas, databaseEvidence: observation.data.databaseEvidence,
+    ...(observation.data.primaryKey ? { primaryKey: observation.data.primaryKey } : {}),
     page: check.channel === 'page' ? { url: observation.data.url, ready: observation.data.ready, dom: observation.data.dom,
       domRecords: observation.data.domRecords } : undefined,
     sources: evidence };
 }
 
 export function compareAgentObservation(check, observation, args) {
+  if (check.type === 'list') {
+    const value = observationAt(observation.data, args.field);
+    const compared = observation.channel === 'database' && observation.data.primaryKey?.complete === true
+      && isDeepStrictEqual(args.field, ['primaryKey', 'columns']) && Array.isArray(value);
+    return { assertion: check.id, fragment: check.requirement, field: args.field, expected: check.expected,
+      observed: value, compared, passed: compared && isDeepStrictEqual(value, check.expected),
+      ...(!compared ? { reason: 'Use the complete primaryKey.columns from test_schema' } : {}) };
+  }
   const rule = { ...check, assertion: check.id, field: args.field, fragment: check.requirement,
     encoding: check.type === 'number' ? 'decimal-text' : undefined };
   if (args.calculation) return evaluateDerivedAssertion(observation.data, rule, args.calculation.terms);

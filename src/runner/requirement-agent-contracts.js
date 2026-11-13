@@ -18,10 +18,11 @@ const selection = { observationId: string, field, identity, calculation, sourceR
   snapshot: { type: 'boolean' }, constraints: array(object({ observationId: string, field,
     operator: enumeration('equals', 'gt', 'gte', 'lt', 'lte'), expected: {} }, ['observationId', 'field', 'operator', 'expected'])) };
 const pathTemplate = string; // Dynamic segments use /resource/{inputName}, never a whole unvalidated route.
+const databaseTable = object({ database: string, table: string, role: enumeration('query', 'subject') }, ['database', 'table', 'role']);
 const spec = object({ resource: string, kind: enumeration('http', 'database', 'browser'), access: enumeration('read', 'create', 'update', 'delete', 'trigger'),
   path: pathTemplate, method: string, body: {}, query: map, authenticated: { type: 'boolean' }, channel: enumeration('api', 'message', 'job', 'database'),
   queryEvidence: array(string, 1), requestCorrelation: { type: 'boolean' },
-  database: string, sql: string, params: array({}), table: string, values: map, where: map, expectedRows: { type: 'integer', minimum: 1 },
+  database: string, sql: string, params: array({}), table: string, tables: array(databaseTable, 1), values: map, where: map, expectedRows: { type: 'integer', minimum: 1 },
   action: enumeration('click', 'goto'), selector: string, effect: object({ path: pathTemplate, method: string, body: {} }, ['path', 'method']) }, ['resource', 'kind', 'access']);
 const measurementSelection = { ...selection, sampleSubject: map };
 const measurement = object(measurementSelection, ['observationId']);
@@ -33,7 +34,7 @@ const domRecord = object({ name: operationNameSchema, layout: enumeration('rows'
 const check = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string, pageStage:string,
   beforeAction,
   channel: enumeration('page', 'api', 'database', 'message', 'job'), subject: map, expected: {},
-  operator: enumeration('equals', 'contains', 'gt', 'gte', 'lt', 'lte'), type: enumeration('number', 'text', 'boolean', 'null'), unit: { type: 'string' },
+  operator: enumeration('equals', 'contains', 'gt', 'gte', 'lt', 'lte'), type: enumeration('number', 'text', 'boolean', 'null', 'list'), unit: { type: 'string' },
   basis: object({ quote: string, observationId: string, field, explanation: string }), measurement },
 ['id', 'line', 'requirement', 'channel', 'expected', 'operator', 'type', 'basis']);
 const requestFields = {
@@ -44,11 +45,16 @@ const requestFields = {
 const requestProof = object({ scope: enumeration('runner', 'service'), phase: enumeration('prepare', 'scenario'), resource: string,
   requests: array(object({ method: string, path: string, count: integer, ...requestFields }, ['method', 'path', 'count']), 1),
   audit: object({ operation: string, correlation: string, matchRunner: { type: 'boolean' } }, ['operation', 'correlation']) }, ['scope', 'phase', 'resource', 'requests']);
+const databaseCall = object({ action: enumeration('identity','inspect','discover','tables','schema','snapshot','read','write'),
+  database: { anyOf: [string, { type: 'null' }] }, table: string, metadataDatabase: { const: 'information_schema' }, operation: operationNameSchema,
+  params: array({ anyOf: [string, { type: 'null' }] }) },
+['action', 'database']);
 const processCheck = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string,
   kind: enumeration('execution_evidence', 'receipt_reconciliation', 'readiness', 'cleanup', 'report', 'external_cleanup'), relatedCheckIds: array(string),
   requestProof, beforeAction, baselineChannel: enumeration('page','api','database','message','job'),
   runnerScope: object({ phase: enumeration('prepare','scenario','all'), allowed: array(object({ resource: string,
-    transport: enumeration('http','browser','database'), method: string, path: string, ...requestFields }, ['resource','transport','method','path']), 1) }, ['phase','allowed']),
+    transport: enumeration('http','browser','database'), method: string, path: string, ...requestFields,
+    databaseCall }, ['resource','transport','method','path']), 1) }, ['phase','allowed']),
   externalReceipt: object({ operation: operationNameSchema, actor: string, correlation: string,
     after: enumeration('business_checks','job_end') }, ['actor','correlation','after']) }, ['id', 'line', 'requirement', 'kind']);
 const pageStage=object({id:string,step:{type:'integer',minimum:1},resource:string,action:enumeration('goto','click','select'),path:string,selector:string,value:{},subject:map,ready:browserReady},['id','step','resource','action','subject']);
@@ -60,11 +66,11 @@ const mutation = object({ ...invocation, id: string, purpose: enumeration('prepa
   restore: object({ operation: string, input: map }, ['operation']), cleanupAction: string, shared: { type: 'boolean' } },
 ['id', 'purpose', 'operation', 'businessKey', 'ownership', 'verify', 'restore', 'cleanupAction']);
 export const requirementToolSchemas = {
-  connection: object({ resource: string, database: string }, ['resource']),
+  connection: object({ resource: string, database: string, identityOnly: { type: 'boolean' } }, ['resource']),
   source: object({ action: enumeration('files', 'search', 'read', 'refs', 'history', 'show'), path: { type: 'string' }, pattern: string,
     start: { type: 'integer', minimum: 1 }, end: { type: 'integer', minimum: 1 }, ref: string, file: string, ...page }, ['action']),
-  schema: object({ resource: string, database: string, table: string }, ['resource']),
-  read_sql: object({ resource: string, database: string, sql: string, params: array({}), subject: map, ...page }, ['resource', 'database', 'sql']),
+  schema: object({ resource: string, database: string, table: string, connectionDatabase: string }, ['resource']),
+  read_sql: object({ resource: string, database: string, sql: string, params: array({}), subject: map, ...page }, ['resource', 'sql']),
   snapshot: object({ resource: string, database: string, table: string, scope: map, fields: array(string, 1), pageSize: { type: 'integer', minimum: 1 }, ...page }, ['resource', 'database', 'table', 'scope']),
   register: object({ name: operationNameSchema, sourceRefs: array(string, 1), reason: string, spec }, ['name', 'sourceRefs', 'reason', 'spec']),
   observe: object(invocation, ['operation']),
@@ -83,7 +89,8 @@ export const requirementToolSchemas = {
     object({ identityCorrections: array(object({ checkId: string, subject: map }, ['checkId', 'subject']), 1) }, ['identityCorrections']),
     object({ version: { const: 1 }, steps: array(string, 1), pageStages:array(pageStage), prerequisites: array(object({ objects: string, target_state: string, construction_entry: string,
       unique_identifier: string, verification_method: string, cleanup_method: string }, ['objects', 'target_state', 'construction_entry', 'unique_identifier', 'verification_method', 'cleanup_method'])), checks: array(check, 1), processChecks: array(processCheck) }, ['version', 'steps', 'prerequisites', 'checks'])] },
-  measure: { anyOf: [object({ action: { const: 'restart' }, reason: string }, ['action', 'reason']),
+  measure: { anyOf: [object({ action: { const: 'restart' }, reason: string, change: string,
+    sourceRefs: array(string, 1), evidenceRefs }, ['action', 'reason']),
     object({ checkId: string, ...measurementSelection }, ['checkId', 'observationId'])] },
   assert: object({ checkId: string, ...selection }, ['checkId', 'observationId']),
   process: object({ checkId: string, evidenceRefs, sourceRefs: array(string, 1) }, ['checkId', 'evidenceRefs']),
@@ -107,7 +114,8 @@ export function schemaErrors(schema, value, at = '$.args') {
   if (schema.enum && !schema.enum.includes(value)) errors.push(at + ' must be one of ' + schema.enum.join(', '));
   const type = schema.type;
   const valid = !type || type === 'object' ? !type || value !== null && typeof value === 'object' && !Array.isArray(value)
-    : type === 'array' ? Array.isArray(value) : type === 'integer' ? Number.isSafeInteger(value) : typeof value === type && (type !== 'number' || Number.isFinite(value));
+    : type === 'array' ? Array.isArray(value) : type === 'integer' ? Number.isSafeInteger(value)
+      : type === 'null' ? value === null : typeof value === type && (type !== 'number' || Number.isFinite(value));
   if (!valid) return [...errors, at + ' must be ' + type];
   if (typeof value === 'string' && value.length < (schema.minLength ?? 0)) errors.push(at + ' must be nonempty');
   if (typeof value === 'string' && schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(at+' must match '+schema.pattern+' (use letters, digits, _ or -; no dots)');
