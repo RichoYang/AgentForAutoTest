@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import { JsonStore } from '../src/shared/store.js';
 import { ReportDelivery } from '../src/control-plane/report-delivery.js';
@@ -226,6 +227,170 @@ async function skillFingerprint(root, name, references) {
 }
 
 const skillsRoot = process.env.AGENTOS_REQUIREMENT_SKILLS_ROOT;
+test('an original workbook stuck on legacy coverage resumes the same Job, records mixed results and reports coverage after cleanup',
+  { skip: !skillsRoot && 'Set AGENTOS_REQUIREMENT_SKILLS_ROOT to the installed QA Skills' }, async t => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'agentos-coverage-resume-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = path.join(root, 'repo');
+  await command('git', ['init', '-b', 'main', repo]);
+  await command('git', ['-C', repo, '-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '--allow-empty', '-m', 'Coverage fixture']);
+  const requests = [];
+  const fixtures = new Set();
+  const endpoint = await localServer(t, async (req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    requests.push(req.method + ' ' + url.pathname);
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/fixture') {
+      let key = url.searchParams.get('code');
+      if (req.method === 'POST') {
+        let raw = ''; for await (const chunk of req) raw += chunk;
+        key = JSON.parse(raw).code;
+        assert.ok(!fixtures.has(key));
+        fixtures.add(key);
+      }
+      if (req.method === 'DELETE') fixtures.delete(key);
+      return res.end(JSON.stringify({ exists: fixtures.has(key), key }));
+    }
+    res.end(JSON.stringify({ data: { balance: url.pathname === '/defect' ? 80 : 100, currency: '元' } }));
+  });
+  const iniPath = path.join(root, 'uat.ini');
+  await writeFile(iniPath, ['[Sample.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=read_only\nenvironment=Uat',
+    '[Sample.Uat.Fixture]\nstatus=configured\nai_access=allowed\nai_operation_mode=full_crud\nenvironment=Uat',
+    '[Sample.Uat.Denied]\nstatus=configured\nai_access=denied\nai_operation_mode=read_only\nenvironment=Uat']
+    .map(section => section + '\nbase_url=' + endpoint + '\n').join('\n'));
+  const bot = { profile: 'coverage-qa', appId: 'cli_coverage', openId: 'ou_coverage' };
+  const readBudget = { resource: 'platform', kind: 'http', path: '/budget', outputs: budgetOutputs, observations: [budget] };
+  const settings = {
+    bot, requesterOpenIds: ['ou_sender'], allowedChatIds: ['oc_coverage'], lockDirectory: path.join(root, 'locks'),
+    reportDirectory: path.join(root, 'reports'), timeZone: 'Asia/Shanghai',
+    document: { domain: tenant, profile: 'doc-reader', appId: 'cli_docs', openId: 'ou_doc' },
+    templateUrl: 'https://' + tenant + '/sheets/Template',
+    skills: { generator: await skillFingerprint(skillsRoot, 'lark-testcase-by-prd-order-generator', generatorReferences),
+      regression: await skillFingerprint(skillsRoot, 'run-full-requirement-regression', regressionReferences) },
+    environment: { name: 'UAT', platform: 'Sample', lockKey: 'coverage', iniPath, resources: {
+      platform: { section: 'Sample.Uat.Platform', scope: 'read' }, denied: { section: 'Sample.Uat.Denied', scope: 'read' },
+      fixture: { section: 'Sample.Uat.Fixture', scope: 'full_crud' },
+    } },
+    execution: { operations: { budget: readBudget, denied: { ...readBudget, resource: 'denied' }, defect: { ...readBudget, path: '/defect' },
+      fixture: { resource: 'fixture', kind: 'fixture', key: 'code',
+        lookup: { kind: 'http', path: '/fixture', outputs: { exists: ['exists'], key: ['key'] } },
+        create: { kind: 'http', method: 'POST', path: '/fixture' }, remove: { kind: 'http', method: 'DELETE', path: '/fixture' } },
+    } },
+  };
+  const projects = { projects: { coverage: { displayName: '覆盖隔离项目', repoPath: repo, baseBranch: 'main', requirementTest: settings } },
+    chatProjectMap: { oc_coverage: 'coverage' }, topicChatIds: ['oc_coverage'] };
+  const store = new JsonStore(path.join(root, 'state.json'));
+  const context = { config: { dataDir: root }, store, requirementRoutes: validateRequirementRoutes(projects, { agents: { qa: bot } }),
+    feishu: { reply: async () => {} } };
+  const message = (id, content) => handleRequirementMessage(context, {
+    agent_profile: bot.profile, receiving_app_id: bot.appId, receiving_bot_id: bot.openId, chat_id: 'oc_coverage',
+    chat_type: 'group', sender_id: 'ou_sender', thread_id: 'omt_coverage', message_id: 'om_' + id, content, mentions: [{ id: bot.openId }],
+  });
+  const originalURL = 'https://' + tenant + '/sheets/Original';
+  const { jobId } = await message('start_coverage', '需求文档：' + doc + '\n测试用例：' + originalURL);
+  const rows = ['权限不足的用例', '隔离夹具预算核对', '隔离产品错误'].map(name => sampleRow(name, '1. 预算余额100元'));
+  const { copies, client } = mockPublisher();
+  copies.set('Original', { matrix: [headers, ...rows], revision: 0 });
+  client.resolveInput = async () => ({ url: originalURL, token: 'Original' });
+  const source = { id: 'LocalDoc', revision: 1, title: '隔离覆盖验证', url: doc,
+    xml: '<h1 id="A1">预算余额100元</h1><p id="A2">核对独立的导出规则</p>', embedded: [] };
+  client.readRequirement = async () => ({ ...source, hash: digest(source) });
+  const workDir = path.join(root, 'requirement-tests', jobId);
+  const config = { projects: projects.projects, dataDir: root };
+  const legacyCandidate = { projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'A1', rule: '预算余额100元。' }],
+    caseRequirements: [[], ['INVENTED'], ['R1']] };
+  const legacyProgram = process.env.AGENTOS_COVERAGE_LEGACY_PROGRAM;
+  const oldRunner = legacyProgram
+    ? (await import(pathToFileURL(path.join(legacyProgram, 'src/runner/requirement-test.js')))).runRequirementTest : runRequirementTest;
+  const run = async (runner, deps, progress = async () => {}) => {
+    const job = await store.leaseNext('coverage-runner', ['requirement_test']);
+    assert.equal(job.id, jobId);
+    const lease = { runnerId: 'coverage-runner', leaseId: job.lease.id };
+    const result = await runner(job, config, async event => { await store.appendEvent(jobId, { ...event, ...lease }); await progress(event); }, deps);
+    await store.appendEvent(jobId, { ...lease, type: 'completed', result });
+    return result;
+  };
+  const previous = await run(oldRunner, { client, generate: async () => structuredClone(legacyCandidate) }, async event => {
+    if (!legacyProgram && event.activity?.current === '建立原表执行索引') {
+      await writeJson(path.join(workDir, 'cases.json'), { headers, rows,
+        source: { title: source.title, url: doc, revision: source.revision } });
+      throw new RequirementWait('case_quality', '用例缺少有效的需求条款引用。');
+    }
+  });
+  assert.equal(previous.requirementWait, 'case_quality');
+  assert.equal((await store.getJob(jobId)).status, 'awaiting_clarification');
+  assert.equal((await readJson(path.join(workDir, 'journal.json'))).casesHash, undefined);
+  assert.deepEqual(requests, []);
+  const savedCases = await readFile(path.join(workDir, 'cases.json'));
+  assert.equal((await message('continue_coverage', '继续测试')).jobId, jobId);
+  let analyses = 0;
+  const dependencies = { client,
+    async generate({ existingCases }) {
+      analyses++;
+      assert.deepEqual(existingCases, rows);
+      assert.equal(fixtures.size, 0);
+      assert.ok(requests.includes('GET /defect'));
+      return { ...legacyCandidate, requirements: [...legacyCandidate.requirements,
+        { id: 'R2', anchor: 'A2', rule: '验证导出结构。' }, { id: 'Rbad', anchor: 'INVENTED', rule: '不存在的条款。' }] };
+    },
+    async plan(prompt) {
+      const operation = prompt.includes('权限不足的用例') ? 'denied' : prompt.includes('隔离产品错误') ? 'defect' : 'budget';
+      const steps = operation === 'budget' ? [{ operation: 'fixture', input: {}, checks: [] }] : [];
+      return { missing: [], steps: [...steps, { operation, input: {}, checks: [check(['balance'], 100)] }] };
+    },
+    async visualModel(_prompt, { images }) { return { sheets: images.map(file => ({ filename: path.basename(file), usable: true, issues: [] })) }; },
+  };
+  const interrupted = await run(runRequirementTest, dependencies, async event => {
+    if (event.activity?.requirement?.phase === 'case_complete' && event.activity.completed === 2) {
+      throw new RequirementWait('test_fixture_interrupt', '隔离夹具在已验证两条后中断。');
+    }
+  });
+  assert.equal(interrupted.requirementWait, 'test_fixture_interrupt', interrupted.finalMessage);
+  const savedResults = (await readJson(path.join(workDir, 'journal.json'))).results;
+  assert.equal(Object.keys(savedResults).length, 2);
+  assert.equal(fixtures.size, 0);
+  assert.equal(analyses, 0);
+  assert.equal((await message('continue_after_result', '继续测试')).jobId, jobId);
+  const result = await run(runRequirementTest, dependencies);
+  assert.equal(result.outcome, 'ready', result.finalMessage + '\n' + JSON.stringify(await readJson(path.join(workDir, 'report-build-error.json'))));
+  assert.deepEqual([result.requirementSummary.blocked, result.requirementSummary.pass, result.requirementSummary.fail], [1, 1, 1]);
+  assert.equal(analyses, 1);
+  assert.equal(fixtures.size, 0);
+  assert.deepEqual(await readFile(path.join(workDir, 'cases.json')), savedCases);
+  assert.equal(copies.size, 1);
+  assert.deepEqual(copies.get('Original').matrix, [headers, ...rows]);
+  const journal = await readJson(path.join(workDir, 'journal.json'));
+  for (const [id, saved] of Object.entries(savedResults)) assert.deepEqual(journal.results[id], saved);
+  const index = await readJson(path.join(workDir, 'case-index.json'));
+  const report = await readJson(path.join(workDir, 'normalized-report.json'));
+  assert.deepEqual(index.map(item => item.row), [2, 3, 4]);
+  assert.ok(index.every(item => !item.requirementIds.length));
+  assert.deepEqual(report.cases.map(row => row.status), ['阻断', '通过', '失败']);
+  assert.deepEqual(report.cases.map(row => row.requirement_ref), [
+    ['原用例表第 2 行', '未匹配需求条款'], ['原用例表第 3 行', '未匹配需求条款'], ['原用例表第 4 行', 'R1'],
+  ]);
+  assert.deepEqual(journal.caseCoverage.unmatchedRows, [2, 3]);
+  assert.deepEqual(journal.caseCoverage.uncoveredRequirements.map(item => item.id), ['R2']);
+  assert.equal(journal.caseCoverage.rejectedClauses, 1);
+  assert.equal(journal.caseCoverage.rows[1].rejectedReferences, 1);
+  assert.match(report.meta.execution_scope.join(' '), /R2.*未发现对应验证项/);
+  assert.equal(report.cleanup_records[0].status, '已清理');
+  assert.ok(journal.cleanup.verified && journal.mutations.every(item => item.cleanup?.verified));
+  assert.equal(requests.filter(request => request === 'POST /fixture').length, 1);
+  assert.equal(requests.filter(request => request === 'DELETE /fixture').length, 1);
+  const requested = process.env.AGENTOS_COVERAGE_EVIDENCE_DIR;
+  if (requested) {
+    const output = path.join(requested, 'provided');
+    await mkdir(output, { recursive: true });
+    const filename = result.requirementReport.filename;
+    for (const file of ['journal.json', 'case-index.json', 'normalized-report.json']) await copyFile(path.join(workDir, file), path.join(output, file));
+    await copyFile(path.join(root, 'exports', jobId, filename), path.join(output, filename));
+    await writeJson(path.join(output, 'acceptance.json'), { jobId, originalStatus: previous.requirementWait, legacyProgram: Boolean(legacyProgram),
+      requests, priorResultsPreserved: true, summary: result.requirementSummary, workbook: filename, workbookSha256: result.requirementReport.sha256 });
+  }
+});
+
 test('structured requirement reads named supplements, comments and the designated workbook before enforcing sidebar-only execution',
   { skip: !skillsRoot && 'Set AGENTOS_REQUIREMENT_SKILLS_ROOT to the installed QA Skills' }, async t => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), 'agentos-structured-intake-')));
@@ -328,7 +493,7 @@ test('structured requirement reads named supplements, comments and the designate
   const finished = await runRequirementTest(background, { projects: projects.projects, dataDir: root }, async () => {}, { client,
     async generate({ existingCases }) {
       assert.equal(existingCases[0][headers.indexOf('测试结果')], '');
-      return { projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'A1', rule: '预算余额100元。' }], caseRequirements: [['R1']] };
+      throw new RequirementWait('generator', '隔离夹具模拟覆盖分析暂不可用。');
     },
     async plan() { return { missing: [], steps: [{ operation: 'budget', input: {}, checks: [check(['balance'], 100)] }] }; },
     async visualModel(_prompt, { images }) { return { sheets: images.map(file => ({ filename: path.basename(file), usable: true, issues: [] })) }; },
@@ -342,6 +507,8 @@ test('structured requirement reads named supplements, comments and the designate
   const normalized = await readJson(path.join(root, 'requirement-tests', backgroundId, 'normalized-report.json'));
   assert.equal(normalized.meta.requirement_sources[1].location, supplement);
   assert.equal(normalized.meta.test_case_sources[0].location, workbook);
+  assert.match(normalized.meta.method_notes.join(' '), /覆盖分析未完成/);
+  assert.equal(normalized.cases[0].status, '通过');
 });
 
 test('an original Feishu job resumes past its legacy release wait and records HTTP 403 without authorizing an ambiguous write',
@@ -357,6 +524,8 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   const iniPath = path.join(root, 'uat.ini');
   const fakeCli = path.join(root, 'no-cli.cmd');
   await writeFile(fakeCli, '@exit /b 94\r\n');
+  const handoff = path.join(root, 'release-handoff.md');
+  await writeFile(handoff, '# 账务导出\n保留报表期间，预算余额可独立比较。');
   const requests = [];
   const fixtures = new Set();
   let revoked = true;
@@ -397,6 +566,7 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   const readBudget = { resource: 'platform', kind: 'http', path: '/budget', outputs: budgetOutputs, observations: [budget] };
   const settings = {
     bot: { profile: 'local-qa', appId: 'cli_local', openId: 'ou_bot' }, requesterOpenIds: ['ou_requester'], allowedChatIds: ['oc_local'],
+    allowedInputDirectories: [root],
     document: { domain: tenant, profile: 'local-docs', appId: 'cli_docs', openId: 'ou_document' },
     templateUrl: 'https://' + tenant + '/sheets/Template', projectFolderUrl: 'https://' + tenant + '/drive/folder/Root',
     lockDirectory: path.join(root, 'locks'), reportDirectory: path.join(root, 'reports'), timeZone: 'Asia/Shanghai',
@@ -430,21 +600,26 @@ test('an original Feishu job resumes past its legacy release wait and records HT
     chat_id: 'oc_local', chat_type: 'group', sender_id: 'ou_requester', message_id: 'om_' + id, thread_id: 'omt_local',
     content, mentions: [{ id: { open_id: settings.bot.openId } }],
   });
-  const { jobId } = await message('start', doc);
+  const { jobId } = await message('start', ['需求文档：' + doc, '本地补充：' + handoff, '执行环境：UAT', '分支名称：main'].join('\n'));
   const workDir = path.join(dataDir, 'requirement-tests', jobId);
   const { copies, client } = mockPublisher();
   client.listFolder = async token => token === 'Root' ? [{ type: 'folder', token: 'Month',
     name: versionNames('发布取证', new Date(), settings.timeZone).folderName }] : [...copies.values()];
-  const source = { id: 'LocalDoc', revision: 4, title: '发布取证', url: doc, xml: '<h1 id="A1">预算</h1>', embedded: [] };
+  const source = { id: 'LocalDoc', revision: 4, title: '发布取证', url: doc,
+    xml: '<h1 id="A1">预算</h1><p id="A2">账务导出需保留期间</p>', embedded: [] };
   client.readRequirement = async () => ({ ...source, hash: digest(source) });
   const rows = ['环境变化时拒绝写入', '指定版本场景', '普通预算读取'].map(name => sampleRow(name, '1. 预算余额100元'));
   rows.push(sampleRow('已证明失败后服务中断', '1. 预算余额100元\n2. 计划限额50元'));
   rows[1][headers.indexOf('前置条件')] = '1. 发布版本前置：web imageTag=uat-123';
   let generationCount = 0;
-  const dependencies = { client, async generate() {
+  const dependencies = { client, async generate({ source: materials, existingCases }) {
     generationCount++;
-    return { projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'A1', rule: '预算余额可以核对。' }],
-      caseRequirements: rows.map(() => ['R1']), manifest: { module_order: ['预算'], headers, required_texts: [], rows } };
+    assert.equal(existingCases, undefined);
+    assert.equal(materials.supplements[0].name, 'release-handoff.md');
+    assert.equal(materials.request.branch, 'main');
+    return { projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'A1', rule: '预算余额可以核对。' },
+      { id: 'R2', anchor: 'A2', rule: '账务导出需保留期间。' }],
+      caseRequirements: [[], ['INVENTED'], [], ['R1']], manifest: { module_order: ['预算'], headers, required_texts: [], rows } };
   }, async plan(prompt) {
     const read = { operation: 'budget', input: {}, checks: [check(['balance'], 100)] };
     if (prompt.includes('环境变化时拒绝写入')) return { missing: [], steps: [
@@ -502,6 +677,8 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   assert.deepEqual(requests, ['GET /releases', 'GET /runtime-version', 'GET /refresh-fixture',
     'GET /releases', 'GET /runtime-version', 'GET /budget', 'GET /mismatch', 'GET /limit']);
   const report = await readJson(path.join(workDir, 'normalized-report.json'));
+  assert.deepEqual(current.caseCoverage.unmatchedRows, [2, 3, 4]);
+  assert.match(report.meta.execution_scope.join(' '), /R2.*未发现对应验证项/);
   assert.ok(report.meta.method_notes.some(note => /HTTP 403.*缺少构建号.*缺少镜像标识/.test(note)));
   assert.ok(report.evidence_index.some(entry => entry.type === '发布版本核验'));
   assert.deepEqual(report.blockers.map(item => item.dependency), ['已授权的非生产资源', '指定发布版本前置', 'limit']);
@@ -511,6 +688,14 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   const oldArtifact = completed.requirementReport;
   const savedWorkbook = path.join(dataDir, 'exports', jobId, oldArtifact.filename);
   const oldWorkbook = await readFile(savedWorkbook);
+  if (process.env.AGENTOS_COVERAGE_EVIDENCE_DIR) {
+    const output = path.join(process.env.AGENTOS_COVERAGE_EVIDENCE_DIR, 'derived');
+    await mkdir(output, { recursive: true });
+    for (const file of ['journal.json', 'case-index.json', 'normalized-report.json']) await copyFile(path.join(workDir, file), path.join(output, file));
+    await copyFile(savedWorkbook, path.join(output, oldArtifact.filename));
+    await writeJson(path.join(output, 'acceptance.json'), { jobId, generatedFromRequirements: generationCount === 1,
+      requests, summary: completed.requirementSummary, workbook: oldArtifact.filename, workbookSha256: oldArtifact.sha256 });
+  }
   const blocked = Object.entries(current.results).filter(([, result]) => result.status === '阻断').map(([caseId]) => caseId);
   const passed = Object.entries(current.results).find(([, result]) => result.status === '通过')[0];
   const oldHead = current.sourceAttempts[blocked[0] + '@1'].repositories[0].worktree_commit;

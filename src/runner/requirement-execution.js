@@ -314,14 +314,6 @@ export async function executeCases({ job, settings, journal, source, index, mani
           continue;
         }
       }
-      if (!journal.preparations[item.caseId]) {
-        const preparation = resources.checkOutput(await adapter.prepare(caseInput));
-        if (!preparation || !Array.isArray(preparation.prerequisites)) {
-          throw new RequirementWait('execution_plan', '执行适配器未返回本轮前置数据构造矩阵。');
-        }
-        journal.preparations[item.caseId] = preparation;
-        await save();
-      }
       const invoke = async (intent, apply) => {
         const resourceBinding = environment.resources[intent?.resource];
         const shared = intent?.shared === true && intent.operation !== 'create'
@@ -372,7 +364,16 @@ export async function executeCases({ job, settings, journal, source, index, mani
       await save();
       const completedSteps = journal.executionSteps[item.caseId] ??= {};
       let result;
+      let caseWait = false;
       try {
+        if (!journal.preparations[item.caseId]) {
+          const preparation = resources.checkOutput(await adapter.prepare(caseInput));
+          if (!preparation || !Array.isArray(preparation.prerequisites)) {
+            throw new RequirementWait('execution_plan', '执行适配器未返回本轮前置数据构造矩阵。');
+          }
+          journal.preparations[item.caseId] = preparation;
+          await save();
+        }
         result = resources.checkOutput(await adapter.execute({ ...caseInput, preparation: journal.preparations[item.caseId], invoke,
           ...(!settings.adapter ? { completedSteps, async saveStep(index, step) {
             completedSteps[index] = resources.checkOutput(step);
@@ -380,22 +381,22 @@ export async function executeCases({ job, settings, journal, source, index, mani
           } } : {}),
           resumed: previous === item.caseId, mutations: journal.mutations.filter(record => record.caseId === item.caseId) }));
       } catch (error) {
-        if (settings.execution?.mode === 'agent' && error instanceof RequirementWait
-          && ['agent_no_progress', 'execution_plan', 'execution_evidence'].includes(error.code)) {
-          const recovered = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId)));
-          journal.caseCleanup ??= {}; journal.caseCleanup[item.caseId] = recovered; await save();
-          if (!recovered.verified) throw new RequirementWait('cleanup_pending', '当前用例尚有未决变更，不能启动后续用例。');
-          const remaining = index.slice(index.indexOf(item) + 1).map(next => manifest.rows[next.row - 2]);
-          const continuation = resources.checkOutput(await adapter.canContinue(caseInput, remaining, error));
-          if (!continuation.independent) throw error;
-          result = { status: '未执行', actual: error.message, retryable: true, evidence: continuation.evidence };
-        } else {
-        if (!(error instanceof RequirementWait) || error.code !== 'environment_scope') throw error;
-        const file = 'resource-blocked-' + digest(item.caseId).slice(0, 24) + '.json';
-        await writeJson(path.join(reportDir, file), { caseId: item.caseId, reason: error.message });
-        result = { status: '阻断', actual: error.message, evidence: [{ path: file, type: '环境权限核验', sanitized: true }],
-          blocker: { dependency: '已授权的非生产资源', required_action: '核对受影响资源的环境归属和操作权限。' } };
-        }
+        if (!(error instanceof RequirementWait)
+          || !['environment_scope', 'execution_plan', 'agent_no_progress', 'execution_evidence'].includes(error.code)) throw error;
+        caseWait = true;
+        const denied = error.code === 'environment_scope';
+        const agentCase = agentMode && (await readJson(path.join(workDir, 'agent-tool-state.json')))?.cases?.[sourceKey];
+        const hasRuntime = Object.keys(completedSteps).length || agentCase?.observations?.length
+          || journal.mutations.some(record => record.caseId === item.caseId && record.attempt === attempt && record.applyAttempts?.length);
+        const file = 'case-gap-' + digest([item.caseId, attempt]).slice(0, 24) + '.json';
+        const detail = resources.checkOutput({ caseId: item.caseId, attempt, row: item.row, code: error.code,
+          reason: error.message, ...(error.gap ? { missing: error.gap.missing, next: error.gap.next } : {}) });
+        await writeJson(path.join(reportDir, file), detail);
+        result = { status: denied || hasRuntime ? '阻断' : '未执行', actual: detail.reason, retryable: true,
+          evidence: [{ path: file, type: denied ? '环境权限核验' : '用例执行缺口', sanitized: true }],
+          blocker: { dependency: denied ? '已授权的非生产资源' : detail.reason,
+            required_action: denied ? '核对受影响资源的环境归属和操作权限。'
+              : detail.next || '核对本用例的前置数据、独立预期或取证方式，再重试受影响项。' } };
       }
       if (!['通过', '失败', '阻断', '未执行', '不适用'].includes(result?.status) || !result.actual
         || !result.evidence?.length || (result.status === '失败' && !result.issue?.expected_result)
@@ -414,7 +415,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
       journal.inFlight = null;
       await save();
       const caseMutations = journal.mutations.filter(record => record.caseId === item.caseId);
-      if (agentMode || staticMode && caseMutations.length) {
+      if (agentMode || (staticMode || caseWait) && caseMutations.length) {
         let cleanup = resources.checkOutput(await clean(caseMutations));
         if (agentMode && !cleanup.verified) {
           // A lost response or transient recovery request gets a fresh readback.

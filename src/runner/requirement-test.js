@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { requirementFeishu, fileToken, readCaseTemplate, RequirementWait, digest } from './requirement-feishu.js';
 import { generatorReferences, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sourceBaseline, writeJson } from './requirement-files.js';
-import { generateValidatedCases } from './requirement-generation.js';
+import { analyzeCaseCoverage, generateCases, generateValidatedCases, indexProvidedCases } from './requirement-generation.js';
 import { reviseMaterialCases } from './requirement-material-revision.js';
 import { publishCases, readProvidedCases } from './requirement-publication.js';
 import { executeCases, requirementResources } from './requirement-execution.js';
@@ -9,6 +9,7 @@ import { createRequirementAgent } from './requirement-agent.js';
 import { buildRequirementReport } from './requirement-report.js';
 import { matchesRequirementTopic, requirementCleanupAfterCancellation, resolveRequirementOptions } from '../shared/requirement-options.js';
 import { verifiedMutationCleanup } from './requirement-mutation-measurement.js';
+import { sanitized } from './requirement-agent-resources.js';
 
 export async function runRequirementTest(job, config, emit, dependencies = {}) {
   if (job.status === 'cancelled' && !job.requirement?.cleanupOnly) return { outcome: 'blocked', requirementWait: 'requirement_cancelled', finalMessage: '任务已取消；未读取或修改执行检查点，未恢复业务执行。' };
@@ -141,7 +142,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       throw new RequirementWait('project_confirmation', '需求标题与机器人绑定项目不一致。仅能在 ' + projectName + ' 执行。如确属该项目，请在本话题回复确认项目。');
     }
     if (!job.requirement.cleanupOnly) {
-      stage = '用例生成和覆盖检查';
+      stage = request.caseSource ? '建立原表执行索引' : '提炼可验证项';
       journal.phase = stage;
       await save();
       await progress(stage);
@@ -165,26 +166,46 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         throw new RequirementWait('browser_unavailable', '任务要求仅使用 Codex 侧边栏浏览器。飞书后台 Runner 无法连接该会话的浏览器，当前尚未开始业务执行。请在可使用该浏览器的 Codex 会话中执行。');
       }
       if (!journal.casesHash) {
-        const { draft, index: cases } = await generateValidatedCases({ source, template: { tabs: template.tabs, headers: template.headers,
-          samples: template.values.slice(1).filter(row => row.some(cell => cell !== '')) },
-          existingCases: provided?.rows, skill: generator, expectedProject: projectName, otherProjects: settings.otherProjects ?? [],
-          codexBin: config.codexBin, cwd: workDir }, settings, casesFile, {
-          generate: dependencies.generate,
-          checkProject(draft) {
-            if (draft?.projectMatch === 'conflict' && !job.requirement.confirmedProject) {
-              throw new RequirementWait('project_confirmation', '需求内容与绑定项目可能冲突。仅能在 ' + projectName + ' 执行；如确属该项目，请回复确认项目。');
-            }
-            if (!['match', 'conflict'].includes(draft?.projectMatch)) {
-              throw new RequirementWait('requirement_clarification', '需求范围或口径尚不明确。请补全飞书需求原文，再为修订后的版本发起新话题。');
-            }
-          },
-        });
-        journal.requirements = draft.requirements;
-        journal.casesHash = digest(draft.manifest);
-        journal.caseIndexHash = digest(cases);
-        if (provided) journal.publication = provided.receipt;
-        await writeJson(indexFile, cases);
-        await save();
+        if (Object.keys(journal.results ?? {}).length || journal.mutations?.length || journal.inFlight
+          || Object.keys(journal.executionCases ?? {}).length) {
+          throw new RequirementWait('publication_version', '已有执行台账，但缺少已绑定的用例清单。保留原结果及恢复记录，请核对检查点。');
+        }
+        const candidate = provided ? indexProvidedCases(source, template, provided.rows, settings) : null;
+        if (candidate) {
+          const prior = await readJson(casesFile);
+          if (prior && (digest(prior.headers) !== digest(candidate.manifest.headers) || digest(prior.rows) !== digest(candidate.manifest.rows))) {
+            throw new RequirementWait('publication_version', '原表的定义与已保存版本不同。已保留原检查点，请按新版本另行发起。');
+          }
+          if (!prior) await writeJson(casesFile, candidate.manifest);
+          journal.requirements = [];
+          journal.casesHash = digest(prior ?? candidate.manifest);
+          journal.caseIndexHash = digest(candidate.index);
+          journal.publication = provided.receipt;
+          await writeJson(indexFile, candidate.index);
+          await save();
+        } else {
+          const { draft, index: cases, coverage } = await generateValidatedCases({ source, template: { tabs: template.tabs, headers: template.headers,
+            samples: template.values.slice(1).filter(row => row.some(cell => cell !== '')) },
+            advisoryCoverage: true, skill: generator, expectedProject: projectName, otherProjects: settings.otherProjects ?? [],
+            codexBin: config.codexBin, cwd: workDir }, settings, casesFile, {
+            generate: dependencies.generate,
+            checkProject(draft) {
+              if (draft?.projectMatch === 'conflict' && !job.requirement.confirmedProject) {
+                throw new RequirementWait('project_confirmation', '需求内容与绑定项目可能冲突。仅能在 ' + projectName + ' 执行；如确属该项目，请回复确认项目。');
+              }
+              if (!['match', 'conflict'].includes(draft?.projectMatch)) {
+                throw new RequirementWait('requirement_clarification', '需求范围或口径尚不明确。请补全飞书需求原文，再为修订后的版本发起新话题。');
+              }
+            },
+          });
+          journal.requirements = draft.requirements;
+          journal.casesHash = digest(draft.manifest);
+          journal.caseIndexHash = digest(cases);
+          journal.caseCoverage = coverage;
+          journal.caseCoverageKey = digest([source.hash, journal.caseIndexHash]);
+          await writeJson(indexFile, cases);
+          await save();
+        }
       }
       stage = provided ? '指定用例回读' : '飞书用例发布与回读';
       journal.phase = stage;
@@ -199,7 +220,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         const { receipt } = await readProvidedCases(client, request.caseSource, template.headers);
         if (receipt.fileToken !== provided.receipt.fileToken || receipt.sheetId !== provided.receipt.sheetId
           || receipt.version !== journal.publication?.version) {
-          throw new RequirementWait('publication_version', '覆盖核验期间指定用例表定义发生变化，请核对后重新发起。');
+          throw new RequirementWait('publication_version', '建立索引期间指定用例表定义发生变化，请核对后重新发起。');
         }
         journal.publication.lastVerifiedRevision = receipt.revision;
         await save();
@@ -259,6 +280,32 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       plan: dependencies.plan, project, agentModel: dependencies.agentModel, review: dependencies.review,
       captureRepositories });
 
+    const coverageKey = digest([source.hash, digest(index)]);
+    if (!job.requirement.cleanupOnly && request.caseSource && journal.caseCoverageKey !== coverageKey) {
+      stage = '报告覆盖分析';
+      journal.phase = stage;
+      await progress(stage);
+      let draft;
+      let analysis = 'reviewed';
+      try {
+        draft = sanitized(await (dependencies.generate ?? generateCases)({ source, existingCases: manifest.rows,
+          template: { headers: manifest.headers }, skill: generator, expectedProject: projectName,
+          otherProjects: settings.otherProjects ?? [], codexBin: config.codexBin, cwd: workDir }));
+        if (!Array.isArray(draft?.requirements) || !Array.isArray(draft?.caseRequirements)) analysis = 'unavailable';
+      } catch {
+        // Coverage analysis is advisory. An unavailable model must leave a reportable gap, not invalidate runtime results.
+        analysis = 'unavailable';
+      }
+      if (analysis === 'unavailable' && journal.requirements?.length) {
+        const links = new Map(index.map(item => [item.row, item.requirementIds]));
+        draft = { requirements: journal.requirements, caseRequirements: manifest.rows.map((_, position) => links.get(position + 2) ?? []) };
+      }
+      journal.caseCoverage = analyzeCaseCoverage(draft, source, index, manifest.rows.length, analysis);
+      journal.caseCoverageKey = coverageKey;
+      await save();
+    }
+    const coverage = journal.caseCoverageKey === coverageKey ? journal.caseCoverage : undefined;
+
     if (!settings.adapter && settings.execution?.mode === 'agent' && Object.values(journal.results ?? {}).some(result => result.checkCoverage?.processTotal)) {
       const resources = await requirementResources(settings.environment, { allowUnavailable: true, dataDir: config.dataDir });
       const agent = createRequirementAgent(settings.execution, { workDir, codexBin: config.codexBin, review: dependencies.review });
@@ -276,7 +323,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     await save();
     await progress(stage);
     const { summary, artifact } = await buildRequirementReport({
-      job, journal, source, index, manifest, regression, workDir, reportDir, dataDir: config.dataDir, save,
+      job, journal, source, index, manifest, coverage, regression, workDir, reportDir, dataDir: config.dataDir, save,
       codexBin: config.codexBin, timeZone: settings.timeZone, visualModel: dependencies.visualModel,
     });
     const processChecks = Object.values(journal.processFinalization ?? {}).flatMap(entry => Object.values(entry.checks));
@@ -305,7 +352,10 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       '执行统计：' + summary.total + ' 条，' + summary.pass + ' 通过，' + summary.fail + ' 失败，' + summary.blocked + ' 阻断，'
         + summary.notExecuted + ' 未执行，' + summary.notApplicable + ' 不适用。',
       ...(incompleteFailures ? ['其中 ' + incompleteFailures + ' 条已证明失败仍有未完成检查或执行缺口，分别见缺陷和阻断记录。'] : []),
-      '覆盖：' + journal.requirements.length + ' 项已抽取条款都有用例映射。登记 ' + summary.issues + ' 项问题，详情见测试报告。',
+      ...(coverage ? [coverage.analysis === 'unavailable' ? '覆盖分析未完成，实测记录已保留。'
+        : '覆盖：' + (coverage.rows.length - coverage.unmatchedRows.length) + '/' + coverage.rows.length
+          + ' 条用例关联到条款，' + coverage.uncoveredRequirements.length + ' 项已提炼条款未找到对应验证项。'] : []),
+      '登记 ' + summary.issues + ' 项问题，详情见测试报告。',
       '清理：' + cleanup + '。报告已通过结构与文件校验并生成逐表预览。',
       ...(externalPending ? ['另有 ' + externalPending + ' 项外部回收待核验。业务比较结论已保存，整体验收待外部回执。'] : []),
       ...(processChecks.length ? ['当前过程证明 ' + processProven + '/' + processChecks.length

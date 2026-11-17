@@ -23,7 +23,7 @@ function displayTime(value, timeZone) {
   return p.year + '年' + p.month + '月' + p.day + '日 ' + p.hour + ':' + p.minute + ':' + p.second + '（' + timeZone + '）';
 }
 
-export async function buildRequirementReport({ job, journal, index, manifest, regression, source, workDir, reportDir, dataDir, save, codexBin,
+export async function buildRequirementReport({ job, journal, index, manifest, coverage, regression, source, workDir, reportDir, dataDir, save, codexBin,
   timeZone = 'Asia/Shanghai', visualModel = askNoTools }) {
   const sheetEvidence = [];
   const evidence = async (entries, caseId) => {
@@ -81,6 +81,21 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
   }
   const specialty = { fix_verifications: [], code_chains: [], export_validations: [] };
   const processNotes = [];
+  const rowLinks = new Map(coverage?.rows.map(item => [item.row, item.requirementIds]));
+  const caseReferences = new Map();
+  const outerRows = journal.publication.external === true;
+  const coverageNotes = [];
+  if (coverage) {
+    const file = 'requirement-coverage-' + digest(coverage).slice(0, 24) + '.json';
+    await writeJson(path.join(reportDir, file), coverage);
+    await evidence([{ path: file, type: '需求覆盖分析', sanitized: true, description: '匹配条款、未匹配行号、覆盖缺口与未识别材料' }]);
+    coverageNotes.push(coverage.analysis === 'unavailable' ? '覆盖分析未完成。实际用例结果见验证明细。'
+      : '覆盖分析：' + coverage.unmatchedRows.length + ' 条用例未匹配，' + coverage.uncoveredRequirements.length
+        + ' 项条款未找到对应验证。逐行结果见验证明细，完整分析见证据索引。');
+    if (coverage.rejectedClauses || coverage.rows.some(row => row.rejectedReferences) || !coverage.aligned || coverage.unreadMaterials.length) {
+      coverageNotes.push('无法核对的条款、关联或材料已作为覆盖缺口登记。');
+    }
+  }
   const sourceAttempts = Object.values(journal.sourceAttempts ?? {});
   const reportRepositories = (journal.repositories ?? []).map(({ worktree_commit, worktree_branch, requested, ...repo }) => ({
     ...repo, branch: worktree_branch ?? repo.branch, commit: worktree_commit ?? repo.commit,
@@ -94,6 +109,10 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
     const result = results[item.caseId];
     const process = journal.processFinalization?.[item.caseId];
     const cells = Object.fromEntries(manifest.headers.map((header, col) => [header, manifest.rows[item.row - 2][col]]));
+    const requirementIds = rowLinks.get(item.row) ?? item.requirementIds;
+    const references = [...(outerRows ? ['原用例表第 ' + item.row + ' 行'] : []),
+      ...(requirementIds.length ? requirementIds : ['未匹配需求条款'])];
+    caseReferences.set(item.caseId, references);
     const processProofs = Object.entries(process?.checks ?? {});
     const sources = [];
     for (const attempt of sourceAttempts.filter(entry => entry.caseId === item.caseId)) {
@@ -128,9 +147,9 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
       const finalId = prior && !merge ? issueId + '-' + item.caseId : issueId;
       if (merge) {
         prior.case_ids.push(item.caseId);
-        prior.requirement_ids = [...new Set([...prior.requirement_ids, ...item.requirementIds])];
+        prior.requirement_ids = [...new Set([...prior.requirement_ids, ...requirementIds])];
         prior.evidence_ids.push(...ids);
-      } else issues.push({ ...result.issue, issue_id: finalId, case_ids: [item.caseId], requirement_ids: item.requirementIds,
+      } else issues.push({ ...result.issue, issue_id: finalId, case_ids: [item.caseId], requirement_ids: requirementIds,
         expected_result: result.issue.expected_result || cells['预期结果'], actual_result: result.actual, evidence_ids: ids,
         status: result.status });
       item.issueId = finalId;
@@ -160,9 +179,9 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
       }
     }
     cases.push({
-      case_id: item.caseId, order: item.row, requirement_ref: item.requirementIds, title_type: cells['测试场景'] + ' · ' + cells['用例类型'],
+      case_id: item.caseId, order: item.row, requirement_ref: references, title_type: cells['测试场景'] + ' · ' + cells['用例类型'],
       module: cells['模块'], page_or_target: cells['页面'], preconditions: cells['前置条件'], steps: cells['操作步骤'],
-      expected_result: cells['预期结果'],
+      expected_result: String(cells['预期结果'] ?? '').trim() ? cells['预期结果'] : '原用例未提供明确的预期结果。',
       actual_result: (source.request?.resultFormat === 'binary' ? '用例验收：'
         + (result?.status === '通过' ? '通过' : '不通过') + '。' : '') + (result?.actual ?? unexecutedReason),
       status: result?.status ?? '未执行', evidence_ids: ids, issue_ids: item.issueId ? [item.issueId] : [],
@@ -204,9 +223,11 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
         .map(receipt => ({ name: receipt.title, location: receipt.url, version: receipt.version })),
       code_baselines: reportRepositories.map(repo => ({ name: repo.name, location: repo.path_or_url,
         version: repo.commit, scope: repo.notes })),
-      execution_scope: journal.requirements.map(item => item.id + ' · ' + item.rule),
+      execution_scope: coverage ? ['本轮验证清单共 ' + index.length + ' 项。', ...coverage.requirements
+        .map(item => item.id + ' · ' + item.rule + (coverage.uncoveredRequirements.some(gap => gap.id === item.id) ? '（未发现对应验证项）' : ''))]
+        : journal.requirements.map(item => item.id + ' · ' + item.rule),
       safety_notes: '已绑定非生产资源。业务运行证据仅来自本轮。',
-      method_notes: ['AgentOS Runner ' + runnerVersion + '。被测源码记录及服务运行版本分别核验。',
+      method_notes: ['AgentOS Runner ' + runnerVersion + '。被测源码记录及服务运行版本分别核验。', ...coverageNotes,
         ...(sourceAttempts.length ? ['用例各尝试的源码 HEAD、实际文件及摘要见证据索引。'] : []),
         ...(reportHistory.length ? ['已保留旧报告 ' + reportHistory.join('、') + '。'] : []),
         ...(releaseNotes.length ? ['发布版本证据：' + releaseNotes.join(' ') + ' 详见证据索引。'] : []), ...processNotes,
@@ -218,7 +239,10 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
     },
     cases, issues, blockers, evidence_index: sheetEvidence, repositories: reportRepositories,
     ...specialty, retained_data: cleanup?.retainedData ?? [],
-    prerequisites: Object.values(journal.preparations ?? {}).flatMap(item => item.prerequisites ?? []),
+    prerequisites: Object.values(journal.preparations ?? {}).flatMap(item => (item.prerequisites ?? []).map(record => ({
+      ...record, requirement_ref: Array.isArray(record.case_ids)
+        ? record.case_ids.flatMap(id => caseReferences.get(id) ?? []) : record.requirement_ref,
+    }))),
     mutation_ledger: mutationLedger.length ? mutationLedger : cleanup?.mutationLedger ?? [],
     config_restorations: cleanup?.configRestorations ?? [], cleanup_records: cleanupRecords,
   };
