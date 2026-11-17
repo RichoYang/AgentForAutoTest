@@ -12,7 +12,7 @@ import { ReportDelivery } from '../src/control-plane/report-delivery.js';
 import { handleRequirementMessage, validateRequirementRoutes } from '../src/control-plane/requirement-testing.js';
 import { createRequirementAdapter } from '../src/runner/requirement-adapter.js';
 import { digest, RequirementWait } from '../src/runner/requirement-feishu.js';
-import { command, generatorReferences, readJson, regressionReferences, sourceBaseline, writeJson } from '../src/runner/requirement-files.js';
+import { command, generatorReferences, readJson, regressionReferences, sameRequirementContent, sourceBaseline, writeJson } from '../src/runner/requirement-files.js';
 import { caseReleaseRequirement, matchesCaseRelease, verifyRequirementRelease } from '../src/runner/requirement-release.js';
 import { versionNames } from '../src/runner/requirement-publication.js';
 import { runRequirementTest } from '../src/runner/requirement-test.js';
@@ -22,6 +22,33 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const check = (field, expected, assertion = 1) => ({ field, expected, assertion, operator: 'equals' });
 const budget = { id: 'budget', label: '预算余额', type: 'number', unit: '元', unitField: ['currency'], field: ['balance'] };
 const budgetOutputs = { balance: ['data', 'balance'], currency: ['data', 'currency'], unrelated: ['data', 'unrelated'] };
+
+test('requirement recheck tolerates image metadata only for identical verified image bytes', () => {
+  const img = { token: 'image-a', type: 'img', anchor: 'first-image', sha256: 'a'.repeat(64) };
+  const old = { hash: 'old', revision: 10, xml: '<p id="p">Budget</p>', documents: [
+    { hash: 'original supplementary hash', revision: 12, materials: [img], comments: [], embedded: [],
+      xml: '<img id="first-image" src="image-a" alt="old generated description" />' },
+  ] };
+  const current = structuredClone(old);
+  current.hash = 'new';
+  current.documents[0].hash = 'updated supplementary hash';
+  current.documents[0].xml = '<img id="first-image" src="image-a" alt="new generated description" />';
+  assert.equal(sameRequirementContent(old, current), true);
+  const changed = edits => {
+    const next = structuredClone(current);
+    edits(next.documents[0]);
+    assert.equal(sameRequirementContent(old, next), false);
+  };
+  changed(doc => { doc.materials[0].sha256 = 'b'.repeat(64); });
+  changed(doc => { doc.xml += '<p id="rule">New requirement</p>'; });
+  changed(doc => { doc.xml = doc.xml.replace('id="first-image"', 'id="moved-image"'); });
+  changed(doc => { doc.comments.push({ id: 'new-comment' }); });
+  changed(doc => { doc.embedded.push({ sheet: 'different input' }); });
+  const unavailable = structuredClone(old);
+  unavailable.documents[0].materials = [];
+  current.documents[0].materials = [];
+  assert.equal(sameRequirementContent(unavailable, current), false);
+});
 
 test('requested source errors name the repository and distinguish denied and unavailable origins', async t => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), 'agentos-required-origin-')));

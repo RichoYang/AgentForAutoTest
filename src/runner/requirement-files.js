@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, rename, realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 import { digest, RequirementWait } from './requirement-feishu.js';
 import { git as runGit } from './source-sync.js';
 
@@ -129,6 +129,24 @@ function markdownSections(name, body, includeIntro = false) {
 }
 
 export const supplementaryAnchor = (document, block) => 'supplement-' + digest([document.id, block]).slice(0, 24);
+
+function comparableRequirement(source) {
+  const { hash, legacyHash, xml, documents, ...data } = source;
+  const verifiedImages = new Set((source.materials ?? []).filter(material =>
+    ['img', 'image'].includes(material.type) && /^[a-f0-9]{64}$/.test(material.sha256 ?? '')).map(material => material.token));
+  const comparableXml = xml?.replace(/<(?:img|image)\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/gi, tag => {
+    const attributes = /\s+([\w:-]+)=(?:"([^"]*)"|'([^']*)')/g;
+    const image = [...tag.matchAll(attributes)].find(([, name]) => /^(?:src|token|app-token|file-token)$/i.test(name));
+    // The raw image identity and byte digest are still compared in data.materials.
+    if (!image || !verifiedImages.has(image[2] ?? image[3])) return tag;
+    return tag.replace(attributes, (attribute, name) => name.toLowerCase() === 'alt' ? '' : attribute);
+  });
+  return { ...data, xml: comparableXml, ...(documents ? { documents: documents.map(comparableRequirement) } : {}) };
+}
+
+export function sameRequirementContent(previous, current) {
+  return previous.hash === current.hash || isDeepStrictEqual(comparableRequirement(previous), comparableRequirement(current));
+}
 
 export async function loadSkill(spec, expectedName, relatives) {
   if (!spec || !path.isAbsolute(spec.path) || !/^[a-f0-9]{64}$/.test(spec.sha256)) {

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { requirementFeishu, fileToken, readCaseTemplate, RequirementWait, digest } from './requirement-feishu.js';
-import { generatorReferences, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sourceBaseline, unavailableRequirementSources, writeJson } from './requirement-files.js';
+import { generatorReferences, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sameRequirementContent, sourceBaseline, unavailableRequirementSources, writeJson } from './requirement-files.js';
 import { analyzeCaseCoverage, generateCases, generateValidatedCases, indexProvidedCases } from './requirement-generation.js';
 import { reviseMaterialCases } from './requirement-material-revision.js';
 import { publishCases, readProvidedCases } from './requirement-publication.js';
@@ -57,9 +57,10 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     }
   };
   const readSource = url => readRequirementWithInputs(client, url, settings.inputDirectories, workDir, { ...settings, checkDocument });
-  let requestedSources;
+  let requestedSources, synchronizedThisRun;
   const captureRepositories = () => request.branch
-    ? (requestedSources ??= sourceBaseline(project, request.branch)) : sourceBaseline(project);
+    ? (requestedSources ??= sourceBaseline(project, request.branch).then(repositories => (synchronizedThisRun = repositories)))
+    : sourceBaseline(project);
   let stage = '需求读取';
   try {
     if (options?.localSupplement && !job.requirement.cleanupOnly) {
@@ -124,7 +125,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         source = current;
         if (!revision) await writeJson(sourceFile, source);
       }
-      if (source && current.hash !== source.hash) {
+      if (source && !sameRequirementContent(source, current)) {
         throw new RequirementWait('requirement_version', '需求正文或嵌入表已变化（原版本 ' + source.revision + '，当前版本 ' + current.revision + '）。已保留原用例和证据。请确认受影响范围后为新版本发起独立话题；如有待清理数据，可在原话题回复恢复清理。');
       }
       if (!source) {
@@ -215,7 +216,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       await progress(stage);
       const manifest = revision?.manifest ?? await readJson(casesFile);
       if (!revision && digest(manifest) !== journal.casesHash) throw new RequirementWait('publication_version', '本轮本地用例校验摘要不符。');
-      if ((await readSource(url.href)).hash !== source.hash) {
+      if (!sameRequirementContent(source, await readSource(url.href))) {
         throw new RequirementWait('requirement_version', '用例准备期间需求版本发生变化，请按新版本重新发起。');
       }
       if (provided) {
@@ -386,7 +387,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       cleanupVerified: Boolean(restored || journal.cleanup?.verified), interruption: journal.waitCode });
     const finalMessage = [request.resultFormat === 'binary' ? '整体验收：不通过（验收未完成）。' : '',
       stage + '暂挂。' + (known ? error.message : '后台执行中断，请管理员检查本轮检查点。'),
-      known && error.repositorySync ? '' : unavailableRequirementSources(journal.repositories),
+      unavailableRequirementSources(synchronizedThisRun),
       journal.publication?.verified ? (journal.publication.external ? '已回读指定用例：' : '已发布并回读用例：') + journal.publication.url
         : journal.providedCases?.verified ? '已读取指定用例表，共 ' + journal.providedCases.count + ' 条。' : '',
       '已记录 ' + Object.keys(journal.results ?? {}).length + ' 条用例结果。清理状态：' + cleanup + '。'].filter(Boolean).join('\n');
