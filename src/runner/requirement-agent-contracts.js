@@ -18,12 +18,15 @@ const selection = { observationId: string, field, identity, calculation, sourceR
   snapshot: { type: 'boolean' }, constraints: array(object({ observationId: string, field,
     operator: enumeration('equals', 'gt', 'gte', 'lt', 'lte'), expected: {} }, ['observationId', 'field', 'operator', 'expected'])) };
 const pathTemplate = string; // Dynamic segments use /resource/{inputName}, never a whole unvalidated route.
+const upload = object({ path: string, sha256: string, name: string, type: string, field: string }, ['path', 'sha256']);
 const databaseTable = object({ database: string, table: string, role: enumeration('query', 'subject') }, ['database', 'table', 'role']);
 const spec = object({ resource: string, kind: enumeration('http', 'database', 'browser'), access: enumeration('read', 'create', 'update', 'delete', 'trigger'),
   path: pathTemplate, method: string, body: {}, query: map, authenticated: { type: 'boolean' }, channel: enumeration('api', 'message', 'job', 'database'),
   queryEvidence: array(string, 1), requestCorrelation: { type: 'boolean' },
+  multipart: object({ fields: map, files: array(map, 1) }, ['files']),
   database: string, sql: string, params: array({}), table: string, tables: array(databaseTable, 1), values: map, where: map, expectedRows: { type: 'integer', minimum: 1 },
-  action: enumeration('click', 'goto'), selector: string, effect: object({ path: pathTemplate, method: string, body: {} }, ['path', 'method']) }, ['resource', 'kind', 'access']);
+  action: enumeration('click', 'goto', 'upload'), selector: string, file: map,
+  effect: object({ path: pathTemplate, method: string, body: {}, multipart: object({ fields: map, files: array(map, 1) }, ['files']) }, ['path', 'method']) }, ['resource', 'kind', 'access']);
 const measurementSelection = { ...selection, sampleSubject: map };
 const measurement = object(measurementSelection, ['observationId']);
 const beforeAction = object({ operation: operationNameSchema, input: map }, ['operation']);
@@ -62,12 +65,17 @@ const invocation = { operation: string, input: map, subject: map, ...page };
 const readiness = object({ field, operator: enumeration('equals', 'not_equals'), value: {},
   timeoutMs: { type: 'integer', minimum: 1 } }, ['field', 'operator', 'value']);
 const mutation = object({ ...invocation, id: string, purpose: enumeration('prepare', 'scenario'), businessKey: string,
+  sampleId: string, nodeId: string,
   ownership: object({ field, value: {} }, ['field', 'value']), verify: object({ operation: string, input: map, stateFields: array(field, 1), before: conditions, after: conditions, ready: readiness }, ['operation', 'before', 'after']),
   restore: object({ operation: string, input: map }, ['operation']), cleanupAction: string, shared: { type: 'boolean' } },
 ['id', 'purpose', 'operation', 'businessKey', 'ownership', 'verify', 'restore', 'cleanupAction']);
 export const requirementToolSchemas = {
+  sample: object({ action: enumeration('register', 'inspect', 'retain', 'release'), id: string,
+    originMutationKey: string,
+    caseIds: array(string, 1), observationId: string, keyField: field, stateField: field, budgetField: field,
+    cleanupOwner: string, reason: string, continueAt: string, nextCondition: string, owner: string }, ['action', 'id']),
   connection: object({ resource: string, database: string, identityOnly: { type: 'boolean' } }, ['resource']),
-  source: object({ action: enumeration('files', 'search', 'read', 'refs', 'history', 'show'), path: { type: 'string' }, pattern: string,
+  source: object({ action: enumeration('files', 'search', 'read', 'refs', 'history', 'show', 'runtime'), observationId: string, field, path: { type: 'string' }, pattern: string,
     start: { type: 'integer', minimum: 1 }, end: { type: 'integer', minimum: 1 }, ref: string, file: string, ...page }, ['action']),
   schema: object({ resource: string, database: string, table: string, connectionDatabase: string }, ['resource']),
   read_sql: object({ resource: string, database: string, sql: string, params: array({}), subject: map, ...page }, ['resource', 'sql']),
@@ -78,7 +86,7 @@ export const requirementToolSchemas = {
     object({ evidenceRef: string, field, ...page }, ['evidenceRef'])] },
   alias: object({ alias: string, value: {}, observationId: string, field, purpose: string }, ['alias', 'value', 'observationId', 'field', 'purpose']),
   mutate: mutation,
-  browser: object({ resource: string, action: enumeration('goto', 'inspect', 'fill', 'click', 'select', 'check', 'wait', 'observe', 'fault', 'clear_fault'),
+  browser: object({ resource: string, action: enumeration('goto', 'inspect', 'fill', 'click', 'select', 'check', 'wait', 'observe', 'fault', 'clear_fault', 'upload'), file: upload,
     path: string, selector: string, value: {}, subject: map, ready: browserReady, record: domRecord,
     fields: { type: 'object', additionalProperties: object({ selector: string, read: enumeration('text', 'input', 'visible', 'count', 'attribute'), attribute: string }, ['selector', 'read']) },
     operation: string, delayMs: { type: 'number', minimum: 0 }, abort: { type: 'boolean' }, status: { type: 'integer' }, body: {} }, ['resource', 'action']),

@@ -25,7 +25,7 @@ export async function requirementAgentModel({ cwd, codexBin, instructions, tools
           const value = await call(params.tool, params.arguments, params.callId);
           return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(value) }] };
         } catch (error) {
-          if (error.code === 'agent_no_progress') { fatalError = error; turnAbort?.abort(); }
+          if (['agent_no_progress', 'sidebar_handoff'].includes(error.code)) { fatalError = error; turnAbort?.abort(); }
           return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: error.code ?? error.name,
             message: error.safeMessage ?? '工具调用未完成，查看已保存的诊断并核对副作用后修正参数。', gap: error.gap }) }] };
         }

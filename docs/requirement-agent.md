@@ -1,5 +1,7 @@
 # 工具型需求测试专员
 
+1.65.0 增加 `sample` 生命周期工具、`source.runtime` 网关来源、浏览器/HTTP multipart 和可信宿主交接。配置 `logins.<资源名>` 可为 TPM、OA 分别登录，`login` 保留兼容。配置及恢复步骤见[跨系统需求测试](requirement-chain.md)。
+
 ## 配置和入口
 
 在项目的 `requirementTest.execution` 中设置 `mode: "agent"`，重启对应实例。沿用项目 `repoPath`、非生产 `environment` 资源、SIT/UAT 别名、凭据来源及操作权限。无需为每个需求手工补齐接口目录。

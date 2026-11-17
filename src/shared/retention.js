@@ -24,6 +24,8 @@ export function pruneState(state,{now=Date.now(),days=30,protectIds=[]}={}){
  // No question means no group, rather than joining all unscoped history together.
  groups.delete('q:');
  for(const j of jobs)if(!doneJobs.has(j.status)||j.lease||!old(j))keep.add(j.id);
+ for(const j of jobs)if(j.result?.requirementSummary?.retainedSamples>0)keep.add(j.id);
+ for(const d of Object.values(state.requirementDeliveries??{}))if(!d.verified)keep.add(d.jobId);
  for(const t of turns)if(!doneTurns.has(t.status)||!old(t))keep.add(t.id);
  for(const q of questions)if(!old(q))keep.add(q.id);
  const aliases=new Map([...allIds].map(id=>[id,new Set([id])]));
@@ -41,6 +43,7 @@ export function pruneState(state,{now=Date.now(),days=30,protectIds=[]}={}){
   if(removedIds.has(bound)||old(c)&&![...linked].some(id=>keep.has(id))){delete state.cardMessages[k];counts.related++;}
  }
  for(const [k,d]of Object.entries(state.reportDeliveries??{}))if(removedIds.has(d.sourceJobId)||removedIds.has(d.questionId)){delete state.reportDeliveries[k];counts.related++;}
+ for(const [k,d]of Object.entries(state.requirementDeliveries??{}))if(removedIds.has(d.jobId)){delete state.requirementDeliveries[k];counts.related++;}
  const liveRunners=new Set(state.jobs.map(j=>j.lease?.runnerId).filter(Boolean));
  for(const [k,r]of Object.entries(state.runners??{}))if(old(r)&&!liveRunners.has(k)){delete state.runners[k];counts.related++;}
  for(const key of ['environmentEnrollments','controlReceipts','cardCallbackChecks'])for(const [k,r]of Object.entries(state[key]??{})){

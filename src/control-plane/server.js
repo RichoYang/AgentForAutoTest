@@ -461,6 +461,13 @@ async function route(context) {
       if (job.workflow !== 'requirement_test' || body.result.requirementReport.kind !== 'requirement-xlsx'
         || body.result.outcome !== 'ready') throw new Error('Invalid requirement report registration');
       await reportFile(config.dataDir, job.id, body.result.requirementReport, { includeContent: false });
+      if (body.result.requirementDelivery) {
+        const bundle = body.result.requirementDelivery;
+        if (bundle.text !== body.result.finalMessage || !Number.isSafeInteger(bundle.version) || bundle.version < 1
+          || !Array.isArray(bundle.artifacts) || !bundle.artifacts.some(file => file.id === body.result.requirementReport.id)
+          || !bundle.artifacts.some(file => file.kind === 'requirement-evidence')) throw new Error('Invalid requirement delivery bundle');
+        for (const file of bundle.artifacts) await reportFile(config.dataDir, job.id, file, { includeContent: false });
+      }
     }
     if (job.workflow === 'requirement_test' && ['cancelled', 'failed'].includes(body.type)) {
       const checkpoint = await readFile(path.join(config.dataDir, 'requirement-tests', job.id, 'journal.json'), 'utf8')
@@ -694,6 +701,7 @@ export async function notifyJobEvent(context, { job, event }) {
     await sendAsJobAgent(context, job, `${job.id} 已开始：${stageLabel(job.stage)}`);
   }
   if (event.type === 'completed') {
+    if (job.result?.requirementDelivery && context.reports) return; // The durable outbox owns the complete conclusion.
     const conclusion = resultSummary(job.result?.summary || job.result?.finalMessage) || '执行器未返回文字结论，请查看任务记录。';
     const status = job.status === 'awaiting_clarification'
       ? '当前阶段等待补充信息，尚未通过。可直接回复具体补充内容。'

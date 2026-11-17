@@ -30,6 +30,7 @@ plan 检查按原预期编号逐项列全，UI 断言须 browser.observe 的真�
 可恢复的参数、规划、查询、页面问题持续修正。有新证据时没有整任务时长或轮数上限。真实外部阻塞须说明具体资源、操作、已尝试替代路径及解除条件。最终用 finish 提交事实摘要；没有 finish 回执不得宣布用例完成。程序依据实际断言和台账判定，并负责清理与回读。`;
 
 const descriptions = {
+  sample: '共享样本生命周期。register:{id,caseIds,observationId,keyField,stateField,budgetField,cleanupOwner}从当前真实观测保存单号、初态及预算快照；inspect:{id}读取；retain:{id,reason,continueAt?,nextCondition,owner}记录跨日或外部条件；release:{id,observationId,stateField}以新回读解除保留。mutate 附 sampleId,nodeId 绑定共享节点，不能按用例提前清理。',
   connection: '核验资源目录中的已绑定资源。args:{resource,database?}，仅 MySQL 可带 database 核验选定的库。读取连接、已配置登录的公开身份或有限 MySQL/管理接口元数据。不读取业务对象、不触发任务、不暴露凭据。入口、账号和连接策略由绑定提供。',
   source: '读取本项目源码。args: {action:"files"|"search"|"read"|"refs"|"history"|"show",path:"相对项目根目录",pattern?,start?,end?,offset?,limit?,ref?,file?}。refs/history/show 的 path 为子仓目录，show 使用 ref 和仓内 file，原样读取指定分支而不切换或覆盖用户文件。返回 sourceRef；register 必须引用已读取的源码。先读适用 AGENTS.md。可分页，不限总调查轮数。',
   schema: '读取授权 MySQL 的数据库、表、列、索引及建表定义。args:{resource,database?,table?}。仅 resource 时发现可见库；结合需求、源码和数据源配置选择库，不能只凭同名表或连接成功。给定 table 时须填写 database。跨库核对分别选库，使用同一业务键取证。数据库写入前必须调用本工具。',
@@ -46,6 +47,9 @@ const descriptions = {
   concurrent: '并发执行多项独立登记调用。args:{actions:[{tool:"mutate"|"observe",args:{对应工具参数}}]}。每项 mutate 必须具有独立稳定 id 和自己的回读/恢复，全部回执分别保存；共享资源的竞态断言应再独立查询最终状态。浏览器操作不能在同一页面并发。',
   cleanup: '按本用例实际变更台账逆序恢复并回查。args:{}。测试场景完成后使用本工具清理，不要为清理再创建一个新的删除/恢复变更。程序也会在finish、异常和恢复时执行此流程。返回逐项实际回执和未决记录；未核验恢复不能开始下一用例。',
 };
+descriptions.source += ' 网关/运行配置可用 action=runtime,observationId,field:[准确字段] 将本次登记只读操作的观测提升为来源引用；注册时必须同时引用业务实现源码，运行配置会再次回读。';
+descriptions.register += ' HTTP multipart:{fields:{字段:值},files:[{field,path,sha256,name?,type?}]} 支持导入，文件仅来自任务目录或项目 uploadDirectories；不能同时提供 body。';
+descriptions.browser += ' action=upload,selector,file:{path,sha256,name?,type?} 选择文件；自动上传触发的写请求仍需正式登记并使用 mutate。codex_sidebar 使用同任务交接，不能改用 Chromium。';
 descriptions.plan += ' args:{action:"inspect"}回读当前冻结计划、断言及修正历史；args:{identityCorrections:[{checkId,subject}]}仅修正未比较检查的主体绑定，无需重写大计划，不能包含其他字段。';
 descriptions.plan += ' 原文约束准备或场景请求次数时，为execution_evidence过程检查加入requestProof:{scope:"runner"|"service",phase:"prepare"|"scenario",resource,requests:[{method,path,count}]}，列出要求一次及明确禁止的路径（count:0）。只要求本Runner调用时用runner，程序记录实际传输尝试，含无回执和非成功响应。原文明确要求独立服务记录才用service，并加audit:{operation,correlation}。先登记真实服务只读GET，传入mode/correlation/from/through，再于相关动作前调用args:{action:"process_preflight",check:同一过程检查}探测当前权限和采集能力。GET的JSON契约为{source,correlation,from,through,complete:true,entries:[{id,at,correlation,method,path}]}；from/through必须覆盖实际请求窗口。真正的窗口内容在动作后由Runner自动获取。';
 descriptions.assert += ' 字段语义须由实际查询/DOM/源码证明，可用sourceRefs:[已读源码引用]补证。不能用元素数量当金额或把已申请当剩余。差额可用calculation:{terms:[{field:[实际路径],sign:1},{field:[实际路径],sign:-1}]}替代field；程序按真实操作数计算，不改预期。页面要求显示某值时，计算出该值不能替代展示。缺失页面字段使用text/input读取并引用实际路径；缺失会明确记录null/缺失，不能改用count=0冒充金额。';
@@ -177,6 +181,20 @@ export function createRequirementAgent(config, options) {
   }
   const context = scope => ({ ...scope, state, saveState });
   async function revalidateSource(scope, old, sourceRef, purpose, failure) {
+    if (old.origin?.kind === 'runtime') {
+      const operation = state.operations[old.operation];
+      if (!operation || operation.access !== 'read' || digest(operation) !== old.operationHash
+        || scope.resourceIdentity(operation.resource) !== old.resourceIdentity) throw agentError(failure);
+      const runtime = createAgentResources(config, context(scope));
+      try {
+        const data = await scope.useRead(operation.resource, resource => runtime.performSpec(operation, old.input, resource));
+        const selected = observationAt(data, old.field);
+        const text = typeof selected === 'string' ? selected : JSON.stringify(selected);
+        if (!text || digest(text) !== old.sha256) throw agentError(failure);
+        scope.checkOutput(text);
+        return old;
+      } finally { await runtime.close(); }
+    }
     const fresh = await readSource(scope.sourceRoot, { action: old.file ? 'show' : 'read', path: old.path || '.',
       ...(old.file ? { file: old.file, ref: old.ref } : {}), start: old.start, end: old.end ?? old.start + 199 }, scope.repositories);
     const changed = fresh.sha256 !== old.sha256 || old.contentSha256 && fresh.contentSha256 !== old.contentSha256
@@ -452,8 +470,11 @@ export function createRequirementAgent(config, options) {
       const current = state.cases[key] ??= { aliases: {}, assertions: {}, observations: [], errors: [], startedAt: new Date().toISOString() };
       const priorMutations = scope.getMutations?.() ?? scope.mutations ?? [];
       const mutationPrefix = () => `${scope.attempt ?? 1}:${current.epoch ? 'epoch' + current.epoch + ':' : ''}`;
+      const currentMutation = record => record.intent?.id?.startsWith(mutationPrefix())
+        || record.intent?.sampleId && (record.caseId === scope.item.caseId && record.attempt === (scope.attempt ?? 1)
+          || Boolean(current.actionBoundaries?.[record.intent.id]));
       if (!current.requestTrace && !current.plan && !current.lastPreparationAt
-        && !priorMutations.some(item => item.intent?.id?.startsWith(mutationPrefix()))) {
+        && !priorMutations.some(currentMutation)) {
         current.requestTrace = [];
         current.requestTraceVersion = 3;
       }
@@ -592,6 +613,8 @@ export function createRequirementAgent(config, options) {
             || state.operations[action.args?.operation]?.kind === 'browser')) throw agentError('Concurrent actions must be independent API/database calls');
           const writes = args.actions.filter(action => action.tool === 'mutate').map(action => action.args.id);
           if (new Set(writes).size !== writes.length) throw agentError('Concurrent mutation ids must be unique');
+          const samples = args.actions.filter(action => action.tool === 'mutate' && action.args.sampleId).map(action => action.args.sampleId);
+          if (new Set(samples).size !== samples.length) throw agentError('Operations on the same sample must be sequential');
           const results = await Promise.allSettled(args.actions.map(action => call('test_' + action.tool, { args: action.args }, 'concurrent-' + randomUUID())));
           const stalled = results.find(result => result.status === 'rejected' && result.reason.code === 'agent_no_progress');
           if (stalled) throw stalled.reason;
@@ -599,12 +622,39 @@ export function createRequirementAgent(config, options) {
             : { index: i, error: result.reason.safeMessage ?? result.reason.code ?? result.reason.name, gap: result.reason.gap });
         }
         if (name === 'source') {
-          const result = scope.checkOutput(sanitized(await readSource(scope.sourceRoot, args, scope.repositories)));
+          let result;
+          if (args.action === 'runtime') {
+            const observation = state.observations[args.observationId];
+            const operation = state.operations[observation?.input?.operation];
+            if (!current.observations.includes(args.observationId) || !operation || operation.access !== 'read'
+              || !args.field?.length) throw agentError('Runtime source requires a current registered read observation and exact field');
+            const selected = observationAt(observation.data, args.field);
+            const text = typeof selected === 'string' ? selected : JSON.stringify(selected);
+            if (!text) throw agentError('Runtime source field is absent');
+            scope.checkOutput(text);
+            result = { text, sha256: digest(text), origin: { kind: 'runtime', observationId: args.observationId,
+              resource: operation.resource, environment: scope.environment }, operation: observation.input.operation,
+              operationHash: digest(operation), input: observation.input.input ?? {}, field: args.field,
+              resourceIdentity: scope.resourceIdentity(operation.resource) };
+          } else result = scope.checkOutput(sanitized(await readSource(scope.sourceRoot, args, scope.repositories)));
           const sourceRef = 'SRC-' + digest(result).slice(0, 24);
           result.readAt = state.sources[sourceRef]?.readAt ?? new Date().toISOString();
           await scope.recordSource?.(sourceRef, result, 'read', 'observed');
           state.sources[sourceRef] = result; await saveState();
           return { sourceRef, ...result };
+        }
+        if (name === 'sample') {
+          if (!scope.sampleLifecycle) throw agentError('Sample lifecycle is unavailable');
+          if (args.action === 'inspect') return scope.sampleLifecycle.get(args.id);
+          if (args.action === 'retain') return scope.sampleLifecycle.retain(args.id, args);
+          const observation = knownObservation(args.observationId);
+          const state = observationAt(observation.data, args.stateField);
+          if (args.action === 'release') return scope.sampleLifecycle.release(args.id, { actualState: state, evidence: [observation.evidence] });
+          return scope.sampleLifecycle.register({ id: args.id, caseIds: args.caseIds,
+            ...(args.originMutationKey ? { originMutationKey: args.originMutationKey, businessKeyField: args.keyField } : {}),
+            businessKey: observationAt(observation.data, args.keyField), initialState: state,
+            budgetSnapshot: observationAt(observation.data, args.budgetField), initialEvidence: [observation.evidence],
+            resource: observation.input.resource, cleanupOwner: args.cleanupOwner, restoreValue: state });
         }
         if (name === 'schema') {
           const data = await runtime.schema(args);
@@ -639,6 +689,7 @@ export function createRequirementAgent(config, options) {
           }
           const sources = (args.sourceRefs ?? []).map(ref => state.sources[ref]);
           if (!sources.length || sources.some(source => !source?.text)) throw agentError('Read concrete source lines before registering an operation');
+          if (sources.every(source => source.origin?.kind === 'runtime')) throw agentError('Runtime routing evidence must accompany concrete implementation source');
           if (spec.kind === 'http' && (!spec.path?.startsWith('/') || spec.path.startsWith('//'))) throw agentError('HTTP operation needs a resource-relative path');
           if (spec.kind === 'http' || spec.kind === 'browser' && spec.action === 'goto') validateRouteTemplate(spec.path, '$.spec.path');
           if (spec.kind === 'browser') validateRouteTemplate(spec.effect?.path, '$.spec.effect.path');
@@ -737,7 +788,8 @@ export function createRequirementAgent(config, options) {
             }), preparationCompletedAt: current.lastPreparationAt, planAt: current.planAt };
           }
           if (!args.id || !args.cleanupAction || !args.ownership?.field || args.ownership.value !== args.businessKey) throw agentError('Mutation needs stable id, ownership readback field and restoration');
-          const mutationId = mutationPrefix() + args.id;
+          const mutationId = args.sampleId ? 'sample:' + args.sampleId + ':' + args.nodeId : mutationPrefix() + args.id;
+          if (args.sampleId && (!args.nodeId || !scope.sampleLifecycle?.get(args.sampleId))) throw agentError('Shared mutation needs a sample and node');
           const previous = (scope.getMutations?.() ?? scope.mutations).find(item => item.intent.id === mutationId);
           const requestPreflights = Object.values(current.requestPreflights ?? {}).filter(({ check }) => {
             const { phase, resource, audit } = check.requestProof;
@@ -771,6 +823,7 @@ export function createRequirementAgent(config, options) {
             restore: resolveInput(restoreSpec, args.restore.input ?? {}),
             sources: Object.values(state.sources).filter(source => source.text), schemas: state.schemas });
           const intent = { id: mutationId, agent: true, target: args.operation, object: args.operation, purpose: args.purpose,
+            ...(args.sampleId ? { sampleId: args.sampleId, nodeId: args.nodeId } : {}),
             resource: spec.resource, operation: spec.access, businessKey: args.businessKey, ownership: args.ownership,
             snapshot, stateFields: args.verify.stateFields, beforeHash: snapshotHash(snapshot, args.verify.stateFields), operationSpec: spec, input: args.input ?? {}, verifySpec, verifyInput: args.verify.input ?? {},
             before: args.verify.before, after: args.verify.after, ...(args.verify.ready ? { ready: args.verify.ready } : {}), restoreSpec, restoreInput: args.restore.input ?? {},
@@ -806,8 +859,9 @@ export function createRequirementAgent(config, options) {
             current.lastPreparationAt = new Date().toISOString();
             current.preparationVersion = (current.preparationVersion ?? 0) + 1;
           }
-          return pageData(await observe(evidenceChannel(verifySpec), receipt.observed, { ...intent.verifyInput, resource: verifySpec.resource },
-            args.subject ?? {}, undefined, { role: 'mutation_readback', purpose: args.purpose }, receipt.requestIds), args);
+          return { ...pageData(await observe(evidenceChannel(verifySpec), receipt.observed, { ...intent.verifyInput, resource: verifySpec.resource },
+            args.subject ?? {}, undefined, { role: 'mutation_readback', purpose: args.purpose }, receipt.requestIds), args),
+            mutationKey: args.sampleId ? mutationId : scope.item.caseId + ':' + mutationId };
         }
         if (name === 'plan') {
           if (args.action === 'process_preflight') {
@@ -825,7 +879,7 @@ export function createRequirementAgent(config, options) {
             }
             validateRequestProof(check, scope);
             if (check.requestProof?.scope !== 'service' || !originalLines[check.line - 1]) throw agentError('Process preflight needs an original line and a service request proof');
-            if (current.plan || (scope.getMutations?.() ?? scope.mutations ?? []).some(item => item.intent.id?.startsWith(mutationPrefix())
+            if (current.plan || (scope.getMutations?.() ?? scope.mutations ?? []).some(item => currentMutation(item)
               && item.intent.purpose === check.requestProof.phase && item.intent.resource === check.requestProof.resource
               && item.intent.businessKey === check.requestProof.audit.correlation)) {
               throw agentError('Independent request evidence must be preflighted before freezing the plan and sending the related side effect; restore and repeat if already sent');
@@ -1182,7 +1236,7 @@ export function createRequirementAgent(config, options) {
           if(stageProof)binding.pageStageProof=stageProof;
           binding.executionContext = { planAt: current.planAt, preparationCompletedAt: current.lastPreparationAt,
             scenarioStartedAt: current.scenarioStartedAt,
-            mutations: (scope.getMutations?.() ?? scope.mutations ?? []).filter(record => record.intent?.id?.startsWith(mutationPrefix())) };
+            mutations: (scope.getMutations?.() ?? scope.mutations ?? []).filter(currentMutation) };
           if (check.channel === 'page') binding.pageTimeline = current.observations.map(id => state.observations[id])
             .filter(record => record.channel === 'page' && record.at <= observation.at)
             .map(record => ({ observationId: record.observationId, at: record.at, action: record.input.action,
@@ -1373,7 +1427,7 @@ export function createRequirementAgent(config, options) {
             registeredOperations: Object.entries(state.operations).filter(([, spec]) => spec.resource === check.requestProof?.resource)
               .map(([name, spec]) => ({ name, spec, evidence: state.operationProofs[name]?.evidence })),
             planAt: current.planAt, scenarioStartedAt: current.scenarioStartedAt, preflights: current.preflights,
-            mutations, currentMutationKeys: mutations.filter(record => record.intent?.id?.startsWith(mutationPrefix())).map(record => record.key),
+            mutations, currentMutationKeys: mutations.filter(currentMutation).map(record => record.key),
             cleanup: current.cleanup, coverage: checkCoverage(current), reportContract: 'Runner fixed 15 sheets; generated and verified after case cleanup, not yet claimed complete' };
           const reviewed = await review(scope, 'process', payload);
           current.processProofs ??= {}; current.processProofs[check.id] = { at: new Date().toISOString(), evidence: reviewed.evidence,
@@ -1405,6 +1459,12 @@ export function createRequirementAgent(config, options) {
           finished = { status, actual: args.actual, assertions, processChecks: current.processProofs ?? {}, evidence: [end, ...real.flatMap(item => [item.evidence, ...(item.data.screenshot ? [item.data.screenshot] : [])]), ...assertions.map(item => item.evidence), ...(current.cleanup?.evidence ?? [])],
             ...(args.blocker ? { blocker: { ...args.blocker, category: external ? '外部资源' : '执行能力或前置证据不足' } } : {}), ...(failures.length ? { issue: { severity: '一般', classification: args.classification ?? '产品',
               problem_business_impact: args.actual, expected_result: scope.row[scope.headers.indexOf('预期结果')] } } : {}) };
+          if (real.some(item => item.data.provenance === 'controlled' || item.data.simulatedFault || item.data.simulated)) {
+            finished.validationScope = 'controlled';
+            if (config.validationMode !== 'controlled' && finished.status === '通过') {
+              finished.status = '阻断'; finished.blocker = { dependency: '真实 UAT 运行证据', required_action: '使用真实宿主及测试系统重新取证；受控替身不能代替 UAT。' };
+            }
+          }
           if (finished.issue) finished.issue.classification = ({ '产品': '产品缺陷', '配置': '配置问题', '部署': '部署问题', '数据': '数据问题' })[finished.issue.classification] ?? finished.issue.classification;
           finished.checkCoverage = checkCoverage(current);
           const externalPending = processChecks.filter(check => check.kind === 'external_cleanup' && !current.processProofs?.[check.id]?.proven);
@@ -1433,6 +1493,7 @@ export function createRequirementAgent(config, options) {
           await saveState(); await scope.progress?.('用例 ' + scope.item.caseId + ' · ' + tool, undefined, undefined, summary);
           return result;
         } catch (error) {
+          if (error.code === 'sidebar_handoff') { error.safeMessage = error.message; throw error; }
           if (!error.safeMessage && typeof error.sqlMessage === 'string') {
             try { error.safeMessage = scope.checkOutput(sanitized(error.sqlMessage)); } catch { /* Keep credential-bearing diagnostics private. */ }
           }

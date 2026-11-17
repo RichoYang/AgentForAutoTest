@@ -97,7 +97,8 @@ function inspectBinding(environment, binding, sections) {
   const parts = typeof binding?.section === 'string' ? binding.section.toLowerCase().split('.') : [];
   const tier = environment.name.toLowerCase();
   const aliases = (environment.aliases ?? []).filter(alias => ['SIT', 'UAT'].includes(alias)).map(alias => alias.toLowerCase());
-  if (parts[0] !== environment.platform.toLowerCase() || ![tier, ...aliases].includes(parts[1])) {
+  const platform = (binding?.platform ?? environment.platform).toLowerCase();
+  if (parts[0] !== platform || ![tier, ...aliases].includes(parts[1])) {
     return blocked('binding_mismatch', '配置节不属于已绑定项目与 SIT/UAT');
   }
   const entry = sections.get(binding.section.toLowerCase());

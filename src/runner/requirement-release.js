@@ -2,6 +2,21 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { readJson } from './requirement-files.js';
 import { digest } from './requirement-feishu.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { realpath } from 'node:fs/promises';
+
+export async function commitContains(repository, required, deployed, sourceRoot) {
+  if (!commit.test(required ?? '') || !commit.test(deployed ?? '') || !repository?.path_or_url || !sourceRoot) return false;
+  try {
+    const root = await realpath(sourceRoot), folder = await realpath(repository.path_or_url);
+    const relative = path.relative(root, folder);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+    const git = promisify(execFile);
+    await git('git', ['-C', folder, 'merge-base', '--is-ancestor', required, deployed], { windowsHide: true });
+    return true;
+  } catch { return false; }
+}
 
 const hash = /^[a-f0-9]{64}$/;
 const commit = /^[a-f0-9]{40,64}$/;
@@ -50,8 +65,17 @@ export async function verifyRequirementRelease(config, scope, inspectArtifact, r
     } catch {
       // The source may be unavailable even when the project test resources are authorized.
     }
-    const sourceMatches = item.commit && scope.repositories?.some(repo => repo.name === binding.repository && repo.commit === item.commit);
-    item.verified = Boolean(sourceMatches && item.observed && item.observed === item.expected);
+    const repository = scope.repositories?.find(repo => repo.name === binding.repository);
+    const head = repository?.requested?.commit ?? repository?.commit;
+    const sourceMatches = item.commit && repository && (head === item.commit
+      || await commitContains(repository, item.commit, head, scope.sourceRoot));
+    item.source = repository ? { branch: repository.requested?.branch ?? repository.branch, commit: head, repository: repository.name } : null;
+    const required = [...new Set([...(binding.requiredCommits ?? []), ...Object.values(config.caseReleases ?? {})
+      .filter(rule => rule.component === name).flatMap(rule => rule.requiredCommits ?? [])])];
+    item.commitProofs = await Promise.all(required.map(async requiredCommit => ({ requiredCommit, deployedCommit: item.commit,
+      included: await commitContains(repository, requiredCommit, item.commit, scope.sourceRoot), method: 'git merge-base --is-ancestor' })));
+    item.verified = Boolean(sourceMatches && item.observed && item.observed === item.expected
+      && (binding.requiredCommits ?? []).every(requiredCommit => item.commitProofs.some(proof => proof.requiredCommit === requiredCommit && proof.included)));
     if (!sourceMatches) gaps.push(name + ' 缺少匹配的发布提交。');
     if (!item.observed) gaps.push(name + ' 运行产物未取得' + (item.httpStatus ? '，HTTP ' + item.httpStatus : '') + '。');
     else if (!item.expected) gaps.push(name + ' 缺少登记的产物摘要。');
@@ -77,12 +101,15 @@ export function caseReleaseRequirement(item, row, headers, configured) {
   const requirement = fixed ?? (named ? { component: named[1], [named[2]]: named[3] } : {});
   const fields = versionFields.filter(field => Object.hasOwn(requirement, field));
   return { component: typeof requirement.component === 'string' ? requirement.component : null,
-    fields: Object.fromEntries(fields.map(field => [field, requirement[field]])) };
+    requiredCommits: requirement.requiredCommits ?? [], fields: Object.fromEntries(fields.map(field => [field, requirement[field]])) };
 }
 
 export function matchesCaseRelease(requirement, receipt) {
   const component = Array.isArray(receipt.proof) && receipt.proof.find(item => item?.name === requirement.component && item.verified === true);
   const fields = Object.entries(requirement.fields);
-  return Boolean(component && fields.length && fields.every(([field, value]) =>
-    typeof value === 'string' && identifier.test(value) && (field === 'sha256' ? component.observed : component[field]) === value));
+  const required = requirement.requiredCommits ?? [];
+  return Boolean(component && (fields.length || required.length) && fields.every(([field, value]) =>
+    typeof value === 'string' && identifier.test(value) && (field === 'sha256' ? component.observed : component[field]) === value)
+    && required.every(requiredCommit => commit.test(requiredCommit) && component.commitProofs?.some(proof =>
+      proof.requiredCommit === requiredCommit && proof.deployedCommit === component.commit && proof.included === true)));
 }

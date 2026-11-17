@@ -81,7 +81,8 @@ export async function handleRequirementMessage(context, event) {
   const content = event.structured_content ?? event.content;
   const text = requirementCommandText(content, event.mentions);
   const clarification = text.match(/^确认图示\s+(IMGQ-[a-f0-9]{12})\s+(.+)$/s);
-  const command = clarification ? 'material_confirm' : requirementCommand(text);
+  const revision = text.match(/^确认执行版本\s+([a-f0-9]{64})\s+用例\s+([A-Za-z0-9_, -]+)$/);
+  const command = revision ? 'execution_revision' : clarification ? 'material_confirm' : requirementCommand(text);
   if (ids.size > 1) return reply('请在话题中只 @ 一个智能体，再发送需求链接。');
   const links = requirementLinks(content, test.document.domain);
   if (route.binding ? links.some(url => url !== route.binding.documentUrl)
@@ -124,7 +125,8 @@ export async function handleRequirementMessage(context, event) {
     sourceMessageId: event.message_id, replyToMessageId: event.message_id, senderId: event.sender_id,
     agentRole: REQUIREMENT_TEST, agentProfile: bot.profile, workflow: REQUIREMENT_TEST, stage: REQUIREMENT_TEST,
     taskIntent: REQUIREMENT_TEST, instruction: '需求测试',
-    requirement: { root, threadId: event.thread_id ?? null, parent: event.reply_to ?? event.parent_id ?? null, url: documentUrl,
+    requirement: { root, rootMessageId: event.root_id ?? null, threadId: event.thread_id ?? null, parent: event.reply_to ?? event.parent_id ?? null, url: documentUrl,
+      ...(revision ? { revisionRequest: { sourceHash: revision[1], caseIds: revision[2].split(/[,\s]+/).filter(Boolean), messageId: event.message_id, author: event.sender_id } } : {}),
       ...(route.binding ? { topicBinding: requirementTopicFingerprint(project),
         ...(typeof event.event_id === 'string' ? { eventId: event.event_id } : {}) } : {}),
       ...(clarification ? { materialConfirmation: { id: clarification[1], answer: clarification[2].trim() } } : {}),

@@ -8,6 +8,7 @@ import { createRequirementAdapter } from './requirement-adapter.js';
 import { caseReleaseRequirement, matchesCaseRelease } from './requirement-release.js';
 import { createRequirementAgent } from './requirement-agent.js';
 import { verifiedMutationCleanup } from './requirement-mutation-measurement.js';
+import { sampleLifecycle } from './requirement-samples.js';
 
 import { requirementResources } from './requirement-resources.js';
 export { requirementResources } from './requirement-resources.js';
@@ -34,6 +35,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
     throw new RequirementWait('requirement_cancelled', '任务已取消；版本升级不恢复执行，历史结果和清理记录保持。');
   }
   const environment = settings.environment;
+  const samples = sampleLifecycle(journal, index, job.id, save);
   const agentMode = !settings.adapter && settings.execution?.mode === 'agent';
   const staticMode = !settings.adapter && Boolean(settings.execution) && !agentMode;
   const resources = await requirementResources(environment, { allowUnavailable: true, dataDir });
@@ -63,7 +65,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
   if ((migrating || retry) && (lock && (lock.jobId !== job.id || lock.binding !== journal.executionBinding))) {
     throw new RequirementWait('environment_busy', '原任务资源锁身份已变化，不能迁移或重试。');
   }
-  if (retry && pendingMutations.length) throw new RequirementWait('cleanup_pending', '重试前须对账并恢复原尝试的变更，台账已保留。');
+  if (retry && pendingMutations.some(item => !samples.retained(item))) throw new RequirementWait('cleanup_pending', '重试前须对账并恢复原尝试的变更，台账已保留。');
   const selected = blockedOnly ? index.filter(item => journal.results?.[item.caseId]?.status === '阻断').map(item => item.caseId) : null;
   if (selected?.length === 0) {
     throw new RequirementWait('retry_no_blocked_cases', '原任务没有已落盘的阻断用例。任务级等待解除后请继续测试。');
@@ -92,7 +94,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
       }
     }
     journal.cleanup = null;
-    journal.mutations = [];
+    journal.mutations = journal.mutations.filter(item => samples.retained(item));
     if (retry) {
       // Only a new, explicitly requested attempt may bind the current identity.
       // No previous observations or mutations can cross this boundary.
@@ -119,12 +121,12 @@ export async function executeCases({ job, settings, journal, source, index, mani
     await writeJson(lockFile, { jobId: job.id, binding }); lock = await readJson(lockFile);
     delete journal.bindingMigration; await save();
   }
-  if (journal.cleanup?.verified === true && pendingMutations.length) {
+  if (journal.cleanup?.verified === true && pendingMutations.some(item => !samples.retained(item))) {
     journal.cleanupHistory ??= []; journal.cleanupHistory.push(structuredClone(journal.cleanup));
     journal.cleanup = { verified: false, pending: pendingMutations.map(item => item.key), reason: 'Saved readback does not prove restoration under the actual field contract' };
     await save();
   }
-  if (journal.cleanup?.verified === true) {
+  if (journal.cleanup?.verified === true && !samples.records().length) {
     if (lock?.jobId === job.id && lock.binding === binding) await unlink(lockFile);
     return;
   }
@@ -139,6 +141,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
     throw new RequirementWait('environment_busy', 'SIT 资源正被另一个任务占用或等待清理，释放后可在本话题回复继续。');
   }
   journal.executionBinding = binding;
+  if (samples.records().length && journal.cleanup?.verified) journal.cleanup = null;
   if (!job.requirement.cleanupOnly && captureRepositories) journal.repositories = await captureRepositories();
   if (job.requirement.cleanupOnly && currentBinding !== binding) {
     journal.cleanupExecutorHistory ??= [];
@@ -165,7 +168,9 @@ export async function executeCases({ job, settings, journal, source, index, mani
     });
   };
   const standards = regression.files['references/execution-standard.md'];
-  const scope = { source, index, manifest, reports: reportDir, standards, useRead, checkOutput: resources.checkOutput, rememberSecret: resources.rememberSecret,
+  const scope = { source, index, manifest, reports: reportDir, workDir, browserMode: settings.request?.browser,
+    executionVersion: journal.executionVersion ?? 1, samples: journal.samples, sampleLifecycle: samples,
+    standards, useRead, checkOutput: resources.checkOutput, rememberSecret: resources.rememberSecret,
     assertRead: async key => { checkResourceIdentity(key); await resources.assertRead(key); },
     assertWrite: async (key, operation) => { checkResourceIdentity(key); await resources.assertWrite(key, operation); },
     jobId: job.id, sourceRoot: project?.repoPath, resourceNames: resources.names, resourceCatalog: resources.catalog, resourceIdentity: resources.identity, progress,
@@ -227,7 +232,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
     await save();
     return { release, releaseEvidence };
   };
-  const clean = async (mutations, startRequest) => adapter.cleanup({ ...scope, mutations, prior: journal.cleanup, startRequest,
+  const cleanRaw = async (mutations, startRequest) => adapter.cleanup({ ...scope, mutations, prior: journal.cleanup, startRequest,
     async restore(key, operation, apply, resourceName) {
       const mutation = journal.mutations.find(item => item.key === key);
       if (!mutation) throw new RequirementWait('mutation_scope', '清理操作缺少本轮变更记录。');
@@ -243,7 +248,13 @@ export async function executeCases({ job, settings, journal, source, index, mani
       await save();
     },
   });
-  if (agentMode && (journal.cleanup || journal.inFlight)
+  const clean = async (mutations, startRequest) => {
+    const eligible = job.requirement.cleanupOnly ? mutations : mutations.filter(item => !samples.retained(item));
+    const result = await cleanRaw(eligible, startRequest);
+    await samples.finalized(eligible, job.requirement.cleanupOnly === true);
+    return { ...result, retainedData: samples.records() };
+  };
+  if (agentMode && (journal.cleanup || journal.inFlight) && !journal.sidebarWaiting && !samples.records().length
     || staticMode && pendingMutations.length && (!journal.inFlight || job.requirement.cleanupOnly)) {
     // Resume always reconciles recorded effects first, including a crash before a receipt.
     const recovered = resources.checkOutput(await clean(journal.mutations));
@@ -292,7 +303,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
           sourceAttempt.reads.push({ ...entry, id: digest(entry), at: new Date().toISOString() });
           await save();
         },
-        getMutations: () => journal.mutations.filter(record => record.caseId === item.caseId),
+        getMutations: () => journal.mutations.filter(record => record.caseId === item.caseId || record.intent.sampleId && samples.get(record.intent.sampleId).caseIds.includes(item.caseId)),
         async cleanupCase(startRequest) {
           const result = resources.checkOutput(await clean(journal.mutations.filter(record => record.caseId === item.caseId), startRequest));
           journal.caseCleanup ??= {}; journal.caseCleanup[item.caseId] = result; await save(); return result;
@@ -316,17 +327,20 @@ export async function executeCases({ job, settings, journal, source, index, mani
       }
       const invoke = async (intent, apply) => {
         const resourceBinding = environment.resources[intent?.resource];
+        const sample = intent?.sampleId ? samples.get(intent.sampleId) : null;
+        const ownedSample = intent.operation !== 'create' && sample?.ownershipProof?.resource === intent.resource && sample.businessKey === intent.businessKey;
         const shared = intent?.shared === true && intent.operation !== 'create'
           && (resourceBinding?.reversibleSharedWrites === true || resourceBinding?.sharedTargets?.includes(intent.target));
         if (!intent?.id || !intent.target || !intent.beforeHash || !intent.cleanupAction || !writeOperations.includes(intent.operation)
-          || (!String(intent.businessKey ?? '').includes(scope.runPrefix) && !shared)) {
+          || (!String(intent.businessKey ?? '').includes(scope.runPrefix) && !shared && !ownedSample)) {
           throw new RequirementWait('mutation_scope', '测试变更缺少唯一归属、前置快照或可验证的恢复动作。');
         }
-        const key = item.caseId + ':' + intent.id;
+        if (sample && (!sample.caseIds.includes(item.caseId) || sample.businessKey !== intent.businessKey)) throw new RequirementWait('sample_scope', '变更与共享样本归属不符。');
+        const key = sample ? 'sample:' + sample.id + ':' + intent.nodeId : item.caseId + ':' + intent.id;
+        if (sample) await samples.node(sample.id, intent.nodeId, intent, 'prepared');
         const prior = journal.mutations.find(record => record.key === key);
         if (prior) {
           if (digest(prior.intent) !== digest(intent)) throw new RequirementWait('mutation_scope', '恢复时操作范围与已保存的变更不一致。');
-          if (prior.phase === 'applied' && !intent.agent) return prior.receipt;
           const observed = resources.checkOutput(await adapter.reconcile({ ...caseInput, intent, key }));
           prior.reconciliationHistory ??= [];
           prior.reconciliationHistory.push({ at: new Date().toISOString(), status: observed?.status, evidence: observed?.evidence ?? observed?.receipt?.evidence });
@@ -335,6 +349,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
             prior.phase = 'applied';
             prior.receipt = observed.receipt;
             prior.reconciled = true;
+            if (sample) await samples.node(sample.id, intent.nodeId, intent, 'applied', prior.receipt);
             await save();
             return prior.receipt;
           }
@@ -355,6 +370,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
         if (!receipt?.evidence?.length) throw new RequirementWait('mutation_uncertain', '外部操作未返回可验证回执。');
         record.phase = 'applied';
         record.receipt = receipt;
+        if (sample) await samples.node(sample.id, intent.nodeId, intent, 'applied', receipt);
         application.status = 'acknowledged';
         await save();
         return receipt;
@@ -380,9 +396,10 @@ export async function executeCases({ job, settings, journal, source, index, mani
             await save();
           } } : {}),
           resumed: previous === item.caseId, mutations: journal.mutations.filter(record => record.caseId === item.caseId) }));
+        delete journal.sidebarWaiting;
       } catch (error) {
         if (!(error instanceof RequirementWait)
-          || !['environment_scope', 'execution_plan', 'agent_no_progress', 'execution_evidence'].includes(error.code)) throw error;
+        || !['environment_scope', 'execution_plan', 'agent_no_progress', 'execution_evidence', 'sample_wait'].includes(error.code)) throw error;
         caseWait = true;
         const denied = error.code === 'environment_scope';
         const agentCase = agentMode && (await readJson(path.join(workDir, 'agent-tool-state.json')))?.cases?.[sourceKey];
@@ -425,7 +442,7 @@ export async function executeCases({ job, settings, journal, source, index, mani
         journal.caseCleanup ??= {};
         journal.caseCleanup[item.caseId] = cleanup;
         await save();
-        if (!cleanup.verified || cleanup.pending?.length || caseMutations.some(item => !verifiedMutationCleanup(item))) {
+        if (!cleanup.verified || cleanup.pending?.length || caseMutations.some(item => !samples.retained(item) && !verifiedMutationCleanup(item))) {
           throw new RequirementWait('cleanup_pending', '该用例的变更尚未恢复；先处理清理，未启动后续用例。');
         }
       }
@@ -437,6 +454,9 @@ export async function executeCases({ job, settings, journal, source, index, mani
     }
   }
   } catch (error) {
+    if (error.code === 'sidebar_handoff') {
+      journal.sidebarWaiting = true; await save(); throw error;
+    }
     if (settings.execution?.mode === 'agent') {
       journal.cleanup = resources.checkOutput(await clean(journal.mutations));
       await save();
@@ -460,5 +480,5 @@ export async function executeCases({ job, settings, journal, source, index, mani
       throw new RequirementWait('cleanup_pending', '测试数据或配置尚未恢复。已保留清理台账，完成核对后在本话题回复恢复清理。');
     }
   }
-  await unlink(lockFile);
+  if (!samples.records().length) await unlink(lockFile);
 }

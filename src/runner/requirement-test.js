@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { copyFile } from 'node:fs/promises';
 import { requirementFeishu, fileToken, readCaseTemplate, RequirementWait, digest } from './requirement-feishu.js';
 import { generatorReferences, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sameRequirementContent, sourceBaseline, unavailableRequirementSources, writeJson } from './requirement-files.js';
 import { analyzeCaseCoverage, generateCases, generateValidatedCases, indexProvidedCases } from './requirement-generation.js';
@@ -10,8 +11,19 @@ import { buildRequirementReport } from './requirement-report.js';
 import { matchesRequirementTopic, requirementCleanupAfterCancellation, resolveRequirementOptions } from '../shared/requirement-options.js';
 import { verifiedMutationCleanup } from './requirement-mutation-measurement.js';
 import { sanitized } from './requirement-agent-resources.js';
+import { withSnapshotLock } from '../shared/snapshot-lock.js';
+import { collectTopicFeedback, archiveExecutionVersion, recoverExecutionVersion } from './requirement-feedback.js';
+import { LarkCliFeishuClient } from '../control-plane/lark-cli.js';
+import { buildEvidenceBundle } from './requirement-bundle.js';
 
 export async function runRequirementTest(job, config, emit, dependencies = {}) {
+  if (job.status === 'cancelled' && !job.requirement?.cleanupOnly) return { outcome: 'blocked', requirementWait: 'requirement_cancelled', finalMessage: '任务已取消；未恢复业务执行。' };
+  if (!/^JOB-[A-Za-z0-9-]+$/.test(job.id)) throw new Error('Invalid requirement job');
+  const root = await privateDirectory(path.join(config.dataDir, 'requirement-tests', job.id));
+  return withSnapshotLock(root, () => runRequirementTestLocked(job, config, emit, dependencies));
+}
+
+async function runRequirementTestLocked(job, config, emit, dependencies) {
   if (job.status === 'cancelled' && !job.requirement?.cleanupOnly) return { outcome: 'blocked', requirementWait: 'requirement_cancelled', finalMessage: '任务已取消；未读取或修改执行检查点，未恢复业务执行。' };
   const project = config.projects[job.projectId];
   const configured = project?.requirementTest;
@@ -44,6 +56,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     return result;
   };
   const sourceFile = path.join(workDir, 'requirement.json');
+  if (!job.requirement.cleanupOnly) await recoverExecutionVersion(journal, workDir, save);
   const templateFile = path.join(workDir, 'template.json');
   const casesFile = path.join(workDir, 'cases.json');
   const indexFile = path.join(workDir, 'case-index.json');
@@ -56,7 +69,16 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       throw new RequirementWait('requirement_source', '此文档只允许在已绑定的独立验收话题内使用。');
     }
   };
-  const readSource = url => readRequirementWithInputs(client, url, settings.inputDirectories, workDir, { ...settings, checkDocument });
+  const readSource = async url => {
+    const source = await readRequirementWithInputs(client, url, settings.inputDirectories, workDir, { ...settings, checkDocument });
+    if (settings.feedback?.enabled) {
+      const resources = await requirementResources(settings.environment, { allowUnavailable: true, dataDir: config.dataDir });
+      source.feedback = await collectTopicFeedback(dependencies.feedbackClient ?? new LarkCliFeishuClient({ dataDir: config.dataDir }), job, settings, workDir, resources.checkOutput);
+      const acceptance = source.feedback.records.filter(record => record.kind === 'acceptance_confirmation');
+      if (acceptance.length) source.hash = digest([source.hash, acceptance]);
+    }
+    return source;
+  };
   let requestedSources, synchronizedThisRun;
   const captureRepositories = () => request.branch
     ? (requestedSources ??= sourceBaseline(project, request.branch).then(repositories => (synchronizedThisRun = repositories)))
@@ -126,12 +148,14 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         if (!revision) await writeJson(sourceFile, source);
       }
       if (source && !sameRequirementContent(source, current)) {
-        throw new RequirementWait('requirement_version', '需求正文或嵌入表已变化（原版本 ' + source.revision + '，当前版本 ' + current.revision + '）。已保留原用例和证据。请确认受影响范围后为新版本发起独立话题；如有待清理数据，可在原话题回复恢复清理。');
+        await archiveExecutionVersion({ journal, source, current, job, workDir, save });
+        source = current;
       }
       if (!source) {
         source = current;
         await writeJson(sourceFile, source);
       }
+      if (current.feedback) { source.feedback = current.feedback; journal.feedback = current.feedback; }
     }
     if (!source) throw new RequirementWait('cleanup_pending', '此任务没有已读取的需求或已执行数据，未进入业务操作。');
     journal.source = { id: source.id, revision: source.revision, hash: source.hash, embedded: source.embedded.length,
@@ -162,11 +186,10 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       const provided = request.caseSource && await readProvidedCases(client, request.caseSource, template.headers);
       if (provided && journal.publication && (journal.publication.fileToken !== provided.receipt.fileToken
         || journal.publication.sheetId !== provided.receipt.sheetId || journal.publication.version !== provided.receipt.version)) {
-        throw new RequirementWait('publication_version', '指定用例表的定义已变化，原用例和执行证据已经保留。请按新版本另行发起。');
-      }
-      if (request.browser === 'codex_sidebar') {
-        if (provided && !journal.casesHash) journal.providedCases = { ...provided.receipt, count: provided.rows.length };
-        throw new RequirementWait('browser_unavailable', '任务要求仅使用 Codex 侧边栏浏览器。飞书后台 Runner 无法连接该会话的浏览器，当前尚未开始业务执行。请在可使用该浏览器的 Codex 会话中执行。');
+        const current = { ...source, approvalHash: digest([source.hash, provided.receipt.version]) };
+        const previous = await readJson(sourceFile);
+        await archiveExecutionVersion({ journal, source: previous, current, job, workDir, save });
+        source = current;
       }
       if (!journal.casesHash) {
         if (Object.keys(journal.results ?? {}).length || journal.mutations?.length || journal.inFlight
@@ -262,8 +285,42 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     journal.phase = stage;
     await save();
     await progress(stage);
+    if (request.browser === 'codex_sidebar' && (!settings.execution?.sidebar?.publicKey || settings.execution?.mode !== 'agent')) {
+      const file = path.join(workDir, 'sidebar-task.json');
+      await writeJson(file, { version: 1, mode: 'codex_sidebar', integration: 'not_verified', jobId: job.id,
+        executionVersion: journal.executionVersion ?? 1, projectId: job.projectId, environment: settings.environment.name,
+        source: journal.source, publication: journal.publication, index, manifest, samples: journal.samples ?? {},
+        results: journal.results ?? {}, next: '配置 execution.mode=agent 及 sidebar 可信宿主公钥、来源类型；在原话题继续。后续逐节点请求位于 sidebar-handoff。' });
+      throw new RequirementWait('sidebar_handoff', 'Codex 侧边栏浏览器待交接；已保存用例、样本和原节点。后台宿主集成尚未验证。交接文件：' + file);
+    }
     const reports = await privateDirectory(settings.reportDirectory);
-    const reportDir = await privateDirectory(path.join(reports, job.id));
+    const reportDir = await privateDirectory(path.join(reports, job.id, ...((journal.executionVersion ?? 1) > 1 ? ['execution-' + journal.executionVersion] : [])));
+    if (journal.reuseCandidates) {
+      const old = journal.reuseCandidates;
+      journal.results ??= {}; journal.executionCases ??= {}; journal.sourceAttempts ??= {};
+      const preserve = async value => {
+        if (!value || typeof value !== 'object') return;
+        if (value.sanitized === true && value.path) {
+          if (path.basename(value.path) !== value.path || !old.reportDirectory) throw new RequirementWait('report_evidence', '复用结果缺少原证据目录。');
+          const prior = value.path;
+          value.path = 'reuse-v' + old.fromVersion + '-' + prior;
+          await copyFile(path.join(old.reportDirectory, prior), path.join(reportDir, value.path));
+        }
+        for (const child of Object.values(value)) await preserve(child);
+      };
+      for (const item of index) {
+        const row = manifest.rows[item.row - 2];
+        const version = digest([item.caseId, item.requirementIds, row, ...(item.assertions ? [item.assertions] : [])]);
+        if (!old.affectedCaseIds.includes(item.caseId) && old.cases[item.caseId]?.caseVersion === version && old.results[item.caseId]) {
+          const result = structuredClone(old.results[item.caseId]); await preserve(result);
+          journal.results[item.caseId] = { ...result, reusedFromVersion: old.fromVersion, reuseScope: '确认未受影响且用例定义一致' };
+          journal.executionCases[item.caseId] = old.cases[item.caseId];
+          if (result.sourceAttempt) journal.sourceAttempts[result.sourceAttempt] = old.sourceAttempts[result.sourceAttempt];
+        }
+      }
+      delete journal.reuseCandidates;
+    }
+    journal.reportDirectory = reportDir; await save();
     await writeJson(path.join(reportDir, 'case-index.json'), index);
     await writeJson(path.join(reportDir, 'publication.json'), {
       jobId: job.id, requestedEnvironment: settings.requestedEnvironment ?? settings.environment.name,
@@ -346,11 +403,13 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         : externalPending ? '业务比较及报告完成；外部过程待回执' : '业务测试及报告完成';
     journal.artifact = artifact;
     await save();
-    const cleanup = journal.cleanup?.verified === true ? '已核验恢复' : '待恢复';
+    const retained = journal.cleanup?.retainedData?.length ?? 0;
+    const cleanup = retained ? '已清理可释放数据；保留 ' + retained + ' 个有继续条件的样本' : journal.cleanup?.verified === true ? '已核验恢复' : '待恢复';
     const acceptance = request.resultFormat === 'binary' ? (summary.pass > 0 && !summary.fail && !summary.blocked
-      && !summary.notExecuted && !externalPending && journal.cleanup?.verified ? '通过' : '不通过') : null;
+      && !summary.notExecuted && !externalPending && !retained && !Object.values(journal.results ?? {}).some(result => result.validationScope === 'controlled') && journal.cleanup?.verified ? '通过' : '不通过') : null;
     const finalMessage = [
       ...(acceptance ? ['整体验收：' + acceptance] : []),
+      '执行版本：' + (journal.executionVersion ?? 1) + '。' + (Object.values(journal.results ?? {}).some(result => result.validationScope === 'controlled') ? '包含受控验证，不能作为真实 UAT 通过凭证。' : ''),
       '用例表：' + journal.publication.url,
       unavailableRequirementSources(journal.repositories),
       ...(job.requirement.cleanupOnly ? [requirementCleanupAfterCancellation(job)
@@ -369,8 +428,13 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         + '，报告阶段 ' + processChecks.filter(check => check.phase === 'report_verification' && check.disposition === 'proven').length
         + '。原尝试的过程记录保留。'] : []),
     ].filter(Boolean).join('\n');
+    const resources = await requirementResources(settings.environment, { allowUnavailable: true, dataDir: config.dataDir });
+    const bundle = await buildEvidenceBundle({ job, journal, reportDir, workDir, dataDir: config.dataDir, checkOutput: resources.checkOutput });
+    journal.artifact = artifact; journal.evidenceBundle = bundle; await save();
     return { outcome: 'ready', finalMessage, requirementReport: artifact,
+      requirementDelivery: { version: journal.executionVersion ?? 1, text: finalMessage, artifacts: [artifact, bundle] },
       requirementSummary: { ...summary, cleanup, caseUrl: journal.publication.url, ...(acceptance ? { acceptance } : {}),
+        retainedSamples: retained,
         ...(incompleteFailures ? { incompleteFailures } : {}),
         ...(externalPending ? { externalPending } : {}),
         ...(processChecks.length ? { process: { total: processChecks.length, proven: processProven } } : {}) } };
@@ -381,7 +445,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     if (known && error.repositorySync) journal.repositorySync = error.repositorySync;
     await save();
     const restored = journal.mutations?.length && journal.mutations.every(verifiedMutationCleanup);
-    const cleanup = restored || journal.cleanup?.verified ? '已核验恢复' : journal.mutations?.length ? '待核对清理台账' : '尚未记录业务变更';
+    const cleanup = journal.cleanup?.retainedData?.length ? '有依据保留样本，见继续条件' : restored || journal.cleanup?.verified ? '已核验恢复' : journal.mutations?.length ? '待核对清理台账' : '尚未记录业务变更';
     if (lastSummary) await progress(stage + '暂挂；清理' + cleanup, undefined, undefined, { ...lastSummary,
       phase: 'execution_interrupted', pendingMutations: (journal.mutations ?? []).filter(item => !verifiedMutationCleanup(item)).length,
       cleanupVerified: Boolean(restored || journal.cleanup?.verified), interruption: journal.waitCode });

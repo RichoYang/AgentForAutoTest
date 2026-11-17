@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "purpose": "TPM 15.1 验收样例；仅作为需求/用例材料，不能直接授权或执行业务",
+  "evidenceScope": "example_not_uat",
+  "confirmationRequired": { "fiscalRuleMessageId": "填写产品原话题确认消息ID", "supersedes": "原季度累计断言", "currentRule": "跨月进入同一财年池" },
+  "cases": [
+    { "id": "A-REJECT", "sample": "oa-reject", "reserved": 500, "nodes": ["submit", "human-reject", "tpm-rejected", "original-budget-refund"], "refund": 500, "requires": ["真实人工驳回回执", "TPM状态", "原账退款流水"] },
+    { "id": "A-DUPLICATE", "sample": "oa-reject", "automaticRetryExists": false, "requires": ["正式同事件重发入口", "原事件号和重发事件号一致", "不再次退款流水"], "missingEvidenceVerdict": "失败" },
+    { "id": "B-EXACT", "sample": "fiscal-exact", "pool": "fiscal-year", "startBalance": 50, "request": 50, "expectedAccepted": true, "expectedRemaining": 0, "requires": ["产品财年口径确认", "跨月同池证据", "独立起点快照"] },
+    { "id": "B-OVER", "sample": "fiscal-over", "pool": "fiscal-year", "startBalance": 50, "request": 51, "expectedAccepted": false, "expectedRemaining": 50, "requires": ["与B-EXACT相同起点", "拒绝状态", "无预算占用流水"] },
+    { "id": "C-CLOSE", "sample": "settlement", "initialReserved": 1000, "holdUntil": "实际首次结案日期", "nodes": [
+      { "id": "settlement-submit", "amount": 900, "refund": 100, "remaining": 900, "paid": 0, "ledger": "activity-plan", "state": "待审核" },
+      { "id": "final-approval", "amount": 800, "refund": 100, "remaining": 800, "paid": 0, "ledger": "activity-plan" },
+      { "id": "posting", "amount": 200, "refund": 0, "remaining": 600, "paid": 200, "ledger": "payment" },
+      { "id": "close-posting", "refund": 600, "remaining": 0, "paid": 200, "ledger": "activity-plan" },
+      { "id": "close-activity-plan", "refund": 0, "remaining": 0, "paid": 200, "ledger": "both-regional-and-activity-plan", "requires": ["大区原账逐笔核对", "活动方案账逐笔核对", "保留已付200"] }
+    ], "everyNodeRequires": ["操作意图", "实际状态", "单号或事件号", "独立预算流水", "截图", "版本证据"], "duplicateProcessing": "不得多退" }
+  ]
+}

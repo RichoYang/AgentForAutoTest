@@ -509,9 +509,9 @@ export class JsonStore {
           || !event.result.sourceSync?.repositories?.length)) throw new Error('Invalid partial analysis evidence');
         if(job.environmentAccess&&event.result?.exportFiles?.length)recordReportFiles(job,event.result.exportFiles,state.questions?.[job.questionId]?.generation);
         if (job.workflow === 'requirement_test' && event.result?.requirementReport) {
-          const file = event.result.requirementReport;
-          recordReportFiles(job, [file], state.questions?.[job.questionId]?.generation);
-          job.reportReviews[file.id] = { status: 'accepted', verificationHash: file.verificationHash };
+          const files = event.result.requirementDelivery?.artifacts ?? [event.result.requirementReport];
+          recordReportFiles(job, files, state.questions?.[job.questionId]?.generation);
+          for (const file of files) job.reportReviews[file.id] = { status: 'accepted', verificationHash: file.verificationHash };
         }
         recordReportReview(job,event.result);
         job.result = event.result ?? null;
@@ -745,9 +745,14 @@ function routeRequirementJob(state, input) {
   const retryStatuses = { retry_unexecuted: ['未执行'], retry_failed: ['失败', '未执行'], retry_blocked: ['阻断'] };
   const retry = Object.hasOwn(retryStatuses, command);
   const canResume = ['awaiting_clarification', 'paused'].includes(prior.status)
+    || command === 'execution_revision' && ['completed', 'failed', 'blocked'].includes(prior.status)
     || retry && ['completed', 'failed', 'blocked'].includes(prior.status)
     || cleanup && prior.status === 'cancelled' && prior.events.some(event => event.type === 'cancelled' && event.processesExited);
   if (!canResume) return current('requirement_invalid_transition');
+  if (command === 'execution_revision') {
+    if (!/^[a-f0-9]{64}$/.test(request.revisionRequest?.sourceHash ?? '') || !request.revisionRequest.caseIds?.length) return current('requirement_invalid_transition');
+    prior.requirement.revisionRequest = request.revisionRequest;
+  }
   if (command === 'retry_blocked' && prior.result?.requirementSummary?.blocked === 0) {
     return current('requirement_no_blocked_cases');
   }

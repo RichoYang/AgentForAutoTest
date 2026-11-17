@@ -67,7 +67,7 @@ export async function buildRequirementReport({ job, journal, index, manifest, co
     const refs = await evidence([...(mutation.receipt?.evidence ?? []), ...(mutation.cleanup?.beforeEvidence ?? []), ...(mutation.cleanup?.attempts ?? []),
       ...(mutation.cleanup?.evidence ?? [])], mutation.caseId);
     mutationLedger.push({
-      mutation_id: 'MUT-' + digest(mutation.key).slice(0, 16), case_ids: [mutation.caseId],
+      mutation_id: 'MUT-' + digest(mutation.key).slice(0, 16), case_ids: journal.samples?.[intent.sampleId]?.caseIds ?? [mutation.caseId],
       target: intent.object ?? intent.target, primary_business_key: intent.businessKey,
       original_snapshot: JSON.stringify(intent.snapshot ?? { hash: intent.beforeHash }),
       action: intent.operation + ' · ' + intent.target,
@@ -186,7 +186,7 @@ export async function buildRequirementReport({ job, journal, index, manifest, co
       expected_result: String(cells['预期结果'] ?? '').trim() ? cells['预期结果'] : '原用例未提供明确的预期结果。',
       actual_result: (source.request?.resultFormat === 'binary' ? '用例验收：'
         + (result?.status === '通过' ? '通过' : '不通过') + '。' : '') + (result?.actual ?? unexecutedReason),
-      status: result?.status ?? '未执行', evidence_ids: ids, issue_ids: item.issueId ? [item.issueId] : [],
+      status: source.request?.resultFormat === 'binary' ? (result?.status === '通过' ? '通过' : '失败') : result?.status ?? '未执行', evidence_ids: ids, issue_ids: item.issueId ? [item.issueId] : [],
       ...(result?.blocker ? { blocker_dependency: result.blocker.dependency } : {}),
       test_data_id: mutationLedger.filter(row => row.case_ids.includes(item.caseId)).map(row => row.primary_business_key),
       construction_method: (journal.preparations?.[item.caseId]?.prerequisites ?? []).map(row => row.construction_entry).filter(Boolean),
@@ -236,7 +236,7 @@ export async function buildRequirementReport({ job, journal, index, manifest, co
         ...Object.entries({ fix_verifications: '修复复测', code_chains: '代码调用链', export_validations: '导出核验' })
         .map(([section, label]) => label + '：' + (specialty[section].length ? '见专项工作表'
           : cases.every(item => item.status === '不适用') ? '本轮所有用例均不适用' : '本轮没有已登记的专项结果，未确认是否适用或完成'))],
-      restoration_conclusion: cleanup?.verified === true ? '已核验恢复' : '待恢复',
+      restoration_conclusion: cleanup?.retainedData?.length ? '有依据保留样本，见保留数据及逐项清理记录' : cleanup?.verified === true ? '已核验恢复' : '待恢复',
       skill_version: regression.sha256,
     },
     cases, issues, blockers, evidence_index: sheetEvidence, repositories: reportRepositories,

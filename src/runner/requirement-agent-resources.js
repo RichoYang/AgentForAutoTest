@@ -8,6 +8,8 @@ import { chromium } from 'playwright';
 import { observationAt } from './requirement-assertions.js';
 import { waitBusinessReady } from './requirement-adapter.js';
 import { digest } from './requirement-feishu.js';
+import { sidebarHandoff } from './requirement-handoff.js';
+import { multipartBody, uploadFile, verifyMultipartRequest } from './requirement-upload.js';
 import { buildRecordSnapshot } from './requirement-snapshot.js';
 import { credentialField, databaseTierMatches, managementReadAllowed, scopedDatabase } from './requirement-resources.js';
 
@@ -262,6 +264,9 @@ export function sanitized(value) {
 }
 
 export function createAgentResources(config, scope) {
+  const sidebar = scope.browserMode === 'codex_sidebar';
+  const handoff = action => sidebarHandoff(config.sidebar, scope, action);
+  const uploadRoots = [...(config.uploadDirectories ?? []), ...(scope.workDir ? [scope.workDir] : [])];
   const sessions = new Map();
   const authentication = new Map();
   const schemas = new Map();
@@ -418,6 +423,7 @@ export function createAgentResources(config, scope) {
   }
 
   async function browserSession(resourceName, resource) {
+    if (sidebar) throw agentError('Codex sidebar requires handoff; standalone Chromium is forbidden');
     if (sessions.has(resourceName)) return sessions.get(resourceName);
     const login = loginFor(resourceName);
     const browser = await chromium.launch({ headless: true });
@@ -460,9 +466,13 @@ export function createAgentResources(config, scope) {
           if (!isLogin && !read && !effect) throw agentError('Browser request needs a verified read contract, or test_mutate with a registered browser goto/click operation and matching effect: '
             + method + ' ' + url.pathname + '. Registering an HTTP write alone does not authorize browser writes.');
           if (effect) {
-            const payload = request.postDataJSON();
-            if (digest(payload ?? null) !== digest(state.effect.body ?? null)) throw agentError('Browser submit payload differs from the ledger intent: '
+            if (state.effect.multipart) {
+              await verifyMultipartRequest(request.postDataBuffer(), request.headers()['content-type'], state.effect.multipart, uploadRoots, scope.checkOutput);
+            } else {
+              const payload = request.postDataJSON();
+              if (digest(payload ?? null) !== digest(state.effect.body ?? null)) throw agentError('Browser submit payload differs from the ledger intent: '
               + JSON.stringify({ expected: sanitized(state.effect.body ?? null), received: sanitized(payload ?? null) }) + '. Omit effect.body for a request with no body.');
+            }
             state.effect = null;
           }
         }
@@ -537,6 +547,13 @@ export function createAgentResources(config, scope) {
       || !managementReadAllowed(resource, method, url.pathname))) {
       throw agentError('This management request cannot be registered as read-only');
     }
+    const body = resolveInput(spec.body, input);
+    if (body !== undefined && spec.multipart) throw agentError('JSON and multipart bodies are mutually exclusive');
+    if (spec.multipart && (spec.access === 'read' || !['POST', 'PUT', 'PATCH'].includes(method))) throw agentError('Upload requires a registered write operation');
+    const multipart = spec.multipart && await multipartBody(resolveInput(spec.multipart, input), uploadRoots, scope.checkOutput);
+    if (sidebar && loginFor(spec.resource) && spec.authenticated !== false) {
+      return handoff({ resource: spec.resource, action: 'http', origin: url.origin, spec, input });
+    }
     const auth = config.resourceAuth?.[spec.resource];
     if (auth && spec.authenticated !== false) {
       if (auth.kind !== 'form') throw agentError('Unsupported configured authentication type');
@@ -564,11 +581,10 @@ export function createAgentResources(config, scope) {
       headers[login.header] = session.token;
     }
     if (resource.resource_type === 'rabbitmq') headers.authorization = 'Basic ' + Buffer.from(resource.username + ':' + resource.password).toString('base64');
-    const body = resolveInput(spec.body, input);
     const operation = Object.keys(operations()).find(name => operations()[name] === spec);
     const response = await send(spec.resource, method, url, 'http', id => fetch(url, {
       method, headers: { ...headers, ...(id ? { 'x-agentos-request-id': id } : {}), ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(spec.timeoutMs ?? 30000) }),
+      ...(multipart ? { body: multipart.form } : body !== undefined ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(spec.timeoutMs ?? 30000) }),
     { fields: spec.queryEvidence, input: query, correlation: spec.requestCorrelation, operation });
     for (const value of response.headers.getSetCookie()) scope.rememberSecret?.(value.split(';')[0].split('=').slice(1).join('='));
     const text = await response.text();
@@ -577,6 +593,7 @@ export function createAgentResources(config, scope) {
     const publicQuery = detail ? Object.fromEntries([...url.searchParams].filter(([key]) => Object.hasOwn(detail.query, key))) : Object.fromEntries(url.searchParams);
     const result = { status: response.status, body: sanitized(data), path: url.pathname, method,
       request: { query: sanitized(publicQuery), ...(detail ? { queryEvidence: detail } : {}),
+        ...(multipart ? { multipart: multipart.evidence } : {}),
         ...(body !== undefined ? { body: sanitized(body) } : {}) } };
     if (responseIds.has(response)) Object.defineProperty(result, 'requestId', { value: responseIds.get(response) });
     return result;
@@ -586,17 +603,24 @@ export function createAgentResources(config, scope) {
     if (spec.kind === 'database') return database(spec, input, resource);
     if (spec.kind === 'http') return http(spec, input, resource);
     if (spec.kind === 'browser') {
+      if (sidebar) {
+        if (spec.action === 'upload') await uploadFile(resolveInput(spec.file, input), uploadRoots, scope.checkOutput);
+        if (spec.effect?.multipart) await multipartBody(resolveInput(spec.effect.multipart, input), uploadRoots, scope.checkOutput);
+        return handoff({ resource: spec.resource, action: 'mutation', origin: resourceURL(resource, '/').origin, spec, input });
+      }
       const session = await browserSession(spec.resource, resource);
       session.pageAction={id:randomUUID(),startedAt:new Date().toISOString(),action:spec.action,
         ...(spec.action==='goto'?{path:resolveRoute(spec.path,input)}:{selector:spec.selector})};
       session.ready = null;
       const effectPath = resolveRoute(spec.effect.path, input);
-      session.effect = { ...spec.effect, path: effectPath, body: resolveInput(spec.effect.body, input) };
+      session.effect = { ...spec.effect, path: effectPath, body: resolveInput(spec.effect.body, input), multipart: resolveInput(spec.effect.multipart, input) };
+      const file = spec.action === 'upload' ? await uploadFile(resolveInput(spec.file, input), uploadRoots, scope.checkOutput) : null;
       try {
         const [response] = await Promise.all([
           session.page.waitForResponse(response => new URL(response.url()).pathname === effectPath && response.request().method() === spec.effect.method),
           spec.action === 'goto'
             ? session.page.goto(resourceURL(resource, resolveRoute(spec.path, input)).href, { waitUntil: 'domcontentloaded' })
+            : spec.action === 'upload' ? session.page.locator(spec.selector).setInputFiles({ name: file.name, mimeType: file.type, buffer: file.bytes })
             : session.page.locator(spec.selector).click(),
         ]);
         return { status: response.status(), body: sanitized(await response.json().catch(() => null)) };
@@ -610,6 +634,7 @@ export function createAgentResources(config, scope) {
   }
   return {
     async authenticationEvidence(resourceName, resource) {
+      if (sidebar) return handoff({ resource: resourceName, action: 'authentication', origin: resourceURL(resource, '/').origin });
       const login = loginFor(resourceName);
       if (!login) return null;
       const session = await browserSession(resourceName, resource);
@@ -804,6 +829,7 @@ export function createAgentResources(config, scope) {
     },
     async browser(args) {
       return scope.useRead(args.resource, async resource => {
+        if (sidebar) return handoff({ ...args, origin: resourceURL(resource, '/').origin });
         const session = await browserSession(args.resource, resource);
         const { page, network } = session;
         const actionStartedAt = new Date().toISOString();
@@ -824,6 +850,10 @@ export function createAgentResources(config, scope) {
         else if (args.action === 'click') await page.locator(args.selector).click();
         else if (args.action === 'select') await page.locator(args.selector).selectOption(String(args.value));
         else if (args.action === 'check') await page.locator(args.selector).setChecked(args.value);
+        else if (args.action === 'upload') {
+          const file = await uploadFile(args.file, uploadRoots, scope.checkOutput);
+          await page.locator(args.selector).setInputFiles({ name: file.name, mimeType: file.type, buffer: file.bytes });
+        }
         else if (args.action === 'wait' && !args.ready) throw agentError('Browser wait requires ready');
         else if (!['inspect', 'observe', 'wait'].includes(args.action)) throw agentError('Unknown browser action');
         if (args.ready) { await waitBusinessReady(page, args.ready); session.ready = { condition: args.ready, at: new Date().toISOString() }; }

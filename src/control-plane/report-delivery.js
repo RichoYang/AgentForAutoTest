@@ -6,11 +6,13 @@ import {reportEligible} from '../shared/report-acceptance.js';
 import {createHash} from 'node:crypto';
 import {reportFile} from '../shared/report-files.js';
 import {messageIdOf} from './live-cards.js';
+import {enqueueRequirementBundle, deliverRequirementBundle} from './requirement-delivery.js';
 // Reports are per-question business artifacts, never shared knowledge or a public download URL.
 export class ReportDelivery {
  constructor(context){this.context=context;this.workers=new Map();this.closed=false;}
  async enqueue(job){
   if(!job||job.nextJobId||job.status!=='completed'||job.result?.outcome!=='ready')return;
+  if(await enqueueRequirementBundle(this.context,job)){await this.retry();return;}
   const snapshot=await this.context.store.read();
   if(!snapshot.jobs.some(j=>(job.questionId?j.questionId===job.questionId:j.id===job.id)&&j.reportFiles?.length))return;
   await this.context.store.transact(state=>{
@@ -39,6 +41,11 @@ export class ReportDelivery {
  }
  async retry(snapshot){
   if(this.closed||typeof this.context.feishu.replyFile!=='function')return;
+  const bundles=await stateView(this.context.store,s=>s.requirementDeliveries??{});
+  for(const [key,entry] of Object.entries(bundles))if(!entry.verified&&!entry.superseded&&Date.now()>=(entry.retryAt??0)&&!this.workers.has(key)){
+   const work=deliverRequirementBundle(this.context,key).catch(async()=>{await this.context.store.transact(s=>{const e=s.requirementDeliveries[key];e.failures=(e.failures??0)+1;e.retryAt=Date.now()+5000;e.error='正文或附件读回未通过；仅补缺失项，保留原消息与回执。';});});
+   this.workers.set(key,work);work.finally(()=>this.workers.delete(key)).catch(()=>{});
+  }
   const state=snapshot??await stateView(this.context.store,s=>{const entries=Object.entries(s.reportDeliveries??{}).filter(([,e])=>!e.messageId&&!e.superseded);const ids=new Set(entries.map(([,e])=>e.questionId));return {reportDeliveries:Object.fromEntries(entries),jobs:entries.length?(s.jobs??[]).filter(j=>ids.has(j.questionId)||entries.some(([,e])=>e.sourceJobId===j.id)):[],questions:s.questions};});
   for(const [key,entry] of Object.entries(state.reportDeliveries??{}))if(!entry.messageId&&!entry.superseded&&Date.now()>=(entry.retryAt??0)&&!this.workers.has(key)){
    if(!deliveryEligible(state,entry)){await this.context.store.transact(s=>{s.reportDeliveries[key].superseded=true;});continue;}

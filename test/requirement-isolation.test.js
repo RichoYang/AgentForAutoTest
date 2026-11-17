@@ -12,6 +12,7 @@ import { ReportDelivery } from '../src/control-plane/report-delivery.js';
 import { handleRequirementMessage, validateRequirementRoutes } from '../src/control-plane/requirement-testing.js';
 import { createRequirementAdapter } from '../src/runner/requirement-adapter.js';
 import { digest, RequirementWait } from '../src/runner/requirement-feishu.js';
+import { deliverRequirementBundle } from '../src/control-plane/requirement-delivery.js';
 import { command, generatorReferences, readJson, regressionReferences, sameRequirementContent, sourceBaseline, writeJson } from '../src/runner/requirement-files.js';
 import { caseReleaseRequirement, matchesCaseRelease, verifyRequirementRelease } from '../src/runner/requirement-release.js';
 import { versionNames } from '../src/runner/requirement-publication.js';
@@ -517,15 +518,15 @@ test('structured requirement reads named supplements, comments and the designate
   assert.equal(job.id, jobId);
   const result = await runRequirementTest(job, { projects: projects.projects, dataDir: root }, async () => {}, { client,
     generate() { assert.fail('A sidebar-only request cannot start background generation or execution'); } });
-  assert.equal(result.requirementWait, 'browser_unavailable');
+  assert.equal(result.requirementWait, 'sidebar_handoff');
   assert.match(result.finalMessage, /不通过（验收未完成）.*\n.*侧边栏浏览器/);
   const directory = path.join(root, 'requirement-tests', jobId);
   const journal = await readJson(path.join(directory, 'journal.json'));
   const source = await readJson(path.join(directory, 'requirement.json'));
-  assert.deepEqual(resolved, [['预算主需求', 'document'], ['预算补充说明', 'document'], ['预算原用例', 'cases']]);
-  assert.equal(journal.providedCases.fileToken, 'Existing');
-  assert.equal(journal.providedCases.count, 1);
-  assert.equal(journal.publication, undefined);
+  assert.deepEqual([...new Map(resolved.map(item => [JSON.stringify(item), item])).values()], [['预算主需求', 'document'], ['预算补充说明', 'document'], ['预算原用例', 'cases']]);
+  assert.equal(journal.publication.fileToken, 'Existing');
+  assert.ok(journal.caseIndexHash);
+  assert.equal((await readJson(path.join(directory, 'sidebar-task.json'))).integration, 'not_verified');
   assert.equal(journal.mutations, undefined);
   assert.equal(copies.get('Existing').matrix[1][headers.indexOf('测试结果')], '旧结果');
   assert.equal(source.request.branch, 'uat-merge');
@@ -947,11 +948,23 @@ test('isolated requirement revision runs real Chromium, HTTP, recovery, workbook
   const config = { projects: projects.projects, dataDir };
   const store = new JsonStore(path.join(dataDir, 'agentos.json'));
   const deliveries = [];
+  const sentMessages = new Map();
   const context = { config, store, requirementRoutes: validateRequirementRoutes(projects, { agents: { qa: settings.bot } }),
-    feishu: { reply: async () => {}, async replyFile(id, file, destination) {
+    feishu: { reply: async (id, text, options) => {
+      if (!options?.idempotencyKey) return;
+      sentMessages.set('om_local_conclusion', { text });
+      return { message_id: 'om_local_conclusion' };
+    }, async replyFile(id, file, destination) {
       deliveries.push({ id, file, thread: destination.replyInThread, profile: destination.profile, sha256: sha(await readFile(file)) });
-      return { message_id: 'om_local_report' };
-    } } };
+      const messageId = 'om_local_report_' + deliveries.length;
+      sentMessages.set(messageId, { file });
+      return { message_id: messageId };
+    }, async readMessage(id) {
+      const sent = sentMessages.get(id);
+      return { message_id: id, chat_id: 'oc_local', root_id: 'om_start', thread_id: 'omt_local',
+        sender: { sender_type: 'app', id: settings.bot.appId }, body: { content: JSON.stringify(sent?.file
+          ? { file_key: id, file_name: path.basename(sent.file) } : { text: sent?.text }) } };
+    }, async downloadMessageResource(_job, id) { return { path: sentMessages.get(id).file }; } } };
   const message = (id, content, overrides = {}) => handleRequirementMessage(context, {
     agent_profile: settings.bot.profile, receiving_app_id: settings.bot.appId, receiving_bot_id: settings.bot.openId, chat_id: 'oc_local',
     chat_type: 'group', sender_id: 'ou_requester', message_id: 'om_' + id, thread_id: 'omt_local', content,
@@ -1099,8 +1112,10 @@ test('isolated requirement revision runs real Chromium, HTTP, recovery, workbook
   const finished = await store.getJob(jobId);
   await delivery.enqueue(finished);
   await delivery.enqueue(finished);
+  for (const key of Object.keys((await store.read()).requirementDeliveries ?? {})) await deliverRequirementBundle(context, key);
   await delivery.close();
-  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries.length, 2);
+  assert.equal(Object.values((await store.read()).requirementDeliveries)[0].verified, true);
   assert.deepEqual({ id: deliveries[0].id, thread: deliveries[0].thread, profile: deliveries[0].profile, sha256: deliveries[0].sha256 },
     { id: 'om_start', thread: true, profile: settings.bot.profile, sha256: artifact.sha256 });
   await writeJson(path.join(root, 'isolation-result.json'), { jobId, createCount, deleteCount, remaining: owned.size,

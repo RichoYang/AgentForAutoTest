@@ -165,6 +165,32 @@ export class LarkCliFeishuClient {
       contentType: type === 'image' ? 'image/*' : 'application/octet-stream',
     };
   }
+
+  async readMessage(messageId, options = {}) {
+    await mkdir(this.cwd, { recursive: true });
+    const result = await runLarkCli(['api', 'GET', '/open-apis/im/v1/messages/' + encodeURIComponent(messageId),
+      '--as', 'bot', '--json'], { cwd: this.cwd, cliEntry: this.cliEntry, profile: options.profile });
+    const item = result.data?.items?.find(item => item.message_id === messageId);
+    if (!item) throw new Error('Message readback unavailable'); return item;
+  }
+
+  async readThread(rootId, threadId, options = {}) {
+    const root = await this.readMessage(rootId, options), items = [root];
+    const thread = threadId ?? root.thread_id;
+    if (!thread) throw new Error('Original thread identity unavailable');
+    const seen = new Set(); let cursor;
+    do {
+      const result = await runLarkCli(['api', 'GET', '/open-apis/im/v1/messages', '--as', 'bot', '--params', JSON.stringify({
+        container_id_type: 'thread', container_id: thread, page_size: 50, ...(cursor ? { page_token: cursor } : {}),
+      }), '--json'], { cwd: this.cwd, cliEntry: this.cliEntry, profile: options.profile });
+      if (!Array.isArray(result.data?.items)) throw new Error('Incomplete thread readback');
+      items.push(...result.data.items.filter(item => !items.some(prior => prior.message_id === item.message_id)));
+      cursor = result.data.has_more ? result.data.page_token : null;
+      if (result.data.has_more && (!cursor || seen.has(cursor))) throw new Error('Incomplete thread pagination');
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return items;
+  }
 }
 
 function findPath(value) {
