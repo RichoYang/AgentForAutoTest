@@ -4,6 +4,7 @@ import { lstat, mkdir, open, readFile, readdir, rename, realpath, unlink } from 
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { digest, RequirementWait } from './requirement-feishu.js';
+import { git as runGit } from './source-sync.js';
 
 const exec = promisify(execFile);
 
@@ -150,9 +151,52 @@ export const generatorReferences = ['references/case-schema.md', 'scripts/publis
 export const regressionReferences = ['references/execution-standard.md', 'references/report-contract.md',
   'references/report-schema-v1.json', 'scripts/build-full-regression-report.mjs', 'assets/full-regression-report-template-v1.xlsx'];
 
+const branchSyncReasons = {
+  not_found: 'origin 无此分支',
+  origin_missing: '未配置可用的 origin',
+  auth_failed: 'origin 鉴权失败或无仓库读取权限',
+  network_failed: 'origin 网络连接失败或超时',
+  sync_failed: 'Git 同步失败，请检查本机 Git 或 origin 配置',
+  symbolic_ref: '远端跟踪引用为符号引用，无法单独更新',
+};
+
+async function syncRequestedBranch(folder, branch) {
+  const source = 'refs/heads/' + branch;
+  const ref = 'refs/remotes/origin/' + branch;
+  const failure = status => ({ branch, ref: null, commit: null, status, reason: branchSyncReasons[status] });
+  const git = args => runGit(folder, args);
+  if (!await git(['remote', 'get-url', 'origin']).catch(() => '')) return failure('origin_missing');
+  try {
+    const references = await git(['ls-remote', '--exit-code', '--refs', 'origin', source]);
+    const advertised = references.split(/\r?\n/).map(line => line.split('\t')).find(([, name]) => name === source)?.[0];
+    if (!advertised) return failure('not_found');
+    if (await git(['symbolic-ref', '--quiet', ref]).catch(() => '')) return failure('symbolic_ref');
+    const resolve = () => git(['rev-parse', '--verify', ref + '^{commit}']);
+    if (await resolve().catch(() => '') === advertised) {
+      return { branch, ref, commit: advertised, status: 'synced', fetched: false };
+    }
+    await git(['fetch', '--no-tags', '--no-recurse-submodules', '--no-prune', '--no-write-fetch-head',
+      '--no-auto-maintenance', '--refmap=', 'origin', '+' + source + ':' + ref]);
+    return { branch, ref, commit: await resolve(), status: 'synced', fetched: true };
+  } catch (error) {
+    return failure(error.gitExitCode === 2 ? 'not_found' : error.gitFailure ?? 'sync_failed');
+  }
+}
+
+export function unavailableRequirementSources(repositories = []) {
+  const unavailable = repositories.filter(repo => repo.requested && !repo.requested.commit);
+  return unavailable.length ? '指定分支源码不可用：' + unavailable
+    .map(repo => repo.name + '（' + (repo.requested.reason ?? '本机无引用') + '）').join('、') + '。' : '';
+}
+
 export async function sourceBaseline(project, requestedBranch) {
   if (!path.isAbsolute(project.repoPath ?? '')) throw new RequirementWait('repository', '项目根仓路径必须为绝对路径。');
   const root = await realpath(project.repoPath);
+  if (requestedBranch) {
+    if (/^HEAD$/i.test(requestedBranch)) throw new RequirementWait('repository', '请指定真实 Git 分支名称。');
+    await runGit(root, ['check-ref-format', 'refs/heads/' + requestedBranch])
+      .catch(() => { throw new RequirementWait('repository', '任务指定的 Git 分支名称无效。'); });
+  }
   const repos = project.analysisRepositories ?? [{ path: '.', branch: project.baseBranch }];
   const result = await Promise.all(repos.map(async (repository, index) => {
     const branch = repository.branch;
@@ -168,29 +212,22 @@ export async function sourceBaseline(project, requestedBranch) {
     }
     const commit = await git(['rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}']);
     const remote = await git(['rev-parse', '--verify', 'refs/remotes/origin/' + branch + '^{commit}']).catch(() => '');
-    let requested;
-    if (requestedBranch) {
-      for (const ref of ['refs/heads/' + requestedBranch, 'refs/remotes/origin/' + requestedBranch]) {
-        const sha = await git(['rev-parse', '--verify', ref + '^{commit}']).catch(() => '');
-        if (sha) {
-          requested = { branch: requestedBranch, ref, commit: sha };
-          break;
-        }
-      }
-      requested ??= { branch: requestedBranch, ref: null, commit: null };
-    }
+    const requested = requestedBranch && await syncRequestedBranch(folder, requestedBranch);
     return {
       repository_id: 'repo-' + (index + 1), name: path.basename(folder), path_or_url: folder,
       branch, commit, remote_baseline: remote || '无本地远端跟踪引用',
       worktree_commit: await git(['rev-parse', '--verify', 'HEAD^{commit}']),
       worktree_branch: await git(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => 'detached HEAD'),
       ...(requested ? { requested } : {}),
-      dirty_status: await git(['status', '--porcelain', '--untracked-files=no']).then(value => value ? '存在本机改动' : '无已跟踪文件改动'),
+      dirty_status: await git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=no']).then(value => value ? '存在本机改动' : '无已跟踪文件改动'),
       deployment_verification: '本机源码记录，实际部署由 SIT 部署指纹核验。',
     };
   }));
   if (requestedBranch && !result.some(repository => repository.requested.commit)) {
-    throw new RequirementWait('repository', '已登记的项目源码仓均未找到分支 ' + requestedBranch + '，请同步对应分支后继续。');
+    const details = unavailableRequirementSources(result);
+    const error = new RequirementWait('repository', '已登记的项目源码仓均未取得分支 ' + requestedBranch + '。' + details);
+    error.repositorySync = result.map(({ name, requested }) => ({ name, ...requested }));
+    throw error;
   }
   return result;
 }

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { requirementFeishu, fileToken, readCaseTemplate, RequirementWait, digest } from './requirement-feishu.js';
-import { generatorReferences, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sourceBaseline, writeJson } from './requirement-files.js';
+import { generatorReferences, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sourceBaseline, unavailableRequirementSources, writeJson } from './requirement-files.js';
 import { analyzeCaseCoverage, generateCases, generateValidatedCases, indexProvidedCases } from './requirement-generation.js';
 import { reviseMaterialCases } from './requirement-material-revision.js';
 import { publishCases, readProvidedCases } from './requirement-publication.js';
@@ -57,7 +57,9 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     }
   };
   const readSource = url => readRequirementWithInputs(client, url, settings.inputDirectories, workDir, { ...settings, checkDocument });
-  const captureRepositories = () => sourceBaseline(project, request.branch);
+  let requestedSources;
+  const captureRepositories = () => request.branch
+    ? (requestedSources ??= sourceBaseline(project, request.branch)) : sourceBaseline(project);
   let stage = '需求读取';
   try {
     if (options?.localSupplement && !job.requirement.cleanupOnly) {
@@ -271,11 +273,13 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     stage = '测试环境执行与恢复';
     journal.phase = stage;
     await save();
-    await progress(stage);
-    if (!journal.repositories) {
+    if (!journal.repositories || request.branch && !job.requirement.cleanupOnly) {
+      if (request.branch && !job.requirement.cleanupOnly) await progress('同步指定分支 ' + request.branch);
       journal.repositories = await captureRepositories();
+      delete journal.repositorySync;
       await save();
     }
+    await progress(stage);
     await executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, dataDir: config.dataDir, save, progress, codexBin: config.codexBin,
       plan: dependencies.plan, project, agentModel: dependencies.agentModel, review: dependencies.review,
       captureRepositories });
@@ -347,6 +351,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     const finalMessage = [
       ...(acceptance ? ['整体验收：' + acceptance] : []),
       '用例表：' + journal.publication.url,
+      unavailableRequirementSources(journal.repositories),
       ...(job.requirement.cleanupOnly ? [requirementCleanupAfterCancellation(job)
         ? '本轮已恢复清理，未完成的业务用例保留为未执行。' : '本轮已恢复清理并保留已有业务判定。'] : []),
       '执行统计：' + summary.total + ' 条，' + summary.pass + ' 通过，' + summary.fail + ' 失败，' + summary.blocked + ' 阻断，'
@@ -362,7 +367,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         + '，其中恢复后补证 ' + processChecks.filter(check => check.phase === 'post_cleanup' && check.disposition === 'proven').length
         + '，报告阶段 ' + processChecks.filter(check => check.phase === 'report_verification' && check.disposition === 'proven').length
         + '。原尝试的过程记录保留。'] : []),
-    ].join('\n');
+    ].filter(Boolean).join('\n');
     return { outcome: 'ready', finalMessage, requirementReport: artifact,
       requirementSummary: { ...summary, cleanup, caseUrl: journal.publication.url, ...(acceptance ? { acceptance } : {}),
         ...(incompleteFailures ? { incompleteFailures } : {}),
@@ -372,6 +377,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     const known = error instanceof RequirementWait;
     journal.phase = stage;
     journal.waitCode = known ? error.code : 'runner_error';
+    if (known && error.repositorySync) journal.repositorySync = error.repositorySync;
     await save();
     const restored = journal.mutations?.length && journal.mutations.every(verifiedMutationCleanup);
     const cleanup = restored || journal.cleanup?.verified ? '已核验恢复' : journal.mutations?.length ? '待核对清理台账' : '尚未记录业务变更';
@@ -380,6 +386,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       cleanupVerified: Boolean(restored || journal.cleanup?.verified), interruption: journal.waitCode });
     const finalMessage = [request.resultFormat === 'binary' ? '整体验收：不通过（验收未完成）。' : '',
       stage + '暂挂。' + (known ? error.message : '后台执行中断，请管理员检查本轮检查点。'),
+      known && error.repositorySync ? '' : unavailableRequirementSources(journal.repositories),
       journal.publication?.verified ? (journal.publication.external ? '已回读指定用例：' : '已发布并回读用例：') + journal.publication.url
         : journal.providedCases?.verified ? '已读取指定用例表，共 ' + journal.providedCases.count + ' 条。' : '',
       '已记录 ' + Object.keys(journal.results ?? {}).length + ' 条用例结果。清理状态：' + cleanup + '。'].filter(Boolean).join('\n');

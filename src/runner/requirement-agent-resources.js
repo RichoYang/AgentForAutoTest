@@ -193,21 +193,34 @@ async function readRequestedSource(root, args, repositories) {
   }
   const containing = repositories.filter(repository => inside(repository.path_or_url, target))
     .sort((a, b) => b.path_or_url.length - a.path_or_url.length)[0];
+  const unavailable = repository => repository.name + ' · ' + repository.requested.branch + ' · '
+    + (repository.requested.reason ?? '本机无引用');
   if (!['files', 'search'].includes(args.action)) {
-    if (!containing?.requested?.commit) throw agentError('Requested branch is unavailable in the selected repository');
+    if (!containing?.requested?.commit) throw agentError('Requested branch is unavailable in the selected repository'
+      + (containing?.requested ? ': ' + unavailable(containing) : ''));
     const base = path.relative(actualRoot, containing.path_or_url) || '.';
     const { ref, commit, branch } = containing.requested;
     if (args.ref && ![ref, commit, branch].includes(args.ref)) throw agentError('Git ref differs from the explicitly requested branch');
+    if (args.action === 'refs') {
+      const text = ref + ' ' + commit;
+      return { path: base, ref, origin: { kind: 'git', repository: base, ref, commit },
+        sha256: digest(text), start: 1, total: 1, text: '1: ' + text };
+    }
     if (args.action === 'read') {
       const file = path.relative(containing.path_or_url, target).split(path.sep).join('/');
       return readSource(root, { ...args, action: 'show', path: base, ref: commit, file });
     }
     return readSource(root, { ...args, path: base, ref: commit });
   }
+  const relevant = repositories.filter(repository => repository === containing || inside(target, repository.path_or_url));
+  const missing = relevant.filter(repository => repository.requested && !repository.requested.commit);
+  if (missing.length === relevant.length && missing.length) {
+    throw agentError('Requested branch is unavailable: ' + missing.map(unavailable).join('；'));
+  }
   const lines = [];
-  for (const repository of repositories) {
+  for (const repository of relevant) {
     const commit = repository.requested?.commit;
-    if (!commit || !inside(repository.path_or_url, target) && !inside(target, repository.path_or_url)) continue;
+    if (!commit) continue;
     const base = path.relative(actualRoot, repository.path_or_url).split(path.sep).join('/');
     const subpath = inside(repository.path_or_url, target) ? path.relative(repository.path_or_url, target).split(path.sep).join('/') : '';
     const exclusions = ['.env*', '.npmrc', 'settings.xml', '*.ini', '*.local.*', 'requirement-resource-bindings/**']
@@ -225,7 +238,8 @@ async function readRequestedSource(root, args, repositories) {
   }
   const offset = args.offset ?? 0, limit = args.limit ?? 100;
   return { path: path.relative(actualRoot, target), lines: lines.slice(offset, offset + limit), total: lines.length,
-    nextOffset: offset + limit < lines.length ? offset + limit : null };
+    nextOffset: offset + limit < lines.length ? offset + limit : null,
+    ...(missing.length ? { unavailableRepositories: missing.map(unavailable) } : {}) };
 }
 
 export function resourceURL(resource, relative) {

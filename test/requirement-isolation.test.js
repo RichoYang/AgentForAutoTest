@@ -23,6 +23,31 @@ const check = (field, expected, assertion = 1) => ({ field, expected, assertion,
 const budget = { id: 'budget', label: '预算余额', type: 'number', unit: '元', unitField: ['currency'], field: ['balance'] };
 const budgetOutputs = { balance: ['data', 'balance'], currency: ['data', 'currency'], unrelated: ['data', 'unrelated'] };
 
+test('requested source errors name the repository and distinguish denied and unavailable origins', async t => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'agentos-required-origin-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const endpoint = await localServer(t, (req, res) => {
+    res.writeHead(req.url.startsWith('/denied/') ? 403 : 503);
+    res.end();
+  });
+  const repo = path.join(root, 'server');
+  const git = args => command('git', ['-C', repo, ...args]);
+  await command('git', ['init', '-b', 'wl-prd', repo]);
+  await git(['-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'Baseline']);
+  await git(['branch', 'uat-merge']);
+  await git(['remote', 'add', 'origin', endpoint + '/denied']);
+  const project = { repoPath: repo, baseBranch: 'wl-prd' };
+  for (const [route, status, reason] of [
+    ['denied', 'auth_failed', '鉴权失败'],
+    ['unavailable', 'network_failed', '网络连接失败'],
+  ]) {
+    await git(['remote', 'set-url', 'origin', endpoint + '/' + route]);
+    await assert.rejects(sourceBaseline(project, 'uat-merge'), error => error.code === 'repository'
+      && error.message.includes('server') && error.message.includes(reason)
+      && error.repositorySync[0].status === status && error.repositorySync[0].commit === null);
+  }
+});
+
 test('static mixed outcomes preserve compared failures across later missing data and transport failures', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'agentos-static-mixed-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -456,23 +481,43 @@ test('structured requirement reads named supplements, comments and the designate
   assert.equal(source.documents[0].comments[0].replies[0].content, '确认 15.2 范围');
 
   const repo = path.join(root, 'repo');
-  await command('git', ['init', '-b', 'uat-merge', repo]);
-  await writeFile(path.join(repo, 'contract.txt'), 'budget comes from the named branch');
-  await command('git', ['-C', repo, 'add', '--', 'contract.txt']);
-  await command('git', ['-C', repo, '-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid',
-    'commit', '-m', 'Add contract']);
-  const branchCommit = (await command('git', ['-C', repo, 'rev-parse', 'HEAD'])).trim();
-  await command('git', ['-C', repo, 'switch', '-c', 'main']);
-  await command('git', ['-C', repo, 'rm', '--', 'contract.txt']);
-  await command('git', ['-C', repo, '-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Remove contract']);
-  Object.assign(project, { repoPath: repo, baseBranch: 'main' });
-  const pinned = await sourceBaseline(project, 'uat-merge');
-  assert.equal(pinned[0].requested.commit, branchCommit);
-  assert.equal(pinned[0].worktree_branch, 'main');
-  assert.deepEqual((await readSource(repo, { action: 'files' }, pinned)).lines, ['contract.txt']);
-  assert.match((await readSource(repo, { action: 'search', pattern: 'named branch' }, pinned)).lines[0], /contract\.txt:1:budget/);
-  assert.equal((await readSource(repo, { action: 'read', path: 'contract.txt' }, pinned)).origin.commit, branchCommit);
-  await assert.rejects(readSource(repo, { action: 'show', path: '.', ref: 'HEAD', file: 'contract.txt' }, pinned), /explicitly requested branch/);
+  const seed = path.join(root, 'seed');
+  const origin = path.join(root, 'origin');
+  const git = (cwd, args) => command('git', ['-C', cwd, ...args]).then(value => value.trim());
+  const commit = (cwd, message) => git(cwd, ['-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '--allow-empty', '-m', message]);
+  await command('git', ['init', '-b', 'wl-prd', seed]);
+  await commit(seed, 'Default branch');
+  const defaultCommit = await git(seed, ['rev-parse', 'HEAD']);
+  await git(seed, ['switch', '-c', 'uat-merge']);
+  await writeFile(path.join(seed, 'contract.txt'), 'budget comes from the named branch');
+  await git(seed, ['add', '--', 'contract.txt']);
+  await commit(seed, 'Add contract');
+  const branchCommit = await git(seed, ['rev-parse', 'HEAD']);
+  await command('git', ['init', '--bare', origin]);
+  await git(seed, ['push', origin, 'wl-prd', 'uat-merge']);
+  await command('git', ['clone', '--no-local', '--single-branch', '--branch', 'wl-prd', origin, repo]);
+  const otherOrigin = path.join(root, 'other-origin');
+  await command('git', ['init', '--bare', otherOrigin]);
+  await git(seed, ['push', otherOrigin, 'wl-prd']);
+  await command('git', ['clone', '--single-branch', '--branch', 'wl-prd', otherOrigin, path.join(repo, 'component')]);
+  await git(seed, ['switch', 'wl-prd']);
+  await commit(seed, 'Advance unrelated branch');
+  await git(seed, ['tag', 'default-release']);
+  await git(seed, ['push', origin, 'wl-prd', 'default-release']);
+  const expectedRefspec = '+refs/heads/wl-prd:refs/remotes/origin/wl-prd';
+  const requestedRef = 'refs/remotes/origin/uat-merge';
+  const fetchHeadFile = path.join(repo, '.git', 'FETCH_HEAD');
+  const fetchHeadBefore = await readFile(fetchHeadFile, 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  assert.equal(await git(repo, ['config', '--get', 'remote.origin.fetch']), expectedRefspec);
+  await assert.rejects(git(repo, ['rev-parse', '--verify', requestedRef]));
+  await git(repo, ['branch', 'uat-merge']); // A stale personal branch is not the remote source.
+  await writeFile(path.join(repo, 'contract.txt'), 'untracked personal contents');
+  Object.assign(project, { repoPath: repo, baseBranch: 'wl-prd',
+    analysisRepositories: [{ path: '.', branch: 'wl-prd' }, { path: 'component', branch: 'wl-prd' }] });
 
   const requests = [];
   const endpoint = await localServer(t, (req, res) => {
@@ -504,6 +549,32 @@ test('structured requirement reads named supplements, comments and the designate
   assert.equal(finished.requirementSummary.caseUrl, workbook);
   assert.deepEqual(requests, ['GET /budget']);
   assert.equal(copies.size, 1);
+  const finishedJournal = await readJson(path.join(root, 'requirement-tests', backgroundId, 'journal.json'));
+  const pinned = finishedJournal.repositories;
+  assert.deepEqual(pinned[0].requested, { branch: 'uat-merge', ref: requestedRef, commit: branchCommit, status: 'synced', fetched: true });
+  assert.equal(pinned[1].requested.status, 'not_found');
+  assert.match(finished.finalMessage, /component（origin 无此分支）/);
+  assert.equal(Object.values(finishedJournal.sourceAttempts)[0].repositories[0].requested.commit, branchCommit);
+  assert.equal(pinned[0].worktree_branch, 'wl-prd');
+  assert.equal(await git(repo, ['rev-parse', 'HEAD']), defaultCommit);
+  assert.equal(await git(repo, ['rev-parse', 'refs/remotes/origin/wl-prd']), defaultCommit);
+  assert.equal(await git(repo, ['tag', '--list']), '');
+  assert.equal(await git(repo, ['rev-parse', 'refs/heads/uat-merge']), defaultCommit);
+  assert.equal(await git(repo, ['rev-parse', requestedRef]), branchCommit);
+  assert.equal(await git(repo, ['config', '--get', 'remote.origin.fetch']), expectedRefspec);
+  assert.equal(await readFile(fetchHeadFile, 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }), fetchHeadBefore);
+  assert.equal(await readFile(path.join(repo, 'contract.txt'), 'utf8'), 'untracked personal contents');
+  // The saved attempt still reads its commit after a later ref update.
+  await git(repo, ['update-ref', requestedRef, defaultCommit]);
+  assert.deepEqual((await readSource(repo, { action: 'files' }, pinned)).lines, ['contract.txt']);
+  assert.match((await readSource(repo, { action: 'search', pattern: 'named branch' }, pinned)).lines[0], /contract\.txt:1:budget/);
+  assert.equal((await readSource(repo, { action: 'read', path: 'contract.txt' }, pinned)).origin.commit, branchCommit);
+  assert.equal((await readSource(repo, { action: 'refs' }, pinned)).origin.commit, branchCommit);
+  await assert.rejects(readSource(repo, { action: 'search', path: 'component', pattern: 'test' }, pinned), /component.*origin 无此分支/);
+  await assert.rejects(readSource(repo, { action: 'show', path: '.', ref: 'HEAD', file: 'contract.txt' }, pinned), /explicitly requested branch/);
   const normalized = await readJson(path.join(root, 'requirement-tests', backgroundId, 'normalized-report.json'));
   assert.equal(normalized.meta.requirement_sources[1].location, supplement);
   assert.equal(normalized.meta.test_case_sources[0].location, workbook);
@@ -521,6 +592,10 @@ test('an original Feishu job resumes past its legacy release wait and records HT
   await command('git', ['init', '-b', 'main', repo]);
   await command('git', ['-C', repo, '-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid',
     'commit', '--allow-empty', '-m', 'Local fixture']);
+  const origin = path.join(root, 'origin');
+  await command('git', ['init', '--bare', origin]);
+  await command('git', ['-C', repo, 'remote', 'add', 'origin', origin]);
+  await command('git', ['-C', repo, 'push', 'origin', 'main']);
   const iniPath = path.join(root, 'uat.ini');
   const fakeCli = path.join(root, 'no-cli.cmd');
   await writeFile(fakeCli, '@exit /b 94\r\n');

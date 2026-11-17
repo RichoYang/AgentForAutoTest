@@ -14,7 +14,19 @@ export async function git(cwd, args) {
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' },
     });
     return stdout.trim();
-  } catch { throw new Error('Git 操作失败或超时；请在本机检查 origin、分支、网络与登录。'); }
+  } catch (error) {
+    const stderr = String(error.stderr ?? '');
+    const failure = new Error('Git 操作失败或超时；请在本机检查 origin、分支、网络与登录。');
+    failure.gitExitCode = error.code;
+    if (/authenticat|credential|could not read (?:username|password)|permission denied|access denied|\b(?:401|403)\b/i.test(stderr)) {
+      failure.gitFailure = 'auth_failed';
+    } else if (error.killed || /could not (?:resolve|connect)|failed to connect|timed? out|connection (?:reset|refused|closed)|SSL connect|certificate|unexpected disconnect|early EOF|\b(?:429|50[0234])\b/i.test(stderr)) {
+      failure.gitFailure = 'network_failed';
+    } else {
+      failure.gitFailure = 'sync_failed';
+    }
+    throw failure;
+  }
 }
 function stop(name, reason) { throw new Error(`源码同步受阻（${name}）：${reason}。`); }
 export async function repositories(project) {

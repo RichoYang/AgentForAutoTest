@@ -98,10 +98,12 @@ export async function buildRequirementReport({ job, journal, index, manifest, co
   }
   const sourceAttempts = Object.values(journal.sourceAttempts ?? {});
   const reportRepositories = (journal.repositories ?? []).map(({ worktree_commit, worktree_branch, requested, ...repo }) => ({
-    ...repo, branch: worktree_branch ?? repo.branch, commit: worktree_commit ?? repo.commit,
+    ...repo, branch: requested?.commit ? requested.branch : worktree_branch ?? repo.branch,
+    commit: requested?.commit ?? worktree_commit ?? repo.commit,
     notes: [repo.notes, '配置目标 ' + repo.branch + ' · ' + repo.commit,
-      requested && '任务指定分支 ' + requested.branch + ' · ' + (requested.commit ?? '本机无引用'),
-      worktree_commit ? '工作树起始 HEAD，文件读取以尝试证据为准。' : '历史记录未核对工作树 HEAD。'].filter(Boolean).join('。'),
+      requested && '任务指定分支 ' + requested.branch + ' · ' + (requested.commit ?? requested.reason ?? '本机无引用'),
+      worktree_commit ? '工作树起始 HEAD ' + worktree_branch + ' · ' + worktree_commit + '，文件读取以尝试证据为准。'
+        : '历史记录未核对工作树 HEAD。'].filter(Boolean).join('。'),
   }));
   const unexecutedReason = requirementCleanupAfterCancellation(job) ? '取消后仅执行清理，本轮未运行此用例。'
     : '本轮未运行此用例。';
