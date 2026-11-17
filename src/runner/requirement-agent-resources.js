@@ -103,13 +103,15 @@ function resolveRoute(value, input) {
   });
 }
 
-export async function readSource(root, args) {
+const sensitiveSourcePath = /(?:^|[\\/])(?:\.git|\.env[^\\/]*|\.npmrc|settings\.xml|requirement-resource-bindings|[^\\/]+\.ini|[^\\/]+\.local\.[^\\/]+)(?:[\\/]|$)/i;
+
+export async function readSource(root, args, repositories = []) {
+  if (repositories.some(repository => repository.requested)) return readRequestedSource(root, args, repositories);
   const actualRoot = await realpath(root);
   const target = await realpath(path.resolve(root, args.path ?? '.'));
   const relative = path.relative(actualRoot, target);
   if (relative.startsWith('..') || path.isAbsolute(relative)) throw agentError('Source path is outside this project');
-  const sensitivePath = /(?:^|[\\/])(?:\.git|\.env[^\\/]*|\.npmrc|settings\.xml|requirement-resource-bindings|[^\\/]+\.ini|[^\\/]+\.local\.[^\\/]+)(?:[\\/]|$)/i;
-  if (sensitivePath.test(relative) || sensitivePath.test(args.file ?? '')) throw agentError('Credentials and repository internals are not source-tool output');
+  if (sensitiveSourcePath.test(relative) || sensitiveSourcePath.test(args.file ?? '')) throw agentError('Credentials and repository internals are not source-tool output');
   const git = async (folder, argv, encoding = 'utf8') => (await exec('git', ['-C', folder, ...argv],
     { encoding, windowsHide: true, maxBuffer: 32 * 1024 * 1024 })).stdout;
   const readGitRoot = async folder => {
@@ -177,6 +179,53 @@ export async function readSource(root, args) {
   }
   if (repo && await head(repo).catch(() => null) !== commit) throw agentError('Source HEAD changed while reading; read the file again');
   return { path: relative, ...listing(bytes, { kind: 'worktree', repository: repo ? path.relative(actualRoot, repo) || '.' : null, file, commit, status }) };
+}
+
+async function readRequestedSource(root, args, repositories) {
+  const actualRoot = await realpath(root);
+  const target = path.resolve(actualRoot, args.path ?? '.');
+  const inside = (parent, child) => {
+    const relative = path.relative(parent, child);
+    return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep);
+  };
+  if (!inside(actualRoot, target) || sensitiveSourcePath.test(path.relative(actualRoot, target))) {
+    throw agentError('Source path is outside this project or not eligible for source-tool output');
+  }
+  const containing = repositories.filter(repository => inside(repository.path_or_url, target))
+    .sort((a, b) => b.path_or_url.length - a.path_or_url.length)[0];
+  if (!['files', 'search'].includes(args.action)) {
+    if (!containing?.requested?.commit) throw agentError('Requested branch is unavailable in the selected repository');
+    const base = path.relative(actualRoot, containing.path_or_url) || '.';
+    const { ref, commit, branch } = containing.requested;
+    if (args.ref && ![ref, commit, branch].includes(args.ref)) throw agentError('Git ref differs from the explicitly requested branch');
+    if (args.action === 'read') {
+      const file = path.relative(containing.path_or_url, target).split(path.sep).join('/');
+      return readSource(root, { ...args, action: 'show', path: base, ref: commit, file });
+    }
+    return readSource(root, { ...args, path: base, ref: commit });
+  }
+  const lines = [];
+  for (const repository of repositories) {
+    const commit = repository.requested?.commit;
+    if (!commit || !inside(repository.path_or_url, target) && !inside(target, repository.path_or_url)) continue;
+    const base = path.relative(actualRoot, repository.path_or_url).split(path.sep).join('/');
+    const subpath = inside(repository.path_or_url, target) ? path.relative(repository.path_or_url, target).split(path.sep).join('/') : '';
+    const exclusions = ['.env*', '.npmrc', 'settings.xml', '*.ini', '*.local.*', 'requirement-resource-bindings/**']
+      .map(pattern => ':(exclude,glob,icase)**/' + pattern);
+    const argv = args.action === 'files' ? ['ls-tree', '-r', '--name-only', '-z', commit, '--', ...(subpath ? [subpath] : [])]
+      : ['grep', '-n', '-I', '-E', '-e', args.pattern, commit, '--', subpath ? ':(literal)' + subpath : '.', ...exclusions];
+    const { stdout } = await exec('git', ['-C', repository.path_or_url, '-c', 'core.quotepath=false', ...argv],
+      { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 })
+      .catch(error => args.action === 'search' && error.code === 1 ? { stdout: '' } : Promise.reject(error));
+    for (const entry of stdout.split(args.action === 'files' ? '\0' : /\r?\n/).filter(Boolean)) {
+      const value = args.action === 'search' ? entry.slice(commit.length + 1) : entry;
+      const file = args.action === 'search' ? value.split(/:\d+:/, 1)[0] : value;
+      if (!sensitiveSourcePath.test(file)) lines.push(base ? base + '/' + value : value);
+    }
+  }
+  const offset = args.offset ?? 0, limit = args.limit ?? 100;
+  return { path: path.relative(actualRoot, target), lines: lines.slice(offset, offset + limit), total: lines.length,
+    nextOffset: offset + limit < lines.length ? offset + limit : null };
 }
 
 export function resourceURL(resource, relative) {

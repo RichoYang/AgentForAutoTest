@@ -1,5 +1,30 @@
 import { digest, fileToken, RequirementWait } from './requirement-feishu.js';
 
+const annotationHeaders = new Set(['测试结果', '备注说明', '测试截图']);
+
+export async function readProvidedCases(client, reference, headers) {
+  const { url, token } = await client.resolveInput(reference, 'cases');
+  const { sheets, revision, title } = await client.workbook(token);
+  const sheet = sheets.find(item => item.title === '测试场景');
+  if (!sheet) throw new RequirementWait('case_sheet', '指定用例表缺少「测试场景」页。');
+  const read = async tab => {
+    const [actual, ...body] = await client.readGrid(token, tab, tab.grid_properties.row_count, headers.length);
+    if (digest(actual ?? []) !== digest(headers)) throw new RequirementWait('case_sheet', '指定用例表的列不符合本项目测试用例模板。');
+    const rows = body.map(row => row.map((cell, col) => annotationHeaders.has(headers[col]) ? '' : cell));
+    while (rows.length && rows.at(-1).every(cell => cell === '')) rows.pop();
+    return rows;
+  };
+  const rows = await read(sheet);
+  if (!rows.length) throw new RequirementWait('case_sheet', '指定用例表没有可执行的用例。');
+  const workbook = await client.workbook(token);
+  const confirmed = workbook.sheets.find(item => item.title === sheet.title && item.sheet_id === sheet.sheet_id);
+  if (!confirmed || workbook.revision !== revision || !revision && digest(await read(confirmed)) !== digest(rows)) {
+    throw new RequirementWait('publication_version', '读取期间指定用例表版本发生变化，请重试。');
+  }
+  return { rows, receipt: { verified: true, external: true, title: title || '指定测试用例', url, fileToken: token, sheetId: sheet.sheet_id,
+    revision, version: digest([headers, ...rows]) } };
+}
+
 export function versionNames(title, now, timeZone) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
     timeZone, year: 'numeric', month: '2-digit',
@@ -139,7 +164,6 @@ function sameCell(left, right) {
 }
 
 function comparePublishedCases(actual, expected) {
-  const annotationHeaders = new Set(['测试结果', '备注说明', '测试截图']);
   const annotations = [], conflicts = [];
   for (let row = 0; row < Math.max(actual.length, expected.length); row++) {
     for (let col = 0; col < Math.max(actual[row]?.length ?? 0, expected[row]?.length ?? 0); col++) {

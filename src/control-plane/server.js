@@ -536,7 +536,7 @@ async function handleFeishuEvent(context, envelope) {
     type: 'im.message.receive_v1', message_id: message.message_id,create_time:message.create_time,
     chat_id: message.chat_id, chat_type: message.chat_type,
     sender_id: event.sender?.sender_id?.open_id, sender_type: 'user',
-    content: parsed.text, mentions: message.mentions, attachments,
+    content: parsed.text, structured_content: parsed.structuredText, mentions: message.mentions, attachments,
     reply_to: message.parent_id, root_id: message.root_id, thread_id: message.thread_id,
     agent_role: context.config.feishu.role ?? 'owner_intake',
     agent_profile: context.config.feishu.profile ?? null,

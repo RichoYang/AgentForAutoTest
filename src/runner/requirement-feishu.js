@@ -55,7 +55,75 @@ export function requirementFeishu(identity, cwd, cliEntry = process.env.LARK_CLI
     return items;
   }
 
+  async function drivePages(args, key) {
+    const items = [];
+    const seen = new Set();
+    let cursor;
+    do {
+      const { data } = await call(['drive', ...args, '--as', 'user', '--format', 'json',
+        ...(cursor ? ['--page-token', cursor] : [])]);
+      if (!Array.isArray(data?.[key])) throw new RequirementWait('feishu_access', '飞书未返回可完整核验的文档列表。');
+      items.push(...data[key]);
+      cursor = data.has_more ? data.page_token : undefined;
+      if (data.has_more && (!cursor || seen.has(cursor))) throw new RequirementWait('feishu_access', '飞书文档列表分页不完整。');
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return items;
+  }
+
+  async function resolveInput(reference, kind) {
+    const allowed = kind === 'cases' ? ['sheets', 'wiki'] : ['docx', 'wiki'];
+    const canonical = value => {
+      try {
+        const url = new URL(value);
+        if (url.protocol === 'https:' && url.host === identity.domain && !url.username && !url.password
+          && new RegExp('^/(?:' + allowed.join('|') + ')/[A-Za-z0-9]+/?$').test(url.pathname)) {
+          return url.origin + url.pathname.replace(/\/$/, '');
+        }
+      } catch { /* Titles are looked up using the bound document identity. */ }
+      return null;
+    };
+    let url = canonical(reference);
+    if (!url) {
+      const label = kind === 'cases' ? '测试用例' : '需求材料';
+      if (/https?:\/\//i.test(reference)) {
+        throw new RequirementWait('requirement_source', label + '链接不符合项目绑定的飞书租户和类型。');
+      }
+      const matches = await drivePages(['+search', '--query', [...reference].slice(0, 30).join(''),
+        '--only-title', '--doc-types', kind === 'cases' ? 'sheet,wiki' : 'docx,wiki'], 'results');
+      const candidates = [...new Set(matches.filter(item => item.title_highlighted?.replace(/<\/?h>/g, '').trim() === reference)
+        .map(item => canonical(item.result_meta?.url)).filter(Boolean))];
+      if (candidates.length !== 1) {
+        throw new RequirementWait('requirement_source', candidates.length ? '找到多份同名' + label + '，请提供确切链接。'
+          : '没有找到标题完全匹配的' + label + '，请提供可读取的链接或核对文档权限。');
+      }
+      [url] = candidates;
+    }
+    if (kind !== 'cases') return { url };
+    if (new URL(url).pathname.startsWith('/sheets/')) return { url, token: fileToken(url, identity.domain, 'sheets') };
+    const { data } = await call(['drive', '+inspect', '--url', url, '--as', 'user', '--format', 'json']);
+    if (data?.type !== 'sheet' || !/^[A-Za-z0-9]+$/.test(data.token)) {
+      throw new RequirementWait('case_sheet', '指定的用例链接未指向可读取的飞书电子表格。');
+    }
+    return { url, token: data.token };
+  }
+
   return {
+    resolveInput,
+    async readComments(url) {
+      const args = ['--url', url];
+      const comments = await drivePages(['+list-comments', ...args, '--solved-status', 'all', '--need-relation'], 'items');
+      const threads = [];
+      for (const comment of comments) {
+        if (!/^[A-Za-z0-9_-]+$/.test(comment.comment_id ?? '')) {
+          throw new RequirementWait('requirement_source', '补充文档评论缺少可回读的评论标识。');
+        }
+        const replies = await drivePages(['+list-replies', ...args, '--comment-id', comment.comment_id], 'items');
+        threads.push({ id: comment.comment_id, solved: comment.is_solved ?? null,
+          replies: replies.map(reply => ({ id: reply.reply_id, content: reply.content })) });
+      }
+      return threads;
+    },
     async verify() {
       const auth = await call(['auth', 'status', '--verify', '--json']);
       if (auth.appId !== identity.appId || auth.identities?.user?.openId !== identity.openId
@@ -63,7 +131,7 @@ export function requirementFeishu(identity, cwd, cliEntry = process.env.LARK_CLI
         throw new RequirementWait('feishu_identity', '飞书文档操作身份校验失败，请重新授权指定的用户 profile。');
       }
     },
-    async readRequirement(url) {
+    async readRequirement(url, { supplementary = false } = {}) {
       const result = await call(['docs', '+fetch', '--api-version', 'v2', '--doc', url,
         '--as', 'user', '--scope', 'full', '--detail', 'with-ids', '--doc-format', 'xml']);
       const doc = result.data?.document;
@@ -108,7 +176,8 @@ export function requirementFeishu(identity, cwd, cliEntry = process.env.LARK_CLI
           } else {
             const args = type === 'mindnote' ? ['drive', '+preview', '--file-token', token, '--type', 'image', '--if-exists', 'overwrite']
               : ['docs', '+media-download', '--token', token, '--type', type === 'whiteboard' ? 'whiteboard' : 'media', '--overwrite'];
-            materials.push({ anchor, type, token, ...(await localPreview(anchor, args)) });
+            const previewKey = supplementary ? doc.document_id + ':' + anchor : anchor;
+            materials.push({ anchor, type, token, ...(await localPreview(previewKey, args)) });
           }
         } catch {
           unread.push(type + '（块 ' + anchor + '）');
@@ -125,7 +194,7 @@ export function requirementFeishu(identity, cwd, cliEntry = process.env.LARK_CLI
       const listing = await api('GET', uri + '/sheets/query');
       const sheets = listing?.sheets?.sort((a, b) => a.index - b.index);
       if (!sheets?.length) throw new RequirementWait('case_sheet', '飞书工作簿没有可读取的工作表。');
-      return { sheets, revision: info.spreadsheet?.revision ?? null };
+      return { sheets, revision: info.spreadsheet?.revision ?? null, title: info.spreadsheet?.title ?? null };
     },
     async readGrid(token, sheet, rows, columns) {
       const values = [];

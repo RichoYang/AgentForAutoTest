@@ -178,7 +178,7 @@ export function createRequirementAgent(config, options) {
   const context = scope => ({ ...scope, state, saveState });
   async function revalidateSource(scope, old, sourceRef, purpose, failure) {
     const fresh = await readSource(scope.sourceRoot, { action: old.file ? 'show' : 'read', path: old.path || '.',
-      ...(old.file ? { file: old.file, ref: old.ref } : {}), start: old.start, end: old.end ?? old.start + 199 });
+      ...(old.file ? { file: old.file, ref: old.ref } : {}), start: old.start, end: old.end ?? old.start + 199 }, scope.repositories);
     const changed = fresh.sha256 !== old.sha256 || old.contentSha256 && fresh.contentSha256 !== old.contentSha256
       || old.origin && (old.origin.repository !== fresh.origin?.repository || old.origin.file !== fresh.origin?.file);
     await scope.recordSource?.(sourceRef, fresh, purpose, changed ? 'changed' : 'verified');
@@ -599,7 +599,7 @@ export function createRequirementAgent(config, options) {
             : { index: i, error: result.reason.safeMessage ?? result.reason.code ?? result.reason.name, gap: result.reason.gap });
         }
         if (name === 'source') {
-          const result = scope.checkOutput(sanitized(await readSource(scope.sourceRoot, args)));
+          const result = scope.checkOutput(sanitized(await readSource(scope.sourceRoot, args, scope.repositories)));
           const sourceRef = 'SRC-' + digest(result).slice(0, 24);
           result.readAt = state.sources[sourceRef]?.readAt ?? new Date().toISOString();
           await scope.recordSource?.(sourceRef, result, 'read', 'observed');

@@ -719,10 +719,13 @@ function routeRequirementJob(state, input) {
       || state.cardMessages?.['question:' + job.questionId]?.messageId === request.parent && request.parent));
   if (!prior) {
     if (!input.requirementAddressed) return { reason: 'requirement_unaddressed' };
-    return request.url ? null : { reason: 'missing_requirement' };
+    return request.url || request.options?.documentTitle ? null : { reason: 'missing_requirement' };
   }
   if (prior.senderId !== input.senderId) return { reason: 'requirement_requester_mismatch' };
-  if (request.url && request.url !== prior.requirement.url) return { reason: 'different_requirement' };
+  if (request.url && request.url !== prior.requirement.url
+    || request.options?.documentTitle && request.options.documentTitle !== prior.requirement.options?.documentTitle) {
+    return { reason: 'different_requirement' };
+  }
   const command = input.requirementCommand;
   const current = reason => ({ current: prior, reason });
   if (command === 'status') return current('requirement_status');

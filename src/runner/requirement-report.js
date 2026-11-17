@@ -82,9 +82,10 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
   const specialty = { fix_verifications: [], code_chains: [], export_validations: [] };
   const processNotes = [];
   const sourceAttempts = Object.values(journal.sourceAttempts ?? {});
-  const reportRepositories = (journal.repositories ?? []).map(({ worktree_commit, worktree_branch, ...repo }) => ({
+  const reportRepositories = (journal.repositories ?? []).map(({ worktree_commit, worktree_branch, requested, ...repo }) => ({
     ...repo, branch: worktree_branch ?? repo.branch, commit: worktree_commit ?? repo.commit,
     notes: [repo.notes, '配置目标 ' + repo.branch + ' · ' + repo.commit,
+      requested && '任务指定分支 ' + requested.branch + ' · ' + (requested.commit ?? '本机无引用'),
       worktree_commit ? '工作树起始 HEAD，文件读取以尝试证据为准。' : '历史记录未核对工作树 HEAD。'].filter(Boolean).join('。'),
   }));
   const unexecutedReason = requirementCleanupAfterCancellation(job) ? '取消后仅执行清理，本轮未运行此用例。'
@@ -161,7 +162,9 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
     cases.push({
       case_id: item.caseId, order: item.row, requirement_ref: item.requirementIds, title_type: cells['测试场景'] + ' · ' + cells['用例类型'],
       module: cells['模块'], page_or_target: cells['页面'], preconditions: cells['前置条件'], steps: cells['操作步骤'],
-      expected_result: cells['预期结果'], actual_result: result?.actual ?? unexecutedReason,
+      expected_result: cells['预期结果'],
+      actual_result: (source.request?.resultFormat === 'binary' ? '用例验收：'
+        + (result?.status === '通过' ? '通过' : '不通过') + '。' : '') + (result?.actual ?? unexecutedReason),
       status: result?.status ?? '未执行', evidence_ids: ids, issue_ids: item.issueId ? [item.issueId] : [],
       ...(result?.blocker ? { blocker_dependency: result.blocker.dependency } : {}),
       test_data_id: mutationLedger.filter(row => row.case_ids.includes(item.caseId)).map(row => row.primary_business_key),
@@ -194,7 +197,9 @@ export async function buildRequirementReport({ job, journal, index, manifest, re
       test_environment: journal.environment, execution_date: start.year + '-' + start.month + '-' + start.day,
       completion_time: displayTime(journal.reportTime, timeZone), executor: job.agentProfile,
       requirement_sources: [{ name: source.title, location: source.url, version: String(source.revision),
-        scope: '正文及 ' + source.embedded.length + ' 张嵌入表、' + (source.materials?.length ?? 0) + ' 项复杂材料', access_method: 'local Feishu CLI' }],
+        scope: '正文及 ' + source.embedded.length + ' 张嵌入表、' + (source.materials?.length ?? 0) + ' 项复杂材料', access_method: 'local Feishu CLI' },
+      ...(source.documents ?? []).map(document => ({ name: document.title, location: document.url, version: String(document.revision),
+        scope: '补充正文、' + document.comments.length + ' 条评论线索', access_method: 'local Feishu CLI' }))],
       test_case_sources: [...(journal.publicationHistory ?? []), journal.publication]
         .map(receipt => ({ name: receipt.title, location: receipt.url, version: receipt.version })),
       code_baselines: reportRepositories.map(repo => ({ name: repo.name, location: repo.path_or_url,

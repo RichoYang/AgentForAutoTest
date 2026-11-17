@@ -130,19 +130,20 @@ export function parseFeishuMessage(message) {
   if (message.message_type === 'post') {
     for (const locale of Object.values(raw)) {
       if (!locale || typeof locale !== 'object') continue;
-      if (locale.title) text += `${locale.title} `;
+      if (locale.title) text += `${locale.title}\n`;
       for (const paragraph of locale.content ?? []) {
         for (const item of paragraph) {
           if (item.tag === 'text' || item.tag === 'a') text += `${item.text ?? ''} ${item.tag==='a'&&item.href&&item.href!==item.text?item.href:''} `;
           if (item.tag === 'img' && item.image_key) resources.push({ key: item.image_key, type: 'image' });
         }
+        text += '\n';
       }
     }
   }
   for (const mention of mentions) {
     if (mention.key) text = text.replaceAll(mention.key, '');
   }
-  return { text: text.replace(/\s+/g, ' ').trim(), resources };
+  return { text: text.replace(/\s+/g, ' ').trim(), structuredText: text.trim(), resources };
 }
 
 function safeJson(value) {

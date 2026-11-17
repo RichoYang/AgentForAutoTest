@@ -34,14 +34,42 @@ export async function privateDirectory(directory) {
   return realpath(directory);
 }
 
-export async function readRequirementWithInputs(client, url, directories, workDir) {
+export async function readRequirementWithInputs(client, url, directories, workDir, options = {}) {
   const source = await client.readRequirement(url);
-  if (!Object.keys(directories).length) return source;
+  const { localSupplement, request = {} } = options;
+  if (!Object.keys(directories).length && !Object.keys(request).length && !localSupplement) return source;
   const [supplements, developerFeedback] = await Promise.all([
     readMarkdownInputs(directories.supplementDirectory, true),
     readMarkdownInputs(directories.developerDirectory, false),
   ]);
   const inputs = { supplements, developerFeedback };
+  if (localSupplement) {
+    const { file, root } = localSupplement;
+    const canonical = await realpath(file).catch(() => null);
+    const stat = canonical && await lstat(file).catch(() => null);
+    if (!canonical || !stat?.isFile() || path.relative(file, canonical) || path.relative(root, await realpath(root))) {
+      throw new RequirementWait('requirement_source', '指定的本地补充 Markdown 无法读取或经过链接重定向。');
+    }
+    const name = path.relative(root, file);
+    inputs.supplements.push(markdownSections(name, await readFile(canonical, 'utf8'), true));
+  }
+  const documents = [];
+  const seen = new Set([source.id]);
+  const additionalMaterials = [];
+  for (const reference of request.supplementDocuments ?? []) {
+    const { url: documentUrl } = await client.resolveInput(reference, 'document');
+    options.checkDocument?.(documentUrl);
+    const document = await client.readRequirement(documentUrl, { supplementary: true });
+    if (seen.has(document.id)) continue;
+    seen.add(document.id);
+    const comments = /评论|comment/i.test(request.supplementNotes ?? '') ? await client.readComments(documentUrl) : [];
+    documents.push({ ...document, comments });
+    additionalMaterials.push(...(document.materials ?? []).map(material => ({
+      ...material, anchor: supplementaryAnchor(document, material.anchor),
+    })));
+  }
+  if (documents.length) inputs.documents = documents;
+  if (Object.keys(request).length) inputs.request = request;
   const images = [];
   if (directories.supplementDirectory) {
     const entries = await readdir(directories.supplementDirectory, { withFileTypes: true });
@@ -67,7 +95,7 @@ export async function readRequirementWithInputs(client, url, directories, workDi
     }
   }
   const legacyHash = source.legacyHash || images.length ? digest([source.legacyHash ?? source.hash, inputs]) : undefined;
-  const materials = [...(source.materials ?? []), ...images];
+  const materials = [...(source.materials ?? []), ...images, ...additionalMaterials];
   return { ...source, ...inputs,
     ...(materials.length ? { materials, legacyHash } : {}),
     hash: images.length ? digest([source.hash, inputs, images]) : digest([source.hash, inputs]) };
@@ -84,14 +112,22 @@ async function readMarkdownInputs(directory, withAnchors) {
   return Promise.all(files.map(async name => {
     const body = await readFile(path.join(directory, name), 'utf8');
     if (!withAnchors) return { name, body };
-    const sections = [...body.matchAll(/^#{1,6}\s+(.+)$/gm)];
-    if (!sections.length) sections.push(Object.assign([name, name], { index: 0 }));
-    return { name, sections: sections.map((section, index) => ({
-      anchor: 'local-' + digest([name, index, section[1]]).slice(0, 20),
-      title: section[1].trim(), text: body.slice(section.index, sections[index + 1]?.index).trim(),
-    })) };
+    return markdownSections(name, body);
   }));
 }
+
+function markdownSections(name, body, includeIntro = false) {
+  const sections = [...body.matchAll(/^#{1,6}\s+(.+)$/gm)];
+  if (!sections.length || includeIntro && sections[0].index > 0 && body.slice(0, sections[0].index).trim()) {
+    sections.unshift(Object.assign([name, name], { index: 0 }));
+  }
+  return { name, sections: sections.map((section, index) => ({
+    anchor: 'local-' + digest([name, index, section[1]]).slice(0, 20),
+    title: section[1].trim(), text: body.slice(section.index, sections[index + 1]?.index).trim(),
+  })) };
+}
+
+export const supplementaryAnchor = (document, block) => 'supplement-' + digest([document.id, block]).slice(0, 24);
 
 export async function loadSkill(spec, expectedName, relatives) {
   if (!spec || !path.isAbsolute(spec.path) || !/^[a-f0-9]{64}$/.test(spec.sha256)) {
@@ -114,11 +150,11 @@ export const generatorReferences = ['references/case-schema.md', 'scripts/publis
 export const regressionReferences = ['references/execution-standard.md', 'references/report-contract.md',
   'references/report-schema-v1.json', 'scripts/build-full-regression-report.mjs', 'assets/full-regression-report-template-v1.xlsx'];
 
-export async function sourceBaseline(project) {
+export async function sourceBaseline(project, requestedBranch) {
   if (!path.isAbsolute(project.repoPath ?? '')) throw new RequirementWait('repository', '项目根仓路径必须为绝对路径。');
   const root = await realpath(project.repoPath);
   const repos = project.analysisRepositories ?? [{ path: '.', branch: project.baseBranch }];
-  return Promise.all(repos.map(async (repository, index) => {
+  const result = await Promise.all(repos.map(async (repository, index) => {
     const branch = repository.branch;
     if (!repository.path || !branch || branch.startsWith('-')) throw new RequirementWait('repository', '项目仓库路径或分支未明确。');
     const folder = await realpath(path.resolve(root, repository.path));
@@ -132,13 +168,29 @@ export async function sourceBaseline(project) {
     }
     const commit = await git(['rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}']);
     const remote = await git(['rev-parse', '--verify', 'refs/remotes/origin/' + branch + '^{commit}']).catch(() => '');
+    let requested;
+    if (requestedBranch) {
+      for (const ref of ['refs/heads/' + requestedBranch, 'refs/remotes/origin/' + requestedBranch]) {
+        const sha = await git(['rev-parse', '--verify', ref + '^{commit}']).catch(() => '');
+        if (sha) {
+          requested = { branch: requestedBranch, ref, commit: sha };
+          break;
+        }
+      }
+      requested ??= { branch: requestedBranch, ref: null, commit: null };
+    }
     return {
       repository_id: 'repo-' + (index + 1), name: path.basename(folder), path_or_url: folder,
       branch, commit, remote_baseline: remote || '无本地远端跟踪引用',
       worktree_commit: await git(['rev-parse', '--verify', 'HEAD^{commit}']),
       worktree_branch: await git(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => 'detached HEAD'),
+      ...(requested ? { requested } : {}),
       dirty_status: await git(['status', '--porcelain', '--untracked-files=no']).then(value => value ? '存在本机改动' : '无已跟踪文件改动'),
       deployment_verification: '本机源码记录，实际部署由 SIT 部署指纹核验。',
     };
   }));
+  if (requestedBranch && !result.some(repository => repository.requested.commit)) {
+    throw new RequirementWait('repository', '已登记的项目源码仓均未找到分支 ' + requestedBranch + '，请同步对应分支后继续。');
+  }
+  return result;
 }

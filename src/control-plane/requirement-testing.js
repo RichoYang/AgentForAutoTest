@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { notifyJobEvent } from './server.js';
 import { requirementCompletion, requirementProgressLines } from './message-cards.js';
-import { requirementOptions, requirementTopicFingerprint, resolveRequirementOptions } from '../shared/requirement-options.js';
+import { requirementLinks, requirementOptions, requirementTopicFingerprint, resolveRequirementOptions } from '../shared/requirement-options.js';
 import { verifyExternalCleanupAfterJob } from '../runner/requirement-external-receipts.js';
 
 export const REQUIREMENT_TEST = 'requirement_test';
@@ -62,14 +62,7 @@ export function validateRequirementRoutes(projects, agents) {
   return routes;
 }
 
-export function requirementLinks(content, domain) {
-  const urls = new Set();
-  for (const match of String(content ?? '').matchAll(/https:\/\/[a-z0-9.-]+\/(?:docx|wiki)\/[A-Za-z0-9]+/gi)) {
-    const url = new URL(match[0]);
-    if (url.hostname === domain) urls.add(url.href);
-  }
-  return [...urls];
-}
+export { requirementLinks };
 
 export async function handleRequirementMessage(context, event) {
   const primary = context.requirementRoutes.get(event.agent_profile);
@@ -85,16 +78,16 @@ export async function handleRequirementMessage(context, event) {
   }
   const ids = new Set((event.mentions ?? []).map(m => m.id?.open_id ?? m.id ?? m.open_id).filter(Boolean));
   if (ids.size && !ids.has(bot.openId)) return { ignored: true };
-  const text = requirementCommandText(event.content, event.mentions);
+  const content = event.structured_content ?? event.content;
+  const text = requirementCommandText(content, event.mentions);
   const clarification = text.match(/^确认图示\s+(IMGQ-[a-f0-9]{12})\s+(.+)$/s);
   const command = clarification ? 'material_confirm' : requirementCommand(text);
   if (ids.size > 1) return reply('请在话题中只 @ 一个智能体，再发送需求链接。');
-  const links = requirementLinks(event.content, test.document.domain);
+  const links = requirementLinks(content, test.document.domain);
   if (route.binding ? links.some(url => url !== route.binding.documentUrl)
     : links.some(url => primary.topicDocuments?.has(url)) || (links.length && /^AgentOS隔离验收(?:\s|[：:])/.test(text))) {
     return { ignored: true, reason: 'requirement_topic_scope' };
   }
-  if (links.length > 1) return reply('每个话题只接受一份需求，请在单独话题中发起。');
   if (text === '核验外部回收') {
     if (!ids.has(bot.openId) || links.length) return { ignored: true, reason: 'external_receipt_unaddressed' };
     const state = await context.store.snapshot();
@@ -113,22 +106,29 @@ export async function handleRequirementMessage(context, event) {
     }
   }
   let options;
-  if (links.length && ids.has(bot.openId)) {
+  if (ids.has(bot.openId) && (links.length || /(?:需求文档|主需求)\s*(?:\*\*)?[:：]/.test(text))) {
     try {
-      options = requirementOptions(event.content);
-      resolveRequirementOptions(test, options);
+      options = requirementOptions(text, test.document.domain);
+      if (route.binding && options.documentUrl !== route.binding.documentUrl) {
+        return { ignored: true, reason: 'requirement_topic_scope' };
+      }
+      if (route.binding && (options.supplementDocuments?.length || options.caseSource || options.localSupplement)) {
+        return reply('该隔离话题只允许读取已绑定的输入材料。');
+      }
+      resolveRequirementOptions(test, { ...options, localSupplement: undefined });
     } catch (error) { return reply(error.message); }
   }
+  const { documentUrl = null, ...requestOptions } = options ?? {};
   const input = {
     projectId, projectName: project.displayName, chatId: event.chat_id, originChatType: 'group',
     sourceMessageId: event.message_id, replyToMessageId: event.message_id, senderId: event.sender_id,
     agentRole: REQUIREMENT_TEST, agentProfile: bot.profile, workflow: REQUIREMENT_TEST, stage: REQUIREMENT_TEST,
     taskIntent: REQUIREMENT_TEST, instruction: '需求测试',
-    requirement: { root, threadId: event.thread_id ?? null, parent: event.reply_to ?? event.parent_id ?? null, url: links[0] ?? null,
+    requirement: { root, threadId: event.thread_id ?? null, parent: event.reply_to ?? event.parent_id ?? null, url: documentUrl,
       ...(route.binding ? { topicBinding: requirementTopicFingerprint(project),
         ...(typeof event.event_id === 'string' ? { eventId: event.event_id } : {}) } : {}),
       ...(clarification ? { materialConfirmation: { id: clarification[1], answer: clarification[2].trim() } } : {}),
-      ...(options && Object.keys(options).length ? { options } : {}) },
+      ...(Object.keys(requestOptions).length ? { options: requestOptions } : {}) },
   };
   const result = await context.store.createJob({ ...input, requirementCommand: command, requirementAddressed: ids.has(bot.openId) });
   if (result?.duplicate) return { duplicate: true };
@@ -145,7 +145,7 @@ export async function handleRequirementMessage(context, event) {
   if (result?.reason === 'different_requirement') return reply('本话题已绑定另一份需求，请为新需求发起独立话题。');
   if (result?.reason === 'requirement_requester_mismatch' && ids.has(bot.openId)) return reply('请由原任务发起人在本话题操作。');
   if (ids.has(bot.openId) && command) return reply('本话题未找到可操作的需求测试任务。请回到原任务话题。');
-  if (result?.reason === 'missing_requirement' && ids.has(bot.openId)) return reply('请提供一份本租户的飞书需求文档链接。');
+  if (result?.reason === 'missing_requirement' && ids.has(bot.openId)) return reply('请提供本租户的飞书主需求链接，或填写「需求文档：准确标题」。补充文档和测试用例可以一起发送。');
   return { ignored: true, reason: result?.reason ?? 'requirement_unaddressed' };
 
   async function reply(message) {

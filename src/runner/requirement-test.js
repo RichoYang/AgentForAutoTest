@@ -3,7 +3,7 @@ import { requirementFeishu, fileToken, readCaseTemplate, RequirementWait, digest
 import { generatorReferences, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sourceBaseline, writeJson } from './requirement-files.js';
 import { generateValidatedCases } from './requirement-generation.js';
 import { reviseMaterialCases } from './requirement-material-revision.js';
-import { publishCases } from './requirement-publication.js';
+import { publishCases, readProvidedCases } from './requirement-publication.js';
 import { executeCases, requirementResources } from './requirement-execution.js';
 import { createRequirementAgent } from './requirement-agent.js';
 import { buildRequirementReport } from './requirement-report.js';
@@ -19,7 +19,8 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     || !matchesRequirementTopic(project, job)) {
     throw new Error('需求测试 Runner 项目绑定不符');
   }
-  const settings = resolveRequirementOptions(configured, job.requirement.options);
+  const options = job.requirement.options;
+  const settings = resolveRequirementOptions(configured, { ...options, localSupplement: undefined });
   let lastSummary;
   const progress = (current, completed = 0, total = 0, summary) => emit({
     type: 'progress', phase: 'tool_activity', activity: { current, completed, total, recent: [],
@@ -46,20 +47,43 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
   const casesFile = path.join(workDir, 'cases.json');
   const indexFile = path.join(workDir, 'case-index.json');
   const client = dependencies.client ?? requirementFeishu(settings.document, workDir);
-  const readSource = url => readRequirementWithInputs(client, url, settings.inputDirectories, workDir);
+  const request = settings.request;
+  const reserved = new Set(Object.values(config.projects).flatMap(candidate =>
+    candidate.requirementTest?.topicBindings?.map(binding => binding.documentUrl) ?? []));
+  const checkDocument = url => {
+    if (reserved.has(url) && (!job.requirement.topicBinding || url !== job.requirement.url)) {
+      throw new RequirementWait('requirement_source', '此文档只允许在已绑定的独立验收话题内使用。');
+    }
+  };
+  const readSource = url => readRequirementWithInputs(client, url, settings.inputDirectories, workDir, { ...settings, checkDocument });
+  const captureRepositories = () => sourceBaseline(project, request.branch);
   let stage = '需求读取';
   try {
+    if (options?.localSupplement && !job.requirement.cleanupOnly) {
+      try { settings.localSupplement = resolveRequirementOptions(configured, options).localSupplement; }
+      catch (error) { throw new RequirementWait('requirement_source', error.message); }
+    }
     if (job.requirement.topicBinding) {
+      if (request.supplementDocuments?.length || request.caseSource || settings.localSupplement) {
+        throw new RequirementWait('requirement_source', '该隔离话题只允许读取已绑定的输入材料。');
+      }
       // Resolve the same resource contract used by execution before invoking any model.
       const resources = await requirementResources(settings.environment, { allowUnavailable: true, dataDir: config.dataDir });
       journal.topicResources = Object.fromEntries(resources.names.map(name => [name, resources.identity(name)]));
-      journal.repositories ??= await sourceBaseline(project);
+      journal.repositories ??= await captureRepositories();
     }
     delete journal.waitCode;
-    const url = new URL(job.requirement.url);
+    if (job.requirement.cleanupOnly && !job.requirement.url && !journal.resolvedUrl) {
+      throw new RequirementWait('cleanup_pending', '此任务尚未解析主需求，没有进入业务操作。');
+    }
+    if (!job.requirement.cleanupOnly) await client.verify();
+    const url = new URL(job.requirement.url ?? journal.resolvedUrl
+      ?? (await client.resolveInput(request.documentTitle, 'document')).url);
     if (url.protocol !== 'https:' || url.hostname !== settings.document.domain || !/^\/(?:docx|wiki)\/[A-Za-z0-9]+$/.test(url.pathname)) {
       throw new RequirementWait('requirement_source', '需求链接不在已绑定的飞书租户内。');
     }
+    checkDocument(url.href);
+    if (!job.requirement.url) journal.resolvedUrl = url.href;
     const generator = await loadSkill(settings.skills?.generator, 'lark-testcase-by-prd-order-generator', generatorReferences);
     const regression = await loadSkill(settings.skills?.regression, 'run-full-requirement-regression', regressionReferences);
     const versions = { generator: generator.sha256, regression: regression.sha256 };
@@ -76,7 +100,6 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       source = revision.source;
     }
     if (!job.requirement.cleanupOnly) {
-      await client.verify();
       const current = await readSource(url.href);
       if (source && !source.materials && current.legacyHash === source.hash) {
         if (journal.casesHash) {
@@ -88,6 +111,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
           if (digest(cases) !== journal.casesHash || digest(caseIndex) !== journal.caseIndexHash) {
             throw new RequirementWait('publication_version', '现有用例无法校验，不能补录图示映射。');
           }
+          if (request.caseSource) throw new RequirementWait('requirement_version', '指定用例的需求图示已变化，请核对原用例后重新发起。');
           revision = await reviseMaterialCases({ source: current, base: { manifest: cases, index: caseIndex,
             requirements: journal.originalRequirements ?? journal.requirements }, journal, job, settings, skill: generator,
             workDir, codexBin: config.codexBin, model: dependencies.materialModel });
@@ -107,6 +131,9 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     }
     if (!source) throw new RequirementWait('cleanup_pending', '此任务没有已读取的需求或已执行数据，未进入业务操作。');
     journal.source = { id: source.id, revision: source.revision, hash: source.hash, embedded: source.embedded.length,
+      ...(source.documents?.length ? { documents: source.documents.map(({ url, revision, hash, comments }) => ({
+        url, revision, hash, commentsHash: digest(comments),
+      })) } : {}),
       ...(source.materials?.length ? { materials: source.materials.map(({ anchor, type, sha256 }) => ({ anchor, type, sha256 })) } : {}) };
     const projectName = settings.projectName ?? project.displayName;
     if (!job.requirement.cleanupOnly && !job.requirement.confirmedProject
@@ -118,7 +145,9 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       journal.phase = stage;
       await save();
       await progress(stage);
-      if (!settings.templateUrl || !settings.projectFolderUrl) throw new RequirementWait('project_defaults', '尚未配置此项目的用例模板或发布目录。');
+      if (!settings.templateUrl || (!request.caseSource && !settings.projectFolderUrl)) {
+        throw new RequirementWait('project_defaults', '尚未配置此项目的用例模板或发布目录。');
+      }
       const token = fileToken(settings.templateUrl, settings.document.domain, 'sheets');
       let template = await readJson(templateFile);
       if (!template) {
@@ -126,10 +155,19 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         await writeJson(templateFile, template);
       }
       if (template.token !== token) throw new RequirementWait('publication_version', '本轮已固定用例模板，配置变更需要重新发起。');
+      const provided = request.caseSource && await readProvidedCases(client, request.caseSource, template.headers);
+      if (provided && journal.publication && (journal.publication.fileToken !== provided.receipt.fileToken
+        || journal.publication.sheetId !== provided.receipt.sheetId || journal.publication.version !== provided.receipt.version)) {
+        throw new RequirementWait('publication_version', '指定用例表的定义已变化，原用例和执行证据已经保留。请按新版本另行发起。');
+      }
+      if (request.browser === 'codex_sidebar') {
+        if (provided && !journal.casesHash) journal.providedCases = { ...provided.receipt, count: provided.rows.length };
+        throw new RequirementWait('browser_unavailable', '任务要求仅使用 Codex 侧边栏浏览器。飞书后台 Runner 无法连接该会话的浏览器，当前尚未开始业务执行。请在可使用该浏览器的 Codex 会话中执行。');
+      }
       if (!journal.casesHash) {
         const { draft, index: cases } = await generateValidatedCases({ source, template: { tabs: template.tabs, headers: template.headers,
           samples: template.values.slice(1).filter(row => row.some(cell => cell !== '')) },
-          skill: generator, expectedProject: projectName, otherProjects: settings.otherProjects ?? [],
+          existingCases: provided?.rows, skill: generator, expectedProject: projectName, otherProjects: settings.otherProjects ?? [],
           codexBin: config.codexBin, cwd: workDir }, settings, casesFile, {
           generate: dependencies.generate,
           checkProject(draft) {
@@ -144,10 +182,11 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         journal.requirements = draft.requirements;
         journal.casesHash = digest(draft.manifest);
         journal.caseIndexHash = digest(cases);
+        if (provided) journal.publication = provided.receipt;
         await writeJson(indexFile, cases);
         await save();
       }
-      stage = '飞书用例发布与回读';
+      stage = provided ? '指定用例回读' : '飞书用例发布与回读';
       journal.phase = stage;
       await save();
       await progress(stage);
@@ -156,7 +195,15 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
       if ((await readSource(url.href)).hash !== source.hash) {
         throw new RequirementWait('requirement_version', '用例准备期间需求版本发生变化，请按新版本重新发起。');
       }
-      if (revision) {
+      if (provided) {
+        const { receipt } = await readProvidedCases(client, request.caseSource, template.headers);
+        if (receipt.fileToken !== provided.receipt.fileToken || receipt.sheetId !== provided.receipt.sheetId
+          || receipt.version !== journal.publication?.version) {
+          throw new RequirementWait('publication_version', '覆盖核验期间指定用例表定义发生变化，请核对后重新发起。');
+        }
+        journal.publication.lastVerifiedRevision = receipt.revision;
+        await save();
+      } else if (revision) {
         const state = { startedAt: journal.startedAt, publication: journal.revisionPublication };
         await publishCases({ client, settings, source, template, manifest, journal: state, revisionTag: revision.tag, async save() {
           journal.revisionPublication = state.publication;
@@ -205,12 +252,12 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     await save();
     await progress(stage);
     if (!journal.repositories) {
-      journal.repositories = await sourceBaseline(project);
+      journal.repositories = await captureRepositories();
       await save();
     }
     await executeCases({ job, settings, journal, source, index, manifest, regression, workDir, reportDir, dataDir: config.dataDir, save, progress, codexBin: config.codexBin,
       plan: dependencies.plan, project, agentModel: dependencies.agentModel, review: dependencies.review,
-      captureRepositories: () => sourceBaseline(project) });
+      captureRepositories });
 
     if (!settings.adapter && settings.execution?.mode === 'agent' && Object.values(journal.results ?? {}).some(result => result.checkCoverage?.processTotal)) {
       const resources = await requirementResources(settings.environment, { allowUnavailable: true, dataDir: config.dataDir });
@@ -248,7 +295,10 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     journal.artifact = artifact;
     await save();
     const cleanup = journal.cleanup?.verified === true ? '已核验恢复' : '待恢复';
+    const acceptance = request.resultFormat === 'binary' ? (summary.pass > 0 && !summary.fail && !summary.blocked
+      && !summary.notExecuted && !externalPending && journal.cleanup?.verified ? '通过' : '不通过') : null;
     const finalMessage = [
+      ...(acceptance ? ['整体验收：' + acceptance] : []),
       '用例表：' + journal.publication.url,
       ...(job.requirement.cleanupOnly ? [requirementCleanupAfterCancellation(job)
         ? '本轮已恢复清理，未完成的业务用例保留为未执行。' : '本轮已恢复清理并保留已有业务判定。'] : []),
@@ -264,7 +314,7 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
         + '。原尝试的过程记录保留。'] : []),
     ].join('\n');
     return { outcome: 'ready', finalMessage, requirementReport: artifact,
-      requirementSummary: { ...summary, cleanup, caseUrl: journal.publication.url,
+      requirementSummary: { ...summary, cleanup, caseUrl: journal.publication.url, ...(acceptance ? { acceptance } : {}),
         ...(incompleteFailures ? { incompleteFailures } : {}),
         ...(externalPending ? { externalPending } : {}),
         ...(processChecks.length ? { process: { total: processChecks.length, proven: processProven } } : {}) } };
@@ -278,8 +328,10 @@ export async function runRequirementTest(job, config, emit, dependencies = {}) {
     if (lastSummary) await progress(stage + '暂挂；清理' + cleanup, undefined, undefined, { ...lastSummary,
       phase: 'execution_interrupted', pendingMutations: (journal.mutations ?? []).filter(item => !verifiedMutationCleanup(item)).length,
       cleanupVerified: Boolean(restored || journal.cleanup?.verified), interruption: journal.waitCode });
-    const finalMessage = [stage + '暂挂。' + (known ? error.message : '后台执行中断，请管理员检查本轮检查点。'),
-      journal.publication?.verified ? '已发布并回读用例：' + journal.publication.url : '',
+    const finalMessage = [request.resultFormat === 'binary' ? '整体验收：不通过（验收未完成）。' : '',
+      stage + '暂挂。' + (known ? error.message : '后台执行中断，请管理员检查本轮检查点。'),
+      journal.publication?.verified ? (journal.publication.external ? '已回读指定用例：' : '已发布并回读用例：') + journal.publication.url
+        : journal.providedCases?.verified ? '已读取指定用例表，共 ' + journal.providedCases.count + ' 条。' : '',
       '已记录 ' + Object.keys(journal.results ?? {}).length + ' 条用例结果。清理状态：' + cleanup + '。'].filter(Boolean).join('\n');
     return { outcome: 'needs_clarification', finalMessage, requirementWait: journal.waitCode,
       ...(known && error.questions ? { requirementQuestions: error.questions.map(item => item.id) } : {}) };

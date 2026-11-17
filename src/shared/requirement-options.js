@@ -18,21 +18,71 @@ export function requirementCleanupAfterCancellation(job) {
     ?? job.events?.some(event => event.type === 'cancelled' && event.processesExited) ?? false);
 }
 
-const inputLabels = { supplementDirectory: '补充文档', developerDirectory: '开发反馈' };
+const inputLabels = { supplementDirectory: '补充目录', developerDirectory: '开发反馈' };
+const messageLabels = {
+  document: '需求文档|主需求', supplements: '补充文档|参考文档', caseSource: '测试用例',
+  branch: '分支名称|测试分支', localSupplement: '本地补充', supplementNotes: '补充说明',
+  task: '需求内容', authorization: '准许内容|允许内容', notes: '备注内容', environment: '执行环境|测试环境|环境',
+  projectFolderUrl: '用例存放|用例目录', reportDirectory: '输出路径|结果路径',
+  ...inputLabels,
+};
 
-export function requirementOptions(content) {
+export function requirementLinks(content, domain) {
+  return [...new Set([...String(content ?? '').matchAll(/https:\/\/[a-z0-9.-]+\/(?:docx|wiki)\/[A-Za-z0-9]+/gi)]
+    .map(([value]) => new URL(value)).filter(url => url.hostname === domain).map(url => url.href))];
+}
+
+export function requirementOptions(content, domain) {
   const text = String(content ?? '');
-  const fields = [
-    ['projectFolderUrl', '用例存放|用例目录'],
-    ['reportDirectory', '输出路径|结果路径'],
-    ...Object.entries(inputLabels),
-  ];
   const options = {};
-  for (const [key, label] of fields) {
-    const values = new Set([...text.matchAll(new RegExp('^\\s*(?:' + label + ')\\s*[:：]([^\\r\\n]*)', 'gm'))]
-      .map(match => match[1].trim()));
-    if (values.size > 1 || values.has('')) throw new Error('请为「' + label.replace('|', '／') + '」填写一个明确值。');
-    if (values.size) options[key] = [...values][0];
+  const labels = new Map(Object.entries(messageLabels).flatMap(([key, names]) => names.split('|').map(name => [name, key])));
+  const boundary = /\r?\n/.test(text) ? '^' : '(?:^|(?<=\\s))';
+  const parts = [...text.matchAll(new RegExp(boundary + '[ \\t]*(?:[-*][ \\t]+)?(?:\\*\\*)?(' + [...labels.keys()].join('|')
+    + ')[ \\t]*(?:\\*\\*)?[:：](?:\\*\\*)?[ \\t]*', 'gm'))];
+  const fields = new Map();
+  for (const [index, part] of parts.entries()) {
+    const key = labels.get(part[1]);
+    const value = text.slice(part.index + part[0].length, parts[index + 1]?.index).trim();
+    const values = fields.get(key) ?? new Set();
+    values.add(value);
+    fields.set(key, values);
+  }
+  for (const [key, values] of fields) {
+    if (values.size > 1 && !['document', 'supplements'].includes(key) || values.has('')) {
+      throw new Error('请为「' + messageLabels[key].split('|')[0] + '」填写明确内容。');
+    }
+    options[key] = [...values].join('\n');
+  }
+  delete options.environment;
+  if (options.supplements && path.isAbsolute(options.supplements)) {
+    options.supplementDirectory ??= options.supplements;
+    delete options.supplements;
+  }
+  if (domain) {
+    const references = value => value.split(/\r?\n/).map(line => line.replace(/^[\s*\-]+/, '').trim()).filter(Boolean)
+      .flatMap(line => {
+        const links = requirementLinks(line, domain);
+        if (links.length) return links;
+        if (/https?:\/\//i.test(line)) throw new Error('需求和补充文档须为本租户的飞书文档链接或准确标题。');
+        return [line];
+      });
+    const supplements = options.supplements ? references(options.supplements) : [];
+    if (options.caseSource) {
+      const urls = [...new Set(options.caseSource.match(/https:\/\/[a-z0-9.-]+\/(?:sheets|wiki)\/[A-Za-z0-9]+/gi) ?? [])];
+      if (urls.length > 1) throw new Error('「测试用例」请指定一份原表。');
+      if (urls.length) options.caseSource = urls[0];
+    }
+    const candidates = requirementLinks(text, domain).filter(url => url !== options.caseSource);
+    const explicit = options.document ? references(options.document) : [];
+    const main = explicit.shift() ?? candidates.find(url => !supplements.includes(url));
+    delete options.document;
+    delete options.supplements;
+    if (main) {
+      if (requirementLinks(main, domain).length) options.documentUrl = main;
+      else options.documentTitle = main;
+    }
+    const supporting = [...new Set([...explicit, ...supplements, ...candidates])].filter(value => value !== main);
+    if (supporting.length) options.supplementDocuments = supporting;
   }
   const tiers = new Set([...text.matchAll(/(?:^\s*(?:执行环境|测试环境|环境)\s*[:：]\s*|(?:在|使用|切换到)\s*)(UAT\b|SIT\b|PRD\b|PROD(?:UCTION)?\b|生产(?=环境|测试|\s|$)|测试环境)/gim)]
     .map(match => match[1].toUpperCase()));
@@ -75,6 +125,27 @@ export function resolveRequirementOptions(settings, options = {}) {
     [settings.reportDirectory, ...(settings.allowedReportDirectories ?? [])], '结果路径');
   resolved.inputDirectories = Object.fromEntries(Object.entries(inputLabels).filter(([key]) => inputs[key])
     .map(([key, label]) => [key, approvedDirectory(inputs[key], settings.allowedInputDirectories ?? [], label)]));
+  if (options.localSupplement) {
+    const candidate = directoryKey(options.localSupplement);
+    if (!candidate || !/\.md$/i.test(candidate)) throw new Error('本地补充须为项目材料目录内的 Markdown 绝对路径。');
+    const file = path.normalize(options.localSupplement);
+    const eligible = (settings.allowedInputDirectories ?? []).filter(directoryKey)
+      .filter(directory => {
+        const relative = path.relative(path.normalize(directory), file);
+        return relative && !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep);
+      });
+    if (!eligible.length) throw new Error('本地补充超出项目已登记的材料目录。');
+    resolved.localSupplement = { file, root: path.normalize(eligible[0]) };
+  }
+  if (options.branch && (!/^[a-zA-Z0-9_][a-zA-Z0-9_./-]*$/.test(options.branch)
+    || /\.\.|\/\.|\/\/|\.lock(?:\/|$)|[/.]$/.test(options.branch))) {
+    throw new Error('分支名称必须是明确的 Git 分支名。');
+  }
+  resolved.request = Object.fromEntries(['documentTitle', 'supplementDocuments', 'caseSource', 'branch', 'task', 'supplementNotes', 'authorization', 'notes']
+    .filter(key => options[key] !== undefined).map(key => [key, options[key]]));
+  if (/Codex.{0,24}(?:侧边栏|内置|自带).{0,12}浏览器/i.test(options.notes ?? '')
+    && /仅|只|不允许|禁止/.test(options.notes)) resolved.request.browser = 'codex_sidebar';
+  if (/通过或不通过|通过或失败/.test(options.authorization ?? '')) resolved.request.resultFormat = 'binary';
   return resolved;
 }
 

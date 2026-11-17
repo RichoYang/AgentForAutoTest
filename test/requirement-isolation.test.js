@@ -226,6 +226,124 @@ async function skillFingerprint(root, name, references) {
 }
 
 const skillsRoot = process.env.AGENTOS_REQUIREMENT_SKILLS_ROOT;
+test('structured requirement reads named supplements, comments and the designated workbook before enforcing sidebar-only execution',
+  { skip: !skillsRoot && 'Set AGENTOS_REQUIREMENT_SKILLS_ROOT to the installed QA Skills' }, async t => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'agentos-structured-intake-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const handoff = path.join(root, '验收交接.md');
+  await writeFile(handoff, '# 环境说明\n仅使用隔离环境。');
+  const supplement = 'https://' + tenant + '/wiki/Rules';
+  const workbook = 'https://' + tenant + '/sheets/Existing';
+  const { client, copies } = mockPublisher();
+  const row = sampleRow('读取隔离预算', '1. 预算余额100元');
+  row[headers.indexOf('测试结果')] = '旧结果';
+  copies.set('Existing', { matrix: [headers, row], revision: 0 });
+  const resolved = [];
+  client.resolveInput = async (reference, kind) => {
+    resolved.push([reference, kind]);
+    return reference === '预算主需求' ? { url: doc } : reference === '预算补充说明' ? { url: supplement }
+      : { url: workbook, token: 'Existing' };
+  };
+  client.readRequirement = async url => {
+    const source = { id: url === doc ? 'Main' : 'Rules', revision: 3, url, xml: '<h1 id="A1">15.2 预算</h1>',
+      title: url === doc ? '预算主需求' : '预算补充说明', embedded: [] };
+    return { ...source, hash: digest(source) };
+  };
+  client.readComments = async url => {
+    assert.equal(url, supplement);
+    return [{ id: '99', replies: [{ id: '100', content: '确认 15.2 范围' }] }];
+  };
+  const bot = { profile: 'qa', appId: 'cli_qa', openId: 'ou_bot' };
+  const settings = { bot, allowedChatIds: ['oc_local'], requesterOpenIds: ['ou_requester'], allowedInputDirectories: [root],
+    document: { domain: tenant, profile: 'docs', appId: 'cli_docs', openId: 'ou_docs' },
+    templateUrl: 'https://' + tenant + '/sheets/Template', environment: { name: 'UAT' },
+    skills: { generator: await skillFingerprint(skillsRoot, 'lark-testcase-by-prd-order-generator', generatorReferences),
+      regression: await skillFingerprint(skillsRoot, 'run-full-requirement-regression', regressionReferences) } };
+  const project = { displayName: '隔离项目', requirementTest: settings };
+  const projects = { projects: { demo: project }, topicChatIds: ['oc_local'], chatProjectMap: { oc_local: 'demo' } };
+  const store = new JsonStore(path.join(root, 'state.json'));
+  const context = { projects, store, requirementRoutes: validateRequirementRoutes(projects, { agents: { qa: bot } }),
+    feishu: { reply: async () => {} } };
+  const { jobId } = await handleRequirementMessage(context, { agent_profile: bot.profile, receiving_app_id: bot.appId,
+    receiving_bot_id: bot.openId, chat_type: 'group', chat_id: 'oc_local', sender_id: 'ou_requester', message_id: 'om_structured',
+    mentions: [{ id: bot.openId }], content: [
+      '需求内容：完成隔离需求测试', '分支名称：uat-merge', '测试用例：预算原用例', '需求文档：预算主需求',
+      '补充文档：预算补充说明', '补充说明：15.2，可结合评论区和上下文', '本地补充：' + handoff,
+      '准许内容：可以准备合成数据，结果仅接受通过或不通过', '备注内容：仅允许使用Codex的自带侧边栏浏览器',
+    ].join('\n') });
+  const job = await store.leaseNext('structured-runner', ['requirement_test']);
+  assert.equal(job.id, jobId);
+  const result = await runRequirementTest(job, { projects: projects.projects, dataDir: root }, async () => {}, { client,
+    generate() { assert.fail('A sidebar-only request cannot start background generation or execution'); } });
+  assert.equal(result.requirementWait, 'browser_unavailable');
+  assert.match(result.finalMessage, /不通过（验收未完成）.*\n.*侧边栏浏览器/);
+  const directory = path.join(root, 'requirement-tests', jobId);
+  const journal = await readJson(path.join(directory, 'journal.json'));
+  const source = await readJson(path.join(directory, 'requirement.json'));
+  assert.deepEqual(resolved, [['预算主需求', 'document'], ['预算补充说明', 'document'], ['预算原用例', 'cases']]);
+  assert.equal(journal.providedCases.fileToken, 'Existing');
+  assert.equal(journal.providedCases.count, 1);
+  assert.equal(journal.publication, undefined);
+  assert.equal(journal.mutations, undefined);
+  assert.equal(copies.get('Existing').matrix[1][headers.indexOf('测试结果')], '旧结果');
+  assert.equal(source.request.branch, 'uat-merge');
+  assert.equal(source.supplements[0].name, '验收交接.md');
+  assert.equal(source.documents[0].comments[0].replies[0].content, '确认 15.2 范围');
+
+  const repo = path.join(root, 'repo');
+  await command('git', ['init', '-b', 'uat-merge', repo]);
+  await writeFile(path.join(repo, 'contract.txt'), 'budget comes from the named branch');
+  await command('git', ['-C', repo, 'add', '--', 'contract.txt']);
+  await command('git', ['-C', repo, '-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-m', 'Add contract']);
+  const branchCommit = (await command('git', ['-C', repo, 'rev-parse', 'HEAD'])).trim();
+  await command('git', ['-C', repo, 'switch', '-c', 'main']);
+  await command('git', ['-C', repo, 'rm', '--', 'contract.txt']);
+  await command('git', ['-C', repo, '-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Remove contract']);
+  Object.assign(project, { repoPath: repo, baseBranch: 'main' });
+  const pinned = await sourceBaseline(project, 'uat-merge');
+  assert.equal(pinned[0].requested.commit, branchCommit);
+  assert.equal(pinned[0].worktree_branch, 'main');
+  assert.deepEqual((await readSource(repo, { action: 'files' }, pinned)).lines, ['contract.txt']);
+  assert.match((await readSource(repo, { action: 'search', pattern: 'named branch' }, pinned)).lines[0], /contract\.txt:1:budget/);
+  assert.equal((await readSource(repo, { action: 'read', path: 'contract.txt' }, pinned)).origin.commit, branchCommit);
+  await assert.rejects(readSource(repo, { action: 'show', path: '.', ref: 'HEAD', file: 'contract.txt' }, pinned), /explicitly requested branch/);
+
+  const requests = [];
+  const endpoint = await localServer(t, (req, res) => {
+    requests.push(req.method + ' ' + req.url);
+    res.setHeader('Content-Type', 'application/json');
+    res.end('{"data":{"balance":100,"currency":"元"}}');
+  });
+  const iniPath = path.join(root, 'uat.ini');
+  await writeFile(iniPath, '[Sample.Uat.Platform]\nstatus=configured\nai_access=allowed\nai_operation_mode=read_only\nenvironment=Uat\nbase_url=' + endpoint + '\n');
+  Object.assign(settings, { lockDirectory: path.join(root, 'locks'), reportDirectory: path.join(root, 'reports'), timeZone: 'Asia/Shanghai',
+    environment: { name: 'UAT', platform: 'Sample', lockKey: 'test', iniPath, resources: { platform: { section: 'Sample.Uat.Platform', scope: 'read' } } },
+    execution: { operations: { budget: { kind: 'http', resource: 'platform', path: '/budget', outputs: budgetOutputs, observations: [budget] } } } });
+  const { jobId: backgroundId } = await handleRequirementMessage(context, { agent_profile: bot.profile, receiving_app_id: bot.appId,
+    receiving_bot_id: bot.openId, chat_type: 'group', chat_id: 'oc_local', sender_id: 'ou_requester', message_id: 'om_background',
+    mentions: [{ id: bot.openId }], content: '需求文档：预算主需求\n补充文档：预算补充说明\n补充说明：15.2，以评论为补充\n分支名称：uat-merge\n测试用例：预算原用例\n准许内容：结果仅接受通过或不通过' });
+  const background = await store.leaseNext('structured-runner', ['requirement_test']);
+  assert.equal(background.id, backgroundId);
+  const finished = await runRequirementTest(background, { projects: projects.projects, dataDir: root }, async () => {}, { client,
+    async generate({ existingCases }) {
+      assert.equal(existingCases[0][headers.indexOf('测试结果')], '');
+      return { projectMatch: 'match', requirements: [{ id: 'R1', anchor: 'A1', rule: '预算余额100元。' }], caseRequirements: [['R1']] };
+    },
+    async plan() { return { missing: [], steps: [{ operation: 'budget', input: {}, checks: [check(['balance'], 100)] }] }; },
+    async visualModel(_prompt, { images }) { return { sheets: images.map(file => ({ filename: path.basename(file), usable: true, issues: [] })) }; },
+  });
+  assert.equal(finished.outcome, 'ready', finished.finalMessage + '\n'
+    + JSON.stringify(await readJson(path.join(root, 'requirement-tests', backgroundId, 'report-build-error.json'))));
+  assert.equal(finished.requirementSummary.acceptance, '通过');
+  assert.equal(finished.requirementSummary.caseUrl, workbook);
+  assert.deepEqual(requests, ['GET /budget']);
+  assert.equal(copies.size, 1);
+  const normalized = await readJson(path.join(root, 'requirement-tests', backgroundId, 'normalized-report.json'));
+  assert.equal(normalized.meta.requirement_sources[1].location, supplement);
+  assert.equal(normalized.meta.test_case_sources[0].location, workbook);
+});
+
 test('an original Feishu job resumes past its legacy release wait and records HTTP 403 without authorizing an ambiguous write',
   { skip: !skillsRoot && 'Set AGENTOS_REQUIREMENT_SKILLS_ROOT to the installed QA Skills' }, async t => {
   const root = await realpath(await mkdtemp(path.join(tmpdir(), 'agentos-release-resume-')));

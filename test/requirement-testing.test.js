@@ -12,6 +12,8 @@ import { createControlPlane } from '../src/control-plane/server.js';
 import { larkEventSourcePlans } from '../src/control-plane/lark-event-source.js';
 import { requirementOptions, resolveRequirementOptions } from '../src/shared/requirement-options.js';
 import { requirementAnchors, validateCases } from '../src/runner/requirement-generation.js';
+import { parseFeishuMessage } from '../src/control-plane/feishu.js';
+import { requirementFeishu } from '../src/runner/requirement-feishu.js';
 
 const domain = 'example.feishu.cn';
 
@@ -88,6 +90,42 @@ test('message options resolve to approved test aliases and exact project destina
   assert.throws(() => resolveRequirementOptions(settings, { reportDirectory: reportDirectory + '-other' }), /未登记/);
 });
 
+test('a structured request keeps the main document, supplements, workbook and task instructions separate', () => {
+  const directory = path.resolve('materials');
+  const file = path.join(directory, '交接.md');
+  const primary = 'https://' + domain + '/docx/Main';
+  const supplementary = 'https://' + domain + '/wiki/Notes';
+  const workbook = 'https://' + domain + '/sheets/Cases';
+  const lines = ['需求内容：根据资料完成需求测试', '分支名称：uat-merge', '测试用例：指定测试用例',
+    '需求文档：主需求标题', '补充文档：补充规格标题', '补充说明：只核对15.2，可结合评论和上下文',
+    '本地补充：' + file, '准许内容：准许自行构造前置数据和Mock，用例执行结果仅接受通过或不通过',
+    '备注内容：测试全程仅允许在Codex的自带侧边栏浏览器内进行，不允许额外操控桌面端浏览器'];
+  for (const text of [lines.join('\n'), lines.join(' ')]) {
+    const settings = resolveRequirementOptions({ document: { domain }, allowedInputDirectories: [directory] },
+      requirementOptions(text, domain));
+    assert.equal(settings.request.documentTitle, '主需求标题');
+    assert.deepEqual(settings.request.supplementDocuments, ['补充规格标题']);
+    assert.equal(settings.request.caseSource, '指定测试用例');
+    assert.equal(settings.request.branch, 'uat-merge');
+    assert.match(settings.request.supplementNotes, /15\.2.*评论/);
+    assert.match(settings.request.authorization, /Mock/);
+    assert.equal(settings.request.browser, 'codex_sidebar');
+    assert.equal(settings.request.resultFormat, 'binary');
+    assert.equal(settings.localSupplement.file, file);
+  }
+  const rich = parseFeishuMessage({ message_type: 'post', content: { zh_cn: { content: [
+    [{ tag: 'text', text: '补充文档：' }, { tag: 'a', text: '规格', href: supplementary }],
+    [{ tag: 'text', text: '需求文档：' }, { tag: 'a', text: '主需求', href: primary }],
+    [{ tag: 'text', text: '测试用例：' }, { tag: 'a', text: workbook, href: workbook }],
+  ] } } });
+  assert.deepEqual(requirementOptions(rich.structuredText, domain), {
+    documentUrl: primary, supplementDocuments: [supplementary], caseSource: workbook,
+  });
+  assert.deepEqual(requirementOptions(primary + '\n' + supplementary, domain), {
+    documentUrl: primary, supplementDocuments: [supplementary],
+  });
+});
+
 test('anchor checks use exact block IDs and report invented anchors before publication', async () => {
   const source = { xml: '<p data-id="not-an-id" id=\'paragraph\'>内容</p>',
     supplements: [{ name: 'supplement.md', sections: [{ anchor: 'local-section', title: '规则' }] }],
@@ -97,6 +135,26 @@ test('anchor checks use exact block IDs and report invented anchors before publi
     requirements: [{ id: 'rule', anchor: 'not-an-id', rule: '规则' }], caseRequirements: [['rule']] };
   await assert.rejects(validateCases(draft, source, { headers: ['模块'] }), error =>
     error.code === 'case_quality' && JSON.parse(error.validationDetails).anchorRecognized === false);
+});
+
+test('Feishu title lookup compares exact titles across pages and uses the bound URL origin', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'agentos-document-title-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cli = path.join(directory, 'fixture.cjs');
+  await writeFile(cli, `
+    const args = process.argv.slice(2);
+    const title = args[args.indexOf('--query') + 1];
+    const page = args.includes('--page-token');
+    const entry = (name, url) => ({ title_highlighted: name, result_meta: { url, is_cross_tenant: true } });
+    const bound = "https://${domain}/docx/";
+    const results = page
+      ? [entry(title, bound + "One"), ...(title === "Duplicate" ? [entry(title, bound + "Two")] : [])]
+      : [entry(title + " - draft", bound + "Draft"), entry(title, "https://other.feishu.cn/docx/One")];
+    console.log(JSON.stringify({ data: { results, has_more: !page, page_token: page ? null : "next" } }));
+  `);
+  const client = requirementFeishu({ domain, profile: 'document' }, directory, cli);
+  assert.deepEqual(await client.resolveInput('Exact', 'document'), { url: 'https://' + domain + '/docx/One' });
+  await assert.rejects(client.resolveInput('Duplicate', 'document'), /同名/);
 });
 
 test('two specialists in one group isolate trusted app, project, duplicate events and followups', async t => {
@@ -125,6 +183,16 @@ test('two specialists in one group isolate trusted app, project, duplicate event
   const b = await handleRequirementMessage(tpm, input('tpm', 'b'));
   assert.equal((await ltx.store.getJob(a.jobId)).projectId, 'ltx');
   assert.equal((await tpm.store.getJob(b.jobId)).projectId, 'tpm');
+  const document = 'https://' + domain + '/docx/Budget';
+  const supplement = 'https://' + domain + '/wiki/Rules';
+  const c = await handleRequirementMessage(tpm, input('tpm', 'mixed', { content: '补充文档：' + supplement
+    + '\n需求文档：' + document + '\n测试用例：预算原用例' }));
+  const mixed = await tpm.store.getJob(c.jobId);
+  assert.equal(mixed.requirement.url, document);
+  assert.deepEqual(mixed.requirement.options.supplementDocuments, [supplement]);
+  assert.equal(mixed.requirement.options.caseSource, '预算原用例');
+  const byTitle = await handleRequirementMessage(tpm, input('tpm', 'title', { content: '需求文档：另一份需求\n补充文档：' + supplement }));
+  assert.equal((await tpm.store.getJob(byTitle.jobId)).requirement.options.documentTitle, '另一份需求');
   assert.deepEqual(await handleRequirementMessage(ltx, input('ltx', 'a')), { duplicate: true });
   assert.equal((await handleRequirementMessage(ltx, input('ltx', 'wrong', { receiving_app_id: 'cli_tpm' }))).ignored, true);
   assert.equal((await handleRequirementMessage(ltx, input('ltx', 'wrongChat', { chat_id: 'oc_other' }))).ignored, true);
