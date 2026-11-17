@@ -212,18 +212,25 @@ export async function sourceBaseline(project, requestedBranch) {
     }
     const commit = await git(['rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}']);
     const remote = await git(['rev-parse', '--verify', 'refs/remotes/origin/' + branch + '^{commit}']).catch(() => '');
-    const requested = requestedBranch && await syncRequestedBranch(folder, requestedBranch);
     return {
       repository_id: 'repo-' + (index + 1), name: path.basename(folder), path_or_url: folder,
       branch, commit, remote_baseline: remote || '无本地远端跟踪引用',
       worktree_commit: await git(['rev-parse', '--verify', 'HEAD^{commit}']),
       worktree_branch: await git(['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(() => 'detached HEAD'),
-      ...(requested ? { requested } : {}),
       dirty_status: await git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=no']).then(value => value ? '存在本机改动' : '无已跟踪文件改动'),
       deployment_verification: '本机源码记录，实际部署由 SIT 部署指纹核验。',
     };
   }));
-  if (requestedBranch && !result.some(repository => repository.requested.commit)) {
+  if (!requestedBranch) return result;
+  // Keep the number of simultaneous connections to a shared Git service low.
+  // A manifest can contain dozens of repositories on the same origin host.
+  const parallelOrigins = 3;
+  for (let start = 0; start < result.length; start += parallelOrigins) {
+    await Promise.all(result.slice(start, start + parallelOrigins).map(async repo => {
+      repo.requested = await syncRequestedBranch(repo.path_or_url, requestedBranch);
+    }));
+  }
+  if (!result.some(repository => repository.requested.commit)) {
     const details = unavailableRequirementSources(result);
     const error = new RequirementWait('repository', '已登记的项目源码仓均未取得分支 ' + requestedBranch + '。' + details);
     error.repositorySync = result.map(({ name, requested }) => ({ name, ...requested }));

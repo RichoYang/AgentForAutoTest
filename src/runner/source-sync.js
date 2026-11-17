@@ -20,7 +20,7 @@ export async function git(cwd, args) {
     failure.gitExitCode = error.code;
     if (/authenticat|credential|could not read (?:username|password)|permission denied|access denied|\b(?:401|403)\b/i.test(stderr)) {
       failure.gitFailure = 'auth_failed';
-    } else if (error.killed || /could not (?:resolve|connect)|failed to connect|timed? out|connection (?:reset|refused|closed)|SSL connect|certificate|unexpected disconnect|early EOF|\b(?:429|50[0234])\b/i.test(stderr)) {
+    } else if (error.killed || /could not (?:resolve|connect)|failed to connect|timed? out|connection (?:reset|refused|closed)|\b(?:SSL|TLS)[_ ]|certificate|unexpected disconnect|early EOF|\b(?:429|50[0234])\b/i.test(stderr)) {
       failure.gitFailure = 'network_failed';
     } else {
       failure.gitFailure = 'sync_failed';

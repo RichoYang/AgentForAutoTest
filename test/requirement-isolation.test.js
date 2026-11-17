@@ -48,6 +48,31 @@ test('requested source errors name the repository and distinguish denied and una
   }
 });
 
+test('requested branches probe a shared Git origin in bounded batches', async t => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'agentos-origin-batches-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let concurrent = 0, peak = 0, requests = 0;
+  const endpoint = await localServer(t, async (_req, res) => {
+    requests += 1;
+    peak = Math.max(peak, ++concurrent);
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    concurrent -= 1;
+    res.writeHead(503).end();
+  });
+  const git = (cwd, args) => command('git', ['-C', cwd, ...args]);
+  await command('git', ['init', '-b', 'wl-prd', root]);
+  await git(root, ['-c', 'user.name=Local Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'Baseline']);
+  const paths = ['.', 'a', 'b', 'c', 'd', 'e'];
+  await Promise.all(paths.slice(1).map(repo => command('git', ['clone', '--single-branch', '--branch', 'wl-prd', root, path.join(root, repo)])));
+  await git(root, ['remote', 'add', 'origin', endpoint + '/root']);
+  await Promise.all(paths.slice(1).map(repo => git(path.join(root, repo), ['remote', 'set-url', 'origin', endpoint + '/' + repo])));
+  const project = { repoPath: root, analysisRepositories: paths.map(repo => ({ path: repo, branch: 'wl-prd' })) };
+  await assert.rejects(sourceBaseline(project, 'uat-merge'), error => error.code === 'repository'
+    && error.repositorySync.length === paths.length && error.repositorySync.every(repo => repo.status === 'network_failed'));
+  assert.equal(requests, paths.length);
+  assert.ok(peak <= 3, 'observed concurrent network probes: ' + peak);
+});
+
 test('static mixed outcomes preserve compared failures across later missing data and transport failures', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'agentos-static-mixed-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
