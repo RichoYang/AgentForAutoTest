@@ -64,6 +64,7 @@ export class JsonStore {
     });
   }
 
+  // Internal borrowed view. Treat the cached snapshot as read-only.
   async snapshot() {
     const nested=this.transactionContext.getStore();if(nested?.active)return nested.state;
     if(this.loading)return this.loading;
@@ -78,7 +79,15 @@ export class JsonStore {
     }catch(error){if(error.code==='ENOENT'){this.cache=null;return emptyState();}throw error;}}
   }
   async select(select){this.readMetrics.selected++;return structuredClone(select(await this.snapshot()));}
-  async read(){this.readMetrics.full++;return structuredClone(await this.snapshot());}
+  async read() {
+    this.readMetrics.full++;
+    const state = await this.snapshot();
+    const cached = this.cache;
+    // Reparse only the bytes belonging to this snapshot. Nested receipts can read
+    // an uncommitted draft, and a concurrent read can observe an older revision.
+    if (cached && cached.state === state) return JSON.parse(cached.raw);
+    return structuredClone(state);
+  }
   async write(state) {
     const raw=JSON.stringify(state)+'\n';
     // Only skip an unchanged transaction if the authoritative file still matches the cached revision.
