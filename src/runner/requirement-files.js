@@ -8,6 +8,11 @@ import { git as runGit } from './source-sync.js';
 
 const exec = promisify(execFile);
 
+export function isAgentDiagnostic(type) {
+  return typeof type === 'string' &&
+    (['工具调用', '工具错误', '模型执行回合', '模型执行事件', '结构化计划候选'].includes(type) || type.includes('-review'));
+}
+
 export async function command(program, args, options = {}) {
   const { stdout } = await exec(program, args, {
     ...options, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024,

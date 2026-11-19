@@ -2,7 +2,7 @@
 
 新增需求执行链路说明见 [测量、证据与恢复](docs/execution-chain-repair.md)；问题清单见 [修复范围](docs/execution-chain-repair.spec.md)，实际结果与边界见 [验证记录](docs/execution-chain-repair.verification.md)。
 
-**程序版本：v1.65.0** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
+**程序版本：v1.65.1** · GitHub：<https://github.com/RichoYang/AgentForAutoTest>
 
 跨 TPM/OA、共享样本、侧边栏交接及报告读回见[使用说明](docs/requirement-chain.md)和[验证记录](docs/requirement-chain.verification.md)。框架版本与专员实际部署版本分别核对。
 

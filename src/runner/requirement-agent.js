@@ -3,7 +3,7 @@ import { lstat, readFile, writeFile } from 'node:fs/promises';
 import { gzip } from 'node:zlib';
 import { promisify, isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { privateDirectory, readJson, writeJson } from './requirement-files.js';
+import { isAgentDiagnostic, privateDirectory, readJson, writeJson } from './requirement-files.js';
 import { digest, RequirementWait } from './requirement-feishu.js';
 import { askNoTools } from './requirement-generation.js';
 import { createRequirementAdapter } from './requirement-adapter.js';
@@ -159,7 +159,7 @@ export function createRequirementAgent(config, options) {
   async function evidence(scope, label, data) {
     const id = randomUUID().replaceAll('-', '');
     const filename = 'agent-' + id + '.json';
-    const audit = ['工具调用', '工具错误', '模型执行回合', '模型执行事件', '结构化计划候选'].includes(label) || label.includes('-review');
+    const audit = isAgentDiagnostic(label);
     const folder = audit ? (auditDirectory ??= await privateDirectory(path.join(options.workDir, 'diagnostics'))) : scope.reports;
     await writeJson(path.join(folder, filename), scope.checkOutput(sanitized({
       jobId: scope.jobId, projectId: scope.projectId, environment: scope.environment, caseId: scope.item?.caseId,

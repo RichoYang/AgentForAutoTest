@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { copyFile } from 'node:fs/promises';
 import { requirementFeishu, fileToken, readCaseTemplate, RequirementWait, digest } from './requirement-feishu.js';
-import { generatorReferences, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sameRequirementContent, sourceBaseline, unavailableRequirementSources, writeJson } from './requirement-files.js';
+import { generatorReferences, isAgentDiagnostic, loadSkill, privateDirectory, readJson, readRequirementWithInputs, regressionReferences, sameRequirementContent, sourceBaseline, unavailableRequirementSources, writeJson } from './requirement-files.js';
 import { analyzeCaseCoverage, generateCases, generateValidatedCases, indexProvidedCases } from './requirement-generation.js';
 import { reviseMaterialCases } from './requirement-material-revision.js';
 import { publishCases, readProvidedCases } from './requirement-publication.js';
@@ -300,7 +300,8 @@ async function runRequirementTestLocked(job, config, emit, dependencies) {
       journal.results ??= {}; journal.executionCases ??= {}; journal.sourceAttempts ??= {};
       const preserve = async value => {
         if (!value || typeof value !== 'object') return;
-        if (value.sanitized === true && value.path) {
+        // Agent diagnostics stay in this Job's work directory across execution versions.
+        if (value.sanitized === true && value.path && !isAgentDiagnostic(value.type)) {
           if (path.basename(value.path) !== value.path || !old.reportDirectory) throw new RequirementWait('report_evidence', '复用结果缺少原证据目录。');
           const prior = value.path;
           value.path = 'reuse-v' + old.fromVersion + '-' + prior;
