@@ -50,6 +50,7 @@ const requestProof = object({ scope: enumeration('runner', 'service'), phase: en
   audit: object({ operation: string, correlation: string, matchRunner: { type: 'boolean' } }, ['operation', 'correlation']) }, ['scope', 'phase', 'resource', 'requests']);
 const databaseCall = object({ action: enumeration('identity','inspect','discover','tables','schema','snapshot','read','write'),
   database: { anyOf: [string, { type: 'null' }] }, table: string, metadataDatabase: { const: 'information_schema' }, operation: operationNameSchema,
+  databaseArgument: { anyOf: [string, { type: 'null' }] }, selection: enumeration('explicit','fixed_binding','connector_default'),
   params: array({ anyOf: [string, { type: 'null' }] }) },
 ['action', 'database']);
 const processCheck = object({ id: string, line: { type: 'integer', minimum: 1 }, requirement: string,

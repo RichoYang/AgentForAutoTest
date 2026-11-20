@@ -317,7 +317,8 @@ export function createAgentResources(config, scope) {
   async function connect(resource, database, name, options, call) {
     if (resource.resource_type !== 'mysql') throw agentError('Resource is not MySQL');
     const selected = scopedDatabase(resource, database, options);
-    const databaseCall = { ...call, database: selected ?? null };
+    const selection = database !== undefined ? 'explicit' : resource.databaseScope ? 'fixed_binding' : 'connector_default';
+    const databaseCall = { ...call, database: selected ?? null, databaseArgument: database ?? null, selection };
     const complete = await scope.startRequest?.({ resource: name, method: 'CONNECT', path: '/', transport: 'database', databaseCall });
     let connection;
     try {
@@ -668,6 +669,7 @@ export function createAgentResources(config, scope) {
             identity.databaseEvidence = { resource: resourceName, environment: identity.environment, database: receipt.databaseName,
               principalMatchesConfiguredUser: identity.principalMatchesConfiguredUser, checkedAt: new Date().toISOString(),
               selection: database === undefined ? (resource.databaseScope ? 'fixed_binding' : 'connector_default') : 'explicit',
+              databaseArgument: database ?? null, boundDatabase: resource.databaseScope ?? null,
               currentDatabaseField: ['database'], currentDatabaseExpression: 'DATABASE()', sql };
             if (identityOnly) return identity;
             const [grants] = await connection.query('SHOW GRANTS FOR CURRENT_USER');
@@ -781,8 +783,8 @@ export function createAgentResources(config, scope) {
     },
     async schema(args) {
       return scope.useRead(args.resource, async resource => {
-        if (args.table && !args.database) throw agentError('Supply database when inspecting a table; list schemas first if unknown');
-        const metadata = args.table && args.database.toLowerCase() === 'information_schema';
+        if (args.table && !args.database && !resource.databaseScope) throw agentError('Supply database when inspecting a table on an unbound resource');
+        const metadata = args.table && args.database?.toLowerCase() === 'information_schema';
         if (args.connectionDatabase && !metadata) throw agentError('connectionDatabase is only used when inspecting an INFORMATION_SCHEMA table');
         const selected = metadata ? args.connectionDatabase : args.database;
         const table = args.table ? (metadata ? 'information_schema.' : '') + identifier(args.table) : undefined;
@@ -796,7 +798,7 @@ export function createAgentResources(config, scope) {
         });
         const requestId = connection.id;
         try {
-          if (!args.database) {
+          if (!table && !args.database) {
             const bound = resource.databaseScope;
             if (bound) return { rows: [{ Database: bound }], requestId };
             const [rows] = await connection.query('SHOW DATABASES');
@@ -807,16 +809,18 @@ export function createAgentResources(config, scope) {
           const [columns] = await connection.query(statements[0]);
           const [indexes] = metadata ? [[]] : await connection.query(statements[1]);
           const [create] = metadata ? [[]] : await connection.query(statements[2]);
-          const schema = { resource: args.resource, database: args.database, table: args.table, columns, indexes, create };
-          schemas.set(args.resource + ':' + args.database + ':' + args.table, schema);
+          const schema = { resource: args.resource, database: args.database ?? identity.databaseName, table: args.table, columns, indexes, create };
+          const schemaKey = args.resource + ':' + schema.database + ':' + args.table;
+          schemas.set(schemaKey, schema);
           scope.state.schemas ??= {};
-          scope.state.schemas[args.resource + ':' + args.database + ':' + args.table] = schema;
+          scope.state.schemas[schemaKey] = schema;
           await scope.saveState();
           const primaryKey = metadata ? undefined : indexes.filter(row => row.Key_name === 'PRIMARY')
             .sort((left, right) => Number(left.Seq_in_index) - Number(right.Seq_in_index)).map(row => row.Column_name);
           return { ...schema, requestId, databaseEvidence: { resource: args.resource, environment: resource.environment ?? null,
             database: identity.databaseName, principalMatchesConfiguredUser: identity.principal.split('@')[0] === resource.username,
             checkedAt: new Date().toISOString(), currentDatabaseField: ['databaseEvidence', 'database'],
+            databaseArgument: selected ?? null, boundDatabase: resource.databaseScope ?? null,
             currentDatabaseExpression: 'DATABASE()', selection: selected === undefined ? (resource.databaseScope ? 'fixed_binding' : 'connector_default') : 'explicit' },
             ...(primaryKey ? { primaryKey: { columns: primaryKey, count: primaryKey.length, complete: true } } : {}) };
         } finally { await connection.end(); }

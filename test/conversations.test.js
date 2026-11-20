@@ -28,7 +28,11 @@ async function setup(t, decide, overrides = {}) {
       ownerOpenIds: ['legacy-leader'], ownerOpenIdsByProfile: { owner: ['leader'] },
     },
     agents: { agents: { owner_intake: { profile: 'owner', openId: 'bot-owner' }, qa: { profile: 'qa', openId: 'bot-qa' }, developer: { profile: 'dev', openId: 'bot-dev' } } },
-    feishuClient: { reply: async (id, text, options) => { replies.push({ id, text, options }); return { data: { message_id: `bot-reply-${replies.length}` } }; }, send: async (id, text) => replies.push({ id, text }) },
+    feishuClient: { reply: async (id, text, options) => {
+      const messageId = `bot-reply-${replies.length + 1}`;
+      replies.push({ id, text, options, messageId });
+      return { data: { message_id: messageId } };
+    }, send: async (id, text) => replies.push({ id, text }) },
     conversationResponder: async (input) => { inputs.push(input); return decide(input); },
     ...overrides,
   });
@@ -166,22 +170,47 @@ test('analysis delegates read-only investigation; planning stays scoped; QA impl
   assert.deepEqual(routeDecision('qa', 'implementation'), { stage: 'owner_intake', workflow: 'full_delivery' });
 });
 
-test('AI analysis creates a developer job with owner origin and refuses missing team profiles', async (t) => {
-  const { send, app, replies, inputs } = await setup(t, () => decision({ action: 'create_task', intent: 'analysis', instruction: '只读查登录接口' }));
+test('AI analysis creates a developer job with owner origin and refuses missing team profiles', { timeout: 30_000 }, async (t) => {
+  const { send, app, replies, inputs } = await setup(t, async input => {
+    // Trigger the same feedback path as the timer while this decision is still in progress.
+    if (input.message === '请先确认，再分析登录接口') await app.conversations.sendFeedback(input.requestId);
+    return decision({ action: 'create_task', intent: 'analysis', instruction: '只读查登录接口' });
+  }, { conversationOptions: { feedbackMs: 30_000 } });
   app.projects.projects.demo.repoPath = 'D:/demo';
-  await send(message('analysis', '帮我看看登录接口怎么走'));
-  const job = (await app.store.read()).jobs[0];
-  assert.equal(job.agentProfile, 'dev');
-  assert.equal(job.taskIntent, 'analysis');
-  assert.equal(job.continuousInvestigation, true);
-  assert.equal(job.requestedAgentProfile, 'owner');
-  assert.equal(job.delegation.toStage, 'developer');
-  assert.equal(inputs[0].project.sourceDirectory, 'D:/demo');
-  assert.match(replies[0].text, /同一开发会话持续完成源码与环境只读调查/);
+  async function finalReply(event, expected) {
+    const { turnId } = await send(event);
+    const state = await app.store.read();
+    const turn = state.conversations.find(item => item.id === turnId && item.messageId === event.message_id);
+    assert.equal(turn.status, 'sent');
+    const sent = replies.filter(item => item.id === event.message_id);
+    const final = sent.filter(item => turn.responseIds.includes(item.messageId));
+    assert.equal(final.length, 1);
+    assert.equal(final[0].options.profile, 'owner');
+    assert.match(final[0].text, expected);
+    return { turn, sent, final: final[0], jobs: state.jobs };
+  }
+  const routed = /同一开发会话持续完成源码与环境只读调查/;
+  const fast = await finalReply(message('analysis', '帮我看看登录接口怎么走'), routed);
+  assert.equal(fast.sent.length, 1);
+  assert.equal(fast.turn.feedbackMessageId, undefined);
+  const slow = await finalReply(message('analysis-with-feedback', '请先确认，再分析登录接口'), routed);
+  assert.equal(slow.sent.length, 2);
+  assert.equal(slow.sent[0].messageId, slow.turn.feedbackMessageId);
+  assert.match(slow.sent[0].text, /^已收到/);
+  assert.equal(slow.sent[1].messageId, slow.final.messageId);
+  for (const [out, job] of [[fast, fast.jobs[0]], [slow, slow.jobs[1]]]) {
+    assert.equal(out.turn.outcome.jobId, job.id);
+    assert.ok(out.final.text.includes(job.id));
+    assert.equal(job.agentProfile, 'dev');
+    assert.equal(job.taskIntent, 'analysis');
+    assert.equal(job.continuousInvestigation, true);
+    assert.equal(job.requestedAgentProfile, 'owner');
+    assert.equal(job.delegation.toStage, 'developer');
+    assert.equal(inputs.find(input => input.requestId === out.turn.id).project.sourceDirectory, 'D:/demo');
+  }
   delete app.agents.agents.developer;
-  await send(message('missing-dev', '再分析一次'));
-  assert.equal((await app.store.read()).jobs.length, 1);
-  assert.match(replies.at(-1).text, /需要配置开发机器人/);
+  const rejected = await finalReply(message('missing-dev', '再分析一次'), /需要配置开发机器人/);
+  assert.equal(rejected.jobs.length, 2);
 });
 
 test('ordinary members may chat and investigate read-only source but cannot create executable work', async (t) => {

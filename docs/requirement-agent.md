@@ -101,9 +101,9 @@ Runner 复用 Codex app-server，通过任务专属动态工具读取本项目�
 
 普通只读或指定对象的需求约束业务查询和操作权限。只有源需求明确要求覆盖所有调用时，才为对应阶段登记封闭的 `runnerScope`。涉及其他调用者或独立服务证明时，沿用独立审计入口及能力预检。
 
-MySQL 的 `test_connection` 可设置 `identityOnly: true`，保存当前库和主体匹配结果。连接观测中的 `databaseEvidence` 记录同一连接的 `DATABASE()` 表达式、取值路径、时点和选库方式。固定绑定要以未传入数据库参数的连接回读为据。常规连接检查还读取授权。无默认库时当前库可为 `null`。`test_schema` 保存实际连接身份与表结构，其中 `primaryKey.columns` 是按索引顺序回读的完整主键列。使用 `type: "list"` 和 `operator: "equals"` 比较整个数组。`data.count` 是 SQL 实际返回行数，外层 `total` 只用于分页显示。
+MySQL 的 `test_connection` 可设置 `identityOnly: true`，保存当前库和主体匹配结果。对明确绑定库的资源，`test_schema` 可以只传资源与表名，在同一连接回读当前库及表结构。未绑定的资源仍需从源码确认并明确指定库名。`databaseEvidence` 分别记录请求的 `databaseArgument`、配置的 `boundDatabase` 和同一连接返回的 `DATABASE()`。固定绑定取证应看到 `selection: "fixed_binding"` 和 `databaseArgument: null`。常规连接检查还读取授权。无默认库时当前库可为 `null`。`primaryKey.columns` 是按索引顺序回读的完整主键列。使用 `type: "list"` 和 `operator: "equals"` 比较整个数组。`data.count` 是 SQL 实际返回行数，外层 `total` 只用于分页显示。
 
-全程范围中的 MySQL 路由使用 `transport: "database"`、`method: "CONNECT"`、`path: "/"`，并以 `databaseCall` 声明允许的调用类别和实际连接库。表结构范围可限定表名。自定义读查询需要指定审核过的操作名及规范化的参数值。连接器在派发前检查冻结范围，并将实际命令回执挂到同一连接和保存观测。过程审查以同一份台账核对逐次回执、跨阶段边界和已关联观测，即使该检查没有另行声明白名单。旧连接回执仅能证明连接。表结构观测可以在冻结后独立重读。
+全程范围中的 MySQL 路由使用 `transport: "database"`、`method: "CONNECT"`、`path: "/"`，并以 `databaseCall` 声明允许的调用类别和连接目标库。可用 `databaseArgument` 和 `selection` 进一步限定选库方式。固定绑定的目标库仍是库名，请求参数为 `null`。表结构范围可限定表名。自定义读查询需要指定审核过的操作名及规范化的参数值。连接器在派发前检查冻结范围，并将实际命令回执挂到同一连接和保存观测。过程审查以同一份台账核对逐次回执、跨阶段边界和已关联观测，即使该检查没有另行声明白名单。旧连接回执仅能证明连接。表结构观测可以在冻结后独立重读。
 
 参数化 SQL 的 `spec.tables` 分别声明实际 SQL 来源 `role: "query"` 和业务验证对象 `role: "subject"`。先读取各项真实结构。通过固定业务库连接读取 `INFORMATION_SCHEMA` 的列定义时，可在 `test_schema` 传入 `connectionDatabase`。声明用于结构证据关联，查询参数及业务范围仍按实际证据独立审查。
 

@@ -26,7 +26,8 @@ test('real MySQL links scoped probes and exposes complete composite keys without
     const connection = await mysql.createConnection({ host: resource.host, port, user: 'root', password: '' });
     const database = 'aos_scope_' + randomUUID().replaceAll('-', '');
     const requests = [];
-    const runtime = createAgentResources({}, { state: {}, saveState: async () => {}, useRead: (_name, run) => run(resource),
+    const runtime = createAgentResources({}, { state: {}, saveState: async () => {},
+      useRead: (name, run) => run(name === 'fixed' ? { ...resource, databaseScope: database } : resource),
       startRequest: async request => {
         const entry = { ...request, id: randomUUID(), phase: 'prepare' };
         requests.push(entry);
@@ -77,6 +78,29 @@ test('real MySQL links scoped probes and exposes complete composite keys without
       const parameterRoute = route({action:'read',database,operation:'read_key',params:[database,'fixture','PRIMARY']});
       assert.equal(verifyRunnerScope({runnerScope:{phase:'all',allowed:[parameterRoute]}},[requests[4]]).satisfied,true);
       assert.equal(verifyRunnerScope({runnerScope:{phase:'all',allowed:[{...parameterRoute,databaseCall:{...parameterRoute.databaseCall,params:[]}}]}},[requests[4]]).satisfied,false);
+      const boundIdentity = await runtime.inspect('fixed', undefined, true);
+      const boundSchema = await runtime.schema({ resource:'fixed', table:'fixture' });
+      for (const receipt of [boundIdentity, boundSchema]) {
+        assert.equal(receipt.databaseEvidence.selection, 'fixed_binding');
+        assert.equal(receipt.databaseEvidence.databaseArgument, null);
+        assert.equal(receipt.databaseEvidence.boundDatabase, database);
+        assert.equal(receipt.databaseEvidence.database, database);
+      }
+      assert.equal(boundSchema.database, database);
+      assert.deepEqual(boundSchema.primaryKey, schema.primaryKey);
+      const fixedRoute = action => ({ ...route({ action, database, databaseArgument:null, selection:'fixed_binding',
+        ...(action === 'schema' ? { table:'fixture' } : {}) }), resource:'fixed' });
+      const fixedScope = { runnerScope:{ phase:'all', allowed:[fixedRoute('identity'), fixedRoute('schema')] } };
+      assert.equal(verifyRunnerScope(fixedScope, requests.slice(5)).satisfied, true);
+      assert.doesNotThrow(() => validateToolArguments('plan', { action:'process_preflight', check:{
+        ...fixedScope, id:'fixed-scope', line:1, kind:'execution_evidence', requirement:'Fixed binding' } }));
+      const overridden = await runtime.schema({ resource:'fixed', database, table:'fixture' });
+      assert.equal(overridden.databaseEvidence.selection, 'explicit');
+      assert.equal(overridden.databaseEvidence.databaseArgument, database);
+      assert.deepEqual(verifyRunnerScope(fixedScope, requests.slice(5)).violations, [requests[7]]);
+      await assert.rejects(runtime.schema({ resource:'fixed', database:'another_database', table:'fixture' }), /绑定的库名不一致/);
+      await assert.rejects(runtime.schema({ resource:'mysql', table:'fixture' }), /unbound resource/);
+      assert.equal(requests.length, 8);
     } finally {
       await runtime.close();
       await connection.query('DROP DATABASE IF EXISTS `' + database + '`');

@@ -76,11 +76,22 @@ test('Windows kernel-owned worker trees exit on owner loss; recovery preserves l
  await writeFile(ownerFile,`import {fork} from 'node:child_process';import {registerLocalExecution} from ${JSON.stringify(url('src/runner/local-executions.js'))};const j=JSON.parse(process.argv[3]);const w=fork(process.argv[4],[],{execArgv:[],stdio:['ignore','ignore','ignore','ipc']});const guard=await registerLocalExecution(process.argv[2],j,w.pid);w.once('message',m=>process.send({...m,worker:w.pid}));w.send('go');`);
  const owner=fork(ownerFile,[registry,JSON.stringify(job),worker],{execArgv:[],stdio:['ignore','ignore','pipe','ipc']});let diagnostic='';owner.stderr.on('data',b=>diagnostic+=b);t.after(()=>owner.kill());const [ready]=await Promise.race([once(owner,'message'),once(owner,'exit').then(([code])=>{throw Error('Isolated owner exited '+code+': '+diagnostic);})]);
  const [name]=await readdir(registry),file=path.join(registry,name),entry=JSON.parse(await readFile(file));assert.equal(entry.version,2);assert.equal((await recoverLocalExecutions(store,registry)).recovered,0);
- assert.ok((await windowsQuery('probe',{...entry,name:entry.jobName})).active>=2);
+ const probe=(ownerPid,workerPid)=>windowsQuery('probe',{name:entry.jobName,ownerPid,workerPid});
+ const ownerBefore=await probe(owner.pid,ready.worker);
+ assert.deepEqual(ownerBefore.errors,[]);
+ assert.equal(ownerBefore.ownerCreated,entry.ownerCreated);
+ assert.equal(ownerBefore.workerCreated,entry.workerCreated);
+ const descendantsBefore=await probe(ready.worker,ready.grandchild);
+ assert.deepEqual(descendantsBefore.errors,[]);
+ assert.equal(descendantsBefore.ownerCreated,entry.workerCreated);
+ assert.match(descendantsBefore.workerCreated,/^\d+$/);
+ assert.ok(descendantsBefore.active>=2);
  const exit=once(owner,'exit');owner.kill();await exit;
- await until(()=>windowsQuery('probe',{...entry,name:entry.jobName}),p=>!p.errors?.length&&p.active===0&&p.workerCreated!==entry.workerCreated);
- // Original child and grandchild are both gone. PID existence alone was never the proof.
- const descendants=await until(()=>windowsQuery('probe',{name:entry.jobName,ownerPid:ready.worker,workerPid:ready.grandchild}),p=>!p.errors?.length);assert.equal(descendants.ownerCreated,null);assert.equal(descendants.workerCreated,null);
+ const ownerAfter=await until(()=>probe(owner.pid,ready.worker),p=>!p.errors.length&&p.active===0&&p.ownerCreated!==entry.ownerCreated&&p.workerCreated!==entry.workerCreated);
+ // The kernel may briefly retain an exiting process or recycle its PID. Compare the original birth identities.
+ const descendantsAfter=await until(()=>probe(ready.worker,ready.grandchild),p=>!p.errors.length&&p.active===0&&
+   p.ownerCreated!==descendantsBefore.ownerCreated&&p.workerCreated!==descendantsBefore.workerCreated);
+ t.diagnostic(JSON.stringify({ownerExited:true,ownerBefore,descendantsBefore,ownerAfter,descendantsAfter}));
  assert.equal((await recoverLocalExecutions(store,registry,{host:'foreign-host'})).recovered,0);
  await store.transact(s=>s.jobs[0].lease.id='different-lease');assert.equal((await recoverLocalExecutions(store,registry)).recovered,0);assert.equal((await store.getJob(job.id)).status,'running');
  await writeFile(file,JSON.stringify(entry));await store.transact(s=>s.jobs[0].lease.id=job.lease.id);
