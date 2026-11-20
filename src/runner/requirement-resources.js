@@ -145,7 +145,10 @@ function inspectBinding(environment, binding, sections) {
     return blocked('connection_unsupported', '配置要求当前连接器不支持的接入方式');
   }
   const connector = connectors.get(section.resource_type);
-  if (connector === 'mysql') resource.databaseTiers = [...new Set([tier, ...aliases])];
+  if (connector === 'mysql') {
+    resource.databaseTiers = [...new Set([tier, ...aliases])];
+    resource.environmentTier = parts[1].toUpperCase();
+  }
   if (binding.database !== undefined) {
     const declared = configuredDatabase(section.database_name);
     const bound = configuredDatabase(binding.database);
@@ -240,7 +243,8 @@ export async function requirementResources(environment, { allowUnavailable = fal
       section: item.binding.section, scope: item.binding.scope, environment: item.section.environment, resource_type: item.section.resource_type,
       ...(item.endpoint ? { [item.connector === 'rabbitmq_management_http' ? 'management_url' : 'base_url']: item.endpoint } : {}),
       database_name: item.resource.database_name, account_role: item.section.account_role, status: item.section.status, connector: item.connector,
-      ...(item.connector === 'mysql' ? { databaseSelection: item.resource.databaseScope ? 'bound' : 'discover' } : {}),
+      ...(item.connector === 'mysql' ? { databaseSelection: item.resource.databaseScope ? 'bound' : 'discover',
+        environmentTier: item.resource.environmentTier } : {}),
       ai_access: item.section.ai_access, ai_operation_mode: item.section.ai_operation_mode, allowedOperations: item.allowed,
       databaseWriteAuthorizationRequired: item.section.resource_type === 'mysql' && item.global?.destructive_database_operations === 'explicit_authorization_required',
       reversibleSharedWrites: item.binding.reversibleSharedWrites === true && item.allowed.includes('update'), sharedTargets: item.binding.sharedTargets ?? [],

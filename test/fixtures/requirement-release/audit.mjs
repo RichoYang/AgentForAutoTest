@@ -123,7 +123,7 @@ const record={id:fixture.jobId,mode:fixture.mode,sourceSha256:fixture.engine,fix
   runtimeEvidence:Object.values(state.observations).filter(row=>row.data.primaryKey?.complete).map(row=>({
     id:row.observationId,caseId:row.caseKey.split('@')[0],at:row.at,database:row.data.database,table:row.data.table,primaryKey:row.data.primaryKey,requests:row.requestIds,
     selection:row.data.databaseEvidence?.selection,databaseArgument:row.data.databaseEvidence?.databaseArgument,
-    boundDatabase:row.data.databaseEvidence?.boundDatabase,
+    boundDatabase:row.data.databaseEvidence?.boundDatabase,environment:row.data.databaseEvidence?.environment,
   }))};
 await writeFile(path.join(root,'audited-result.json'),JSON.stringify(record,null,2)+'\n',{flag:'wx'});
 console.log(JSON.stringify({id:record.id,summary,cases:cases.map(c=>({checks:c.coverage?.compared,scopes:c.actualScopes,errors:c.diagnostics})),report}));

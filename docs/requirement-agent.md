@@ -107,6 +107,8 @@ MySQL 的 `test_connection` 可设置 `identityOnly: true`，保存当前库和�
 
 全程范围中的 MySQL 路由使用 `transport: "database"`、`method: "CONNECT"`、`path: "/"`，并以 `databaseCall` 声明允许的调用类别和连接目标库。可用 `databaseArgument` 和 `selection` 进一步限定选库方式。固定绑定的目标库仍是库名，请求参数为 `null`。表结构范围可限定表名。自定义读查询需要指定审核过的操作名及规范化的参数值。连接器在派发前检查冻结范围，并将实际命令回执挂到同一连接和保存观测。过程审查以同一份台账核对逐次回执、跨阶段边界和已关联观测，即使该检查没有另行声明白名单。旧连接回执仅能证明连接。表结构观测可以在冻结后独立重读。
 
+MySQL 的环境取证使用通过绑定校验的实际资源层级，规范值为 `SIT` 或 `UAT`。原 INI 拼写保存在 `configuredEnvironment`，仅供诊断。允许的别名资源保留自己的真实层级，Runner 不会按任务名称重标。
+
 参数化 SQL 的 `spec.tables` 分别声明实际 SQL 来源 `role: "query"` 和业务验证对象 `role: "subject"`。先读取各项真实结构。通过固定业务库连接读取 `INFORMATION_SCHEMA` 的列定义时，可在 `test_schema` 传入 `connectionDatabase`。声明用于结构证据关联，查询参数及业务范围仍按实际证据独立审查。
 
 过去轮次的调用范围和缺口仍保留。重复补证未产生新事实时，使用当前缺口说明、已知事实和清理记录收尾。需要重启测量时，说明实际变化并提供来源或观测证据，保留原冻结预期与已发生调用。

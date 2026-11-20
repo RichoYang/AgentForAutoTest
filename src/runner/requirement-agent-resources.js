@@ -263,6 +263,11 @@ export function sanitized(value) {
   return value;
 }
 
+const databaseEnvironment = resource => ({
+  environment: resource.environmentTier ?? resource.environment ?? null,
+  configuredEnvironment: resource.environment ?? null,
+});
+
 export function createAgentResources(config, scope) {
   const sidebar = scope.browserMode === 'codex_sidebar';
   const handoff = action => sidebarHandoff(config.sidebar, scope, action);
@@ -382,7 +387,7 @@ export function createAgentResources(config, scope) {
         await connection.rollback();
         return { rows: sanitized(rows), count: rows.length, columns: mysqlResultColumns(fields),
           requestId: connection.id,
-          databaseEvidence: { resource: spec.resource, environment: resource.environment ?? null, database: identity.databaseName,
+          databaseEvidence: { resource: spec.resource, ...databaseEnvironment(resource), database: identity.databaseName,
             principalMatchesConfiguredUser: identity.principal.split('@')[0] === resource.username, checkedAt: new Date().toISOString() } };
       }
       const schema = schemas.get(spec.resource + ':' + spec.database + ':' + spec.table)
@@ -665,8 +670,8 @@ export function createAgentResources(config, scope) {
             const [[receipt]] = await connection.query(sql);
             const identity = { connector: 'mysql', connected: String(receipt.ready) === '1',
               principalMatchesConfiguredUser: receipt.principal.split('@')[0] === resource.username, database: receipt.databaseName,
-              resource: resourceName, environment: resource.environment ?? null, requestId: connection.id };
-            identity.databaseEvidence = { resource: resourceName, environment: identity.environment, database: receipt.databaseName,
+              resource: resourceName, ...databaseEnvironment(resource), requestId: connection.id };
+            identity.databaseEvidence = { resource: resourceName, ...databaseEnvironment(resource), database: receipt.databaseName,
               principalMatchesConfiguredUser: identity.principalMatchesConfiguredUser, checkedAt: new Date().toISOString(),
               selection: database === undefined ? (resource.databaseScope ? 'fixed_binding' : 'connector_default') : 'explicit',
               databaseArgument: database ?? null, boundDatabase: resource.databaseScope ?? null,
@@ -817,7 +822,7 @@ export function createAgentResources(config, scope) {
           await scope.saveState();
           const primaryKey = metadata ? undefined : indexes.filter(row => row.Key_name === 'PRIMARY')
             .sort((left, right) => Number(left.Seq_in_index) - Number(right.Seq_in_index)).map(row => row.Column_name);
-          return { ...schema, requestId, databaseEvidence: { resource: args.resource, environment: resource.environment ?? null,
+          return { ...schema, requestId, databaseEvidence: { resource: args.resource, ...databaseEnvironment(resource),
             database: identity.databaseName, principalMatchesConfiguredUser: identity.principal.split('@')[0] === resource.username,
             checkedAt: new Date().toISOString(), currentDatabaseField: ['databaseEvidence', 'database'],
             databaseArgument: selected ?? null, boundDatabase: resource.databaseScope ?? null,

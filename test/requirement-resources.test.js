@@ -27,17 +27,22 @@ test('explicit INI bindings report isolated format, policy and protocol failures
     + section('Demox.Sit.Api') + section('Demo.Uat.Other', '', 'Uat')
     + section('Demo.Sit.Mongo', 'resource_type=mongodb')
     + section('Demo.Sit.Missing', 'resource_type=mysql\nhost=\nusername=')
-    + section('Demo.Sit.Db', 'resource_type=mysql\nhost=127.0.0.1\nport=3306\nusername=fixture\npassword=fixture-only'), {
+    + section('Demo.Sit.Db', 'resource_type=mysql\nhost=127.0.0.1\nport=3306\nusername=fixture\npassword=fixture-only')
+    + section('Demo.Uat.Db', 'resource_type=mysql\nhost=127.0.0.1\nport=3306\nusername=fixture\npassword=fixture-only', 'Uat'), {
     main: { section: 'Demo.Sit', scope: 'full_crud' }, bad: { section: 'Demo.Sit.Bad', scope: 'read' },
     unknown: { section: 'Demo.Sit.Policy', scope: 'read' }, unsupported: { section: 'Demo.Sit.Mongo', scope: 'read' },
     prd: { section: 'Demo.Prd.Api', scope: 'read' }, other: { section: 'Demox.Sit.Api', scope: 'read' },
     alias: { section: 'Demo.Uat.Other', scope: 'read' }, missing: { section: 'Demo.Sit.Missing', scope: 'read' },
-    db: { section: 'Demo.Sit.Db', scope: 'full_crud' },
+    db: { section: 'Demo.Sit.Db', scope: 'full_crud' }, dbAlias: { section: 'Demo.Uat.Db', scope: 'read' },
   }, { aliases: ['UAT', 'PRD'] });
   const bound = await requirementResources(env, { allowUnavailable: true });
-  assert.deepEqual(bound.names, ['main', 'alias', 'db']);
+  assert.deepEqual(bound.names, ['main', 'alias', 'db', 'dbAlias']);
   assert.deepEqual(bound.catalog.main.allowedOperations, ['read', 'create', 'update']);
   assert.deepEqual(bound.catalog.db.allowedOperations, ['read']);
+  assert.equal(bound.catalog.db.environment, 'Sit');
+  assert.equal(bound.catalog.db.environmentTier, 'SIT');
+  assert.equal(bound.catalog.dbAlias.environment, 'Uat');
+  assert.equal(bound.catalog.dbAlias.environmentTier, 'UAT');
   assert.equal(bound.catalog.db.databaseWriteAuthorizationRequired, true);
   await bound.assertWrite('main', 'update');
   for (const operation of ['delete', 'trigger']) await assert.rejects(bound.assertWrite('main', operation), { code: 'environment_scope' });
@@ -161,9 +166,11 @@ test('real MySQL connector returns identity and selected database metadata and r
     const runtime = createAgentResources({}, { state: { operations: {} }, useRead: (key, run) => resources.use(key, 'read', run) });
     const { databaseEvidence, ...identity } = await runtime.inspect('db');
     assert.deepEqual(identity, { connector: 'mysql', connected: true, principalMatchesConfiguredUser: true,
-      database: name, resource: 'db', environment: 'Sit', requestId: undefined, globalPrivilege: false, grantEntries: 2 });
+      database: name, resource: 'db', environment: 'SIT', configuredEnvironment: 'Sit', requestId: undefined, globalPrivilege: false, grantEntries: 2 });
     assert.equal(databaseEvidence.selection, 'fixed_binding');
     assert.equal(databaseEvidence.database, name);
+    assert.equal(databaseEvidence.environment, 'SIT');
+    assert.equal(databaseEvidence.configuredEnvironment, 'Sit');
     assert.equal(databaseEvidence.currentDatabaseExpression, 'DATABASE()');
     assert.equal((await runtime.inspect('db', name, true)).databaseEvidence.selection, 'explicit');
     assert.deepEqual(await runtime.schema({ resource: 'db' }), { rows: [{ Database: name }], requestId: undefined });
