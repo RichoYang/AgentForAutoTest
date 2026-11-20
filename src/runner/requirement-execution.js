@@ -295,6 +295,14 @@ export async function executeCases({ job, settings, journal, source, index, mani
       }
       const caseInput = { ...scope, item, row, headers: manifest.headers, attempt,
         repositories: sourceAttempt?.repositories ?? scope.repositories,
+        ...(agentMode ? { previousCaseBlockers: index.flatMap(prior => {
+          if (prior.row >= item.row || journal.executionCases[prior.caseId]?.publicationVersion !== journal.publication.version) return [];
+          const result = journal.results[prior.caseId];
+          if (!['阻断', '未执行'].includes(result?.status) || !result.blocker?.dependency ||
+              journal.caseCleanup?.[prior.caseId]?.verified !== true) return [];
+          return [{ caseId: prior.caseId, row: prior.row, scenario: manifest.rows[prior.row - 2]?.[manifest.headers.indexOf('测试场景')],
+            status: result.status, dependency: result.blocker.dependency, recordedAt: result.at, resultHash: digest(result) }];
+        }) } : {}),
         async recordSource(sourceRef, file, purpose, disposition) {
           if (!sourceAttempt || !file.contentSha256) return;
           const entry = resources.checkOutput({ sourceRef, origin: file.origin, path: file.path, start: file.start, end: file.end,

@@ -264,3 +264,45 @@ test('two attributed process proofs retain each other when only their registered
   assert.equal(result.checkCoverage.processProven, 2);
   assert.equal(receipts.length, 1);
 });
+
+test('a process-only case needs actual scope proof, without inventing a business assertion', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'agentos-process-only-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  await writeFile(path.join(root, 'service.js'), 'GET /status is read-only.');
+  const url = await server(t, (_, response) => response.end('{"ready":true}'));
+  const previousCaseBlockers = [{ caseId:'CASE-PREVIOUS', row:2, status:'未执行',
+    dependency:'Independent audit not configured', resultHash:'b'.repeat(64) }];
+  const reviewed = [];
+  const processCheck = { id:'P1', line:1, kind:'execution_evidence', requirement:'Only the status route is used',
+    runnerScope:{ phase:'all', allowed:[{ resource:'portal', method:'GET', path:'/status', transport:'http' }] } };
+  const agent = createRequirementAgent({}, { workDir:root, review:async input => {
+    const proof = JSON.parse(input.split('\n\n').at(-1));
+    if (['plan','process'].includes(proof.kind)) {
+      assert.deepEqual(proof.previousCaseBlockers,previousCaseBlockers);
+      reviewed.push(proof.kind);
+    }
+    return { accepted:true, errors:[] };
+  }, agentModel:async ({ call }) => ({ close:async () => {}, async turn() {
+    const invoke = (name, args) => call('test_'+name,{ args });
+    const plan = { version:1, steps:['Read status and prove the route'], prerequisites:[], checks:[] };
+    await assert.rejects(invoke('plan',plan), /business check or a runtime process check/);
+    const source = await invoke('source',{ action:'read', path:'service.js' });
+    await invoke('register',{ name:'read_status',sourceRefs:[source.sourceRef],reason:'Read fixture status',
+      spec:{ resource:'portal',kind:'http',access:'read',method:'GET',path:'/status' } });
+    await invoke('plan',{ ...plan,processChecks:[processCheck] });
+    await assert.rejects(invoke('finish',{ actual:'No scope proof yet' }), { code:'incomplete_checks' });
+    const actual = await invoke('observe',{ operation:'read_status' });
+    await invoke('process',{ checkId:'P1',evidenceRefs:[{ observationId:actual.observationId,fields:[['body','ready']] }] });
+    await invoke('finish',{ actual:'The permitted route was used and the trace matched' });
+    return { text:'done' };
+  } }) });
+  const result = await agent.execute({ jobId:'JOB-process-only',item:{ caseId:'CASE-CURRENT' }, reports:root,
+    row:['Only the status route is used'],headers:['预期结果'],source:{},sourceRoot:root,runPrefix:'AOS_',
+    resourceNames:['portal'],mutations:[],previousCaseBlockers,checkOutput:value=>value,
+    useRead:(_,read)=>read({ base_url:url }) });
+  assert.equal(result.status,'通过');
+  assert.deepEqual(result.assertions,[]);
+  assert.equal(result.checkCoverage.total,0);
+  assert.equal(result.checkCoverage.processProven,1);
+  assert.deepEqual(reviewed,['plan','process']);
+});

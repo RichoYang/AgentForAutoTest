@@ -6,6 +6,7 @@ import {createHash} from 'node:crypto';
 import {digest} from '../../../src/runner/requirement-feishu.js';
 import {reportFile} from '../../../src/shared/report-files.js';
 import {verifyRunnerScope,runnerScopeHistory} from '../../../src/runner/requirement-agent-request-proof.js';
+import {fixtureTables} from './db-fixture-delivery6.mjs';
 const read=async name=>JSON.parse((await readFile(name,'utf8')).replace(/^\uFEFF/,''));
 const evidence=process.env.AGENTOS_RELEASE_FIXTURE_DIR;
 assert.ok(evidence&&path.isAbsolute(evidence),'Set an absolute isolated evidence directory');
@@ -30,13 +31,35 @@ assert.equal(Object.keys(journal.results).length,rows.length);
 assert.equal(run.pending,0);
 assert.equal(journal.mutations?.length??0,0);
 assert.equal(journal.cleanup?.verified,true);
+const [primary,secondary]=fixtureTables(fixture.mode);
+function verifyDatabaseRead(request) {
+  const target=request.resource==='mysql'?primary:request.resource==='secondary'?secondary:null;
+  assert.ok(target, 'Unexpected database resource: '+request.resource);
+  const detail=request.databaseCall;
+  assert.ok([target[0],...(target===primary?[null]:[])].includes(detail.database));
+  assert.ok(['identity','schema'].includes(detail.action));
+  assert.ok(Array.isArray(request.statementReceipts));
+  if(detail.action==='schema'){
+    assert.equal(detail.database,target[0]);
+    assert.equal(detail.table,target[1]);
+  }
+  const quoted='`'+target[1]+'`';
+  const allowed=detail.action==='identity'?['SELECT 1 AS ready, CURRENT_USER() AS principal, DATABASE() AS databaseName']
+    :['SELECT DATABASE() AS databaseName, CURRENT_USER() AS principal','SHOW FULL COLUMNS FROM '+quoted,
+      'SHOW INDEX FROM '+quoted,'SHOW CREATE TABLE '+quoted];
+  for(const row of request.statementReceipts){
+    assert.equal(row.method,'query');
+    assert.ok(allowed.includes(row.statement),'Unexpected database statement receipt');
+    assert.notEqual(row.outcome,'pending');
+  }
+}
 const cases=Object.entries(state.cases).map(([key,value])=>{
   const requests=runnerScopeHistory(value);
   assert.ok(requests, 'missing trace for '+key);
   assert.equal(value.model?.model, process.env.AGENTOS_CODEX_MODEL);
   assert.equal(value.model?.reasoningEffort, process.env.AGENTOS_CODEX_REASONING_EFFORT);
   assert.ok(requests.every(request=>request.transport==='database'));
-  assert.ok(requests.every(request=>request.databaseCall && Array.isArray(request.statementReceipts)));
+  for(const request of requests)verifyDatabaseRead(request);
   const actualScopes=(value.plan?.processChecks ?? []).filter(check=>check.runnerScope).map(check=>({
     id:check.id, structured:check.runnerScope.allowed.every(route=>route.databaseCall),
     proven:value.processProofs?.[check.id]?.proven===true, satisfied:verifyRunnerScope(check,requests).satisfied,
@@ -94,11 +117,11 @@ const record={id:fixture.jobId,mode:fixture.mode,sourceSha256:fixture.engine,fix
   model:fixture.model,summary,cases,report,originalCases:fixture.originalCases,processDiagnostics:[...processDiagnostics].map(([name,sha256])=>({name,sha256})),
   pending:run.pending,cleanup:journal.cleanup?.verified??false,
   jobStatus:run.finalStatus,outcome:execution.result.outcome,wait:execution.result.requirementWait??null,
-  results:Object.values(journal.results).map(row=>({status:row.status,blocker:row.blocker?.dependency,coverage:row.checkCoverage})),
+  results:Object.entries(journal.results).map(([caseId,row])=>({caseId,status:row.status,blocker:row.blocker?.dependency,coverage:row.checkCoverage})),
   connectionEvidence:Object.values(state.observations).filter(row=>row.data.databaseEvidence?.selection).map(row=>({id:row.observationId,
     database:row.data.databaseEvidence.database,selection:row.data.databaseEvidence.selection,requestIds:row.requestIds})),
   runtimeEvidence:Object.values(state.observations).filter(row=>row.data.primaryKey?.complete).map(row=>({
-    id:row.observationId,at:row.at,database:row.data.database,table:row.data.table,primaryKey:row.data.primaryKey,requests:row.requestIds,
+    id:row.observationId,caseId:row.caseKey.split('@')[0],at:row.at,database:row.data.database,table:row.data.table,primaryKey:row.data.primaryKey,requests:row.requestIds,
     selection:row.data.databaseEvidence?.selection,databaseArgument:row.data.databaseEvidence?.databaseArgument,
     boundDatabase:row.data.databaseEvidence?.boundDatabase,
   }))};

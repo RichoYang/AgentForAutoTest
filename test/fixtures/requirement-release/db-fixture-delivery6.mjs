@@ -9,6 +9,7 @@ const cases={
   negative6:{module:'档案编号与检索结构验收',tables:[['convergence_archive_sit','archive_record','RECORD_ID'],['convergence_search_sit','archive_index','INDEX_ID']]},
 };
 export const fixtureModule=mode=>cases[mode].module;
+export const fixtureTables=mode=>cases[mode].tables;
 export function fixtureSource(mode) {
   const c=cases[mode];
   return c.tables.map(([database,table,key])=>[

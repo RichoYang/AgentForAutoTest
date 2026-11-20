@@ -89,6 +89,7 @@ descriptions.plan += ' Plain read-only or specified objects do not require a who
 descriptions.measure += ' Restart with unresolved gaps needs a change plus new sourceRefs or evidenceRefs. Restart cannot erase an earlier scope violation.';
 descriptions.plan += ' For a databaseCall action=read supply params with the exact normalized strings/null (or [] when there are none), together with the registered operation name.';
 descriptions.plan += ' For a fixed MySQL binding omit the database argument in both identityOnly and direct table schema probes. In allowed.databaseCall use the bound database name as database, null as databaseArgument and fixed_binding as selection. The argument, connector target and actual DATABASE() are distinct. test_plan action=inspect returns recordedDatabaseRoutes; use those fields to express the permitted routes based on the original source, not to bless any recorded out-of-scope call. Combine all applicable read-only routes into one phase:"all" whitelist when the case requires both preparation and formal evidence.';
+descriptions.plan += ' If the original case only tests runtime process requirements, use checks:[] and map every original line to processChecks. Do not invent business assertions. Use the built-in identity and schema action names for those read-only probes, not the action "read" used by registered SQL. Omit unused table, operation and metadataDatabase fields.';
 descriptions.plan += ' For a schema-only case, use test_connection identityOnly and test_schema directly. Those are supported independent reads before and after plan freeze. Use type:list for primaryKey.columns. A check of the actual database or table must not use that same expected value to filter the observation.';
 export const requirementAgentTools = Object.entries(descriptions).map(([name, description]) => ({ name: 'test_' + name, description,
   inputSchema: { type: 'object', properties: { args: requirementToolSchemas[name] }, required: ['args'], additionalProperties: false } }));
@@ -286,6 +287,7 @@ export function createRequirementAgent(config, options) {
       ['plan', 'assertion_binding', 'measurement'].includes(kind) ? 'For primaryKey.columns use list equality on the complete, ordered, unfiltered key. No SQL aggregate or first-row shortcut. SQL count is returned rows only; top-level display pagination total is not a saved field.' : '',
       ['plan', 'assertion_binding', 'measurement'].includes(kind) ? 'For a built-in MySQL connection observation, databaseEvidence identifies the actual selected field from the same session SELECT DATABASE() and how the database was chosen. selection=fixed_binding means no database argument overrode the resource binding. The SQL and currentDatabaseField are connector facts; do not ask for a duplicate SQL query merely to verify the origin of that field. An explicit database argument cannot prove the default binding.' : '',
       ['plan', 'process', 'assertion_binding', 'measurement'].includes(kind) ? 'For fixed-binding identity/schema reads, input.database is absent; databaseEvidence.databaseArgument is null, boundDatabase is the configured binding, and database is the actual same-session current database. In a Runner route, database is the connector target even when databaseArgument is null. Compare the observed database and ordered primary key with independent source values. Apply independent audit only to the named row, resource and scope the original requirement makes dependent on it. Recording a prior audit blocker as a precondition for a separate case does not require that case to retrieve the missing audit.' : '',
+      ['plan', 'process'].includes(kind) ? 'previousCaseBlockers are Runner-recorded earlier rows in the same Job and publication version with verified case cleanup. Use them only if this case explicitly depends on the earlier blocked outcome. They do not establish that an audit was performed and cannot substitute for current-case observations. A runtime process-only row can use checks:[] when all its original lines have verifiable processChecks. Limit scope to what this row asks to exercise; a whitelist of permitted tables does not require querying each table in every case.' : '',
       ['plan', 'assertion_binding', 'measurement'].includes(kind) ? 'When the original expectation asks the Runner to choose a database using source evidence, an explicit selection followed by the same session DATABASE() is the requested observation. A resource without a default database has no independent default to confirm. Only require a no-override observation when the original expectation specifically asks about the default or fixed binding.' : '',
       kind === 'process' ? 'runnerRequests contains host-captured connection and statement receipts from the whole case, including previous measurement epochs. Use each entry id and databaseCall/statementReceipts to check explicit trace requirements; compared observation requestIds link the same actual calls. A local trace does not satisfy a separately required independent audit. Use runnerScope for the program-checked whitelist and require it where the frozen check declares it.' : '',
       kind === 'operation' ? 'spec.tables role=query identifies actual SQL sources; role=subject identifies the measured business table. Cross-check SQL and parameters separately. databaseTarget.selected is the actual connection database, which can differ from INFORMATION_SCHEMA.' : '',
@@ -974,7 +976,10 @@ export function createRequirementAgent(config, options) {
           if (!Array.isArray(args.steps) || !args.steps.length) errors.push('$.steps needs executable steps');
           else if (args.steps.some(step => typeof step !== 'string' || !step.trim())) errors.push('$.steps entries must be nonempty action descriptions');
           if (!Array.isArray(args.prerequisites)) errors.push('$.prerequisites must be an array');
-          if (!Array.isArray(args.checks) || !args.checks.length) errors.push('$.checks needs every original expectation');
+          if (!Array.isArray(args.checks) || !args.checks.length &&
+              !args.processChecks?.some(check => !['report','external_cleanup'].includes(check.kind))) {
+            errors.push('The plan needs at least one business check or a runtime process check');
+          }
           const expected = scope.row[scope.headers.indexOf('预期结果')];
           const lines = expected.split(/\r?\n/).filter(line => line.trim());
           const ids = new Set();
@@ -1071,6 +1076,7 @@ export function createRequirementAgent(config, options) {
             }
           }
           const planReview=await review(scope, 'plan', { headers: scope.headers, row: scope.row, source: scope.source, plan: args, aliases: current.aliases,
+            previousCaseBlockers: scope.previousCaseBlockers,
             coverageMatrix: planCoverageMatrix(lines,args),
             toolContracts: { plan: requirementToolSchemas.plan, browser: requirementToolSchemas.browser, process: requirementToolSchemas.process },
             externalPreflights: current.externalPreflights,
@@ -1410,7 +1416,7 @@ export function createRequirementAgent(config, options) {
           // The assertion engine owns business verdicts. Correct evidence,
           // readiness and cleanup remain provable when the product fails.
           const runnerRequests = check.kind === 'execution_evidence' ? runnerScopeHistory(current) : undefined;
-          const payload = { check,
+          const payload = { check, previousCaseBlockers: scope.previousCaseBlockers,
             originalExpectation: scope.row[scope.headers.indexOf('预期结果')].split(/\r?\n/).filter(line => line.trim())[check.line - 1],
             related: related.map(item => ({ checkId: item.check.id, requirement: item.check.requirement,
               compared: true,pageStage:item.check.pageStage,
@@ -1443,21 +1449,23 @@ export function createRequirementAgent(config, options) {
           const assertions = Object.values(current.assertions).flat();
           const checks = current.plan?.checks ?? [];
           const processChecks = current.plan?.processChecks ?? [];
+          const runtimeChecks = processChecks.filter(check => !['report','external_cleanup'].includes(check.kind));
+          const hasChecks = checks.length > 0 || runtimeChecks.length > 0;
           const missing = [...checks.filter(check => !current.assertions[check.id]?.some(result => result.compared)),
-            ...processChecks.filter(check => !['report','external_cleanup'].includes(check.kind) && (!current.processProofs?.[check.id]?.proven
+            ...runtimeChecks.filter(check => (!current.processProofs?.[check.id]?.proven
               || !current.processProofs[check.id].baseline && current.processProofs[check.id].mutationVersion !== mutationVersion(check.kind)))];
           const real = current.observations.map(id => state.observations[id]).filter(item => ['page', 'api', 'database', 'message', 'job'].includes(item.channel));
-          if ((!checks.length || missing.length) && (!args.blocker?.dependency || !args.blocker?.required_action || !args.blocker.attempts?.length)) {
+          if ((!hasChecks || missing.length) && (!args.blocker?.dependency || !args.blocker?.required_action || !args.blocker.attempts?.length)) {
             const httpErrors = real.filter(item => item.data.status >= 400)
               .map(item => ({ observationId: item.observationId, resource: item.input?.resource, httpStatus: item.data.status }));
             const diagnostic = scope.checkOutput(sanitized(finishDiagnostics(current, missing, httpErrors)));
             const fields = diagnostic.missingChecks.map(check => check.checkId + ' (' + check.role + ', ' + check.phase + ', ' + check.status + ')');
-            throw Object.assign(agentError('Incomplete checks: ' + (fields.join(', ') || 'no frozen business checks') + '. ' + diagnostic.next),
+            throw Object.assign(agentError('Incomplete checks: ' + (fields.join(', ') || 'no frozen business or runtime process checks') + '. ' + diagnostic.next),
               { code: 'incomplete_checks', fields, gapDetails: diagnostic });
           }
           const failures = assertions.filter(check => check.compared && !check.passed);
           const external = current.externalErrors?.length || real.some(item => item.data.status >= 400);
-          const status = failures.length ? '失败' : checks.length && !missing.length ? '通过' : external ? '阻断' : '未执行';
+          const status = failures.length ? '失败' : hasChecks && !missing.length ? '通过' : external ? '阻断' : '未执行';
           const end = await evidence(scope, '用例结论', { ...args, status, missing: missing.map(check => check.id) });
           finished = { status, actual: args.actual, assertions, processChecks: current.processProofs ?? {}, evidence: [end, ...real.flatMap(item => [item.evidence, ...(item.data.screenshot ? [item.data.screenshot] : [])]), ...assertions.map(item => item.evidence), ...(current.cleanup?.evidence ?? [])],
             ...(args.blocker ? { blocker: { ...args.blocker, category: external ? '外部资源' : '执行能力或前置证据不足' } } : {}), ...(failures.length ? { issue: { severity: '一般', classification: args.classification ?? '产品',
@@ -1560,7 +1568,7 @@ export function createRequirementAgent(config, options) {
           sourceRoot: scope.sourceRoot, source: scope.source, headers: scope.headers, row: scope.row, repositories: scope.repositories,
           sourceIndex: Object.entries(state.sources).map(([sourceRef, entry]) => ({ sourceRef, path: entry.path, file: entry.file,
             ref: entry.ref, start: entry.start, end: entry.end, sha256: entry.sha256 })),
-          existingOperations: state.operations,
+          existingOperations: state.operations, previousCaseBlockers: scope.previousCaseBlockers,
           priorAttemptReference,
           projectKnowledge: config.knowledgeFile ? await readJson(config.knowledgeFile) : undefined,
           knowledgePolicy: 'existingOperations 是本Job已审核的操作，可直接复用同一契约；需改变契约才另起名称登记。projectKnowledge 是跨任务线索，须核实当前源码和资源再登记。实时对象和基线必须本次回读，不从历史推断。',
