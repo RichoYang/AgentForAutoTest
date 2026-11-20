@@ -5,7 +5,7 @@ import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {digest} from '../../../src/runner/requirement-feishu.js';
 import {reportFile} from '../../../src/shared/report-files.js';
-import {verifyRunnerScope,runnerScopeHistory} from '../../../src/runner/requirement-agent-request-proof.js';
+import {verifyRunnerScope,runnerScopeHistory,runnerTraceWindow} from '../../../src/runner/requirement-agent-request-proof.js';
 import {fixtureTables} from './db-fixture-delivery6.mjs';
 const read=async name=>JSON.parse((await readFile(name,'utf8')).replace(/^\uFEFF/,''));
 const evidence=process.env.AGENTOS_RELEASE_FIXTURE_DIR;
@@ -56,6 +56,8 @@ function verifyDatabaseRead(request) {
 const cases=Object.entries(state.cases).map(([key,value])=>{
   const requests=runnerScopeHistory(value);
   assert.ok(requests, 'missing trace for '+key);
+  const traceWindow=runnerTraceWindow(value);
+  assert.ok(traceWindow&&traceWindow.count===requests.length,'missing complete trace boundary for '+key);
   assert.equal(value.model?.model, process.env.AGENTOS_CODEX_MODEL);
   assert.equal(value.model?.reasoningEffort, process.env.AGENTOS_CODEX_REASONING_EFFORT);
   assert.ok(requests.every(request=>request.transport==='database'));
@@ -64,7 +66,7 @@ const cases=Object.entries(state.cases).map(([key,value])=>{
     id:check.id, structured:check.runnerScope.allowed.every(route=>route.databaseCall),
     proven:value.processProofs?.[check.id]?.proven===true, satisfied:verifyRunnerScope(check,requests).satisfied,
   }));
-  return {key,model:value.model,requests:requests.length,diagnostics:value.errors?.length??0,restarts:value.restarts?.length??0,
+  return {key,model:value.model,requests:requests.length,traceWindow,diagnostics:value.errors?.length??0,restarts:value.restarts?.length??0,
     statementAttempts:requests.reduce((count,request)=>count+request.statementReceipts.length,0),
     coverage:journal.results[key.split('@')[0]]?.checkCoverage,actualScopes};
 });

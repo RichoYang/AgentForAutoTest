@@ -15,7 +15,7 @@ import { credentialField, scopedDatabase } from './requirement-resources.js';
 import { requirementToolSchemas, validateToolArguments,operationNameSchema,planCoverageMatrix,duplicatePlanChecks,pageStageErrors,planRepair } from './requirement-agent-contracts.js';
 import { compareRecordSnapshots } from './requirement-snapshot.js';
 import { checkCoverage, finishDiagnostics, recordGap, resolveGaps } from './requirement-agent-progress.js';
-import { auditWindow, compareRequestProof, correlateRequestAudit, validateRequestProof, verifyRunnerScope, runnerScopeHistory, externalCleanupReceipt } from './requirement-agent-request-proof.js';
+import { auditWindow, compareRequestProof, correlateRequestAudit, validateRequestProof, verifyRunnerScope, runnerScopeHistory, runnerTraceWindow, externalCleanupReceipt } from './requirement-agent-request-proof.js';
 import { mutationReadbackHash, validateMutationReadback, repairHttpEnvelope, verifiedMutationCleanup } from './requirement-mutation-measurement.js';
 
 const instructions = `你是项目需求测试专员。你必须亲自使用工具调查、构造、执行、取证和清理，不得用计划或报告冒充完成。
@@ -296,6 +296,7 @@ export function createRequirementAgent(config, options) {
       ['plan', 'process'].includes(kind) ? 'previousCaseBlockers are Runner-recorded earlier rows in the same Job and publication version with verified case cleanup. Use them only if this case explicitly depends on the earlier blocked outcome. They do not establish that an audit was performed and cannot substitute for current-case observations. A runtime process-only row can use checks:[] when all its original lines have verifiable processChecks. Limit scope to what this row asks to exercise; a whitelist of permitted tables does not require querying each table in every case.' : '',
       ['plan', 'assertion_binding', 'measurement'].includes(kind) ? 'When the original expectation asks the Runner to choose a database using source evidence, an explicit selection followed by the same session DATABASE() is the requested observation. A resource without a default database has no independent default to confirm. Only require a no-override observation when the original expectation specifically asks about the default or fixed binding.' : '',
       kind === 'process' ? 'runnerRequests contains host-captured connection and statement receipts from the whole case, including previous measurement epochs. Use each entry id and databaseCall/statementReceipts to check explicit trace requirements; compared observation requestIds link the same actual calls. A local trace does not satisfy a separately required independent audit. Use runnerScope for the program-checked whitelist and require it where the frozen check declares it.' : '',
+      ['plan','process'].includes(kind) ? 'runnerTraceWindow is the host-captured local trace boundary, persisted before the first dispatch and checked through the time of review, including all settled recorded requests. Its traceSha256 binds runnerRequests, and requests carry dispatch and settlement timestamps. A null window cannot prove a complete window. Only require an external audit if the original case explicitly calls for that source.' : '',
       kind === 'operation' ? 'spec.tables role=query identifies actual SQL sources; role=subject identifies the measured business table. Cross-check SQL and parameters separately. databaseTarget.selected is the actual connection database, which can differ from INFORMATION_SCHEMA.' : '',
       JSON.stringify({ kind, ...payload, environmentProof: scope.resourceCatalog }),
     ].join('\n\n'), { cwd: options.workDir, codexBin: options.codexBin,
@@ -488,6 +489,8 @@ export function createRequirementAgent(config, options) {
         && !priorMutations.some(currentMutation)) {
         current.requestTrace = [];
         current.requestTraceVersion = 3;
+        current.requestTraceOpenedAt = new Date().toISOString();
+        await saveState();
       }
       const startRequest = async (request, phase = current.plan ? 'scenario' : 'prepare') => {
         if (!current.requestTrace) return;
@@ -512,13 +515,18 @@ export function createRequirementAgent(config, options) {
           const proof = current.processProofs?.[check.id], contract = check.requestProof;
           if (proof?.proven && (contract?.phase === attempt.phase && contract.resource === attempt.resource
             && contract.requests.some(item => item.method === attempt.method && item.path === attempt.path)
-            || check.runnerScope && ['all', attempt.phase].includes(check.runnerScope.phase))) {
+            || check.runnerScope && ['all', attempt.phase].includes(check.runnerScope.phase)
+            || proof.runnerTraceWindow)) {
             proof.proven = false;
             proof.invalidatedByRequest = attempt.id;
           }
         }
         await saveState();
-        return Object.assign(async outcome => { Object.assign(attempt, outcome); await saveState(); }, { id: attempt.id });
+        return Object.assign(async outcome => {
+          Object.assign(attempt, outcome);
+          if (outcome.outcome && outcome.outcome !== 'pending') attempt.settledAt = new Date().toISOString();
+          await saveState();
+        }, { id: attempt.id });
       };
       const runtime = createAgentResources(config, { ...context(scope), startRequest });
       const cleanupCurrent = () => scope.cleanupCase(request => startRequest(request, 'cleanup'));
@@ -1092,6 +1100,7 @@ export function createRequirementAgent(config, options) {
               .map(([name, operation]) => ({ name, ...operation, channel: evidenceChannel(operation) })),
             sourceEvidence: Object.values(state.sources).filter(item => item.text),
             runnerRequests: args.processChecks?.some(check => check.runnerScope) ? runnerScopeHistory(current) : undefined,
+            runnerTraceWindow: args.processChecks?.some(check => check.runnerScope) ? runnerTraceWindow(current) : undefined,
             measurementSamples: args.checks.filter(check => check.measurement).map(check => {
               const sample = knownObservation(check.measurement.observationId);
               return { checkId: check.id, role: 'pre-action method sample, not scenario result', observationId: sample.observationId,
@@ -1162,11 +1171,13 @@ export function createRequirementAgent(config, options) {
             evidenceRefs: args.evidenceRefs, unresolvedGaps: unresolved.map(gap => gap.id),
             at: new Date().toISOString(), epoch: current.epoch ?? 0,
             plan: current.plan, planReview:current.planReview, assertions: current.assertions, processProofs: current.processProofs, observations: current.observations, aliases: current.aliases, preflights: current.preflights,
-            requestTrace: current.requestTrace, requestTraceVersion: current.requestTraceVersion, requestPreflights: current.requestPreflights,
+            requestTrace: current.requestTrace, requestTraceVersion: current.requestTraceVersion,
+            requestTraceOpenedAt: current.requestTraceOpenedAt, requestPreflights: current.requestPreflights,
             externalPreflights: current.externalPreflights, preparationAudits: current.preparationAudits, cleanup });
           current.epoch = (current.epoch ?? 0) + 1;
           current.startedAt = new Date().toISOString(); current.assertions = {}; current.observations = []; current.aliases = {}; current.requestTrace = [];
           current.requestTraceVersion = 3;
+          current.requestTraceOpenedAt = current.startedAt;
           delete current.externalPreflights;
           delete current.businessCompletedAt;
           delete current.planCandidate;
@@ -1423,6 +1434,7 @@ export function createRequirementAgent(config, options) {
           // readiness and cleanup remain provable when the product fails.
           const runnerRequests = ['execution_evidence','receipt_reconciliation'].includes(check.kind)
             ? runnerScopeHistory(current) : undefined;
+          const traceWindow = runnerRequests ? runnerTraceWindow(current) : undefined;
           const payload = { check, originalCase: { headers: scope.headers, row: scope.row },
             previousCaseBlockers: scope.previousCaseBlockers,
             originalExpectation: scope.row[scope.headers.indexOf('预期结果')].split(/\r?\n/).filter(line => line.trim())[check.line - 1],
@@ -1437,7 +1449,7 @@ export function createRequirementAgent(config, options) {
               assertionEvidence: item.attempts.filter(attempt => attempt.compared).map(attempt => attempt.evidence) })),
             pageStages:(current.plan.pageStages??[]).map(stage=>{const check=current.plan.checks.find(item=>item.pageStage===stage.id);return check?pageStageContext(current.plan,check,current,state.observations):{stageId:stage.id};}),
             pageTimeline:current.observations.map(id=>state.observations[id]).filter(record=>record.channel==='page').map(record=>({observationId:record.observationId,at:record.at,epoch:record.epoch??0,resource:record.input?.resource,action:record.input?.action,lifecycle:record.data.lifecycle,ready:record.data.ready,url:record.data.url})),
-            observed, sources, requestProof, runnerScope, runnerRequests, planReview:current.planReview,
+            observed, sources, requestProof, runnerScope, runnerRequests, runnerTraceWindow:traceWindow, planReview:current.planReview,
             ...(runnerScope || runnerRequests ? { runnerDatabaseOperations: Object.fromEntries((runnerScope?.entries ?? runnerRequests)
               .filter(entry => entry.databaseCall?.operation)
               .map(entry => [entry.databaseCall.operation, state.operations[entry.databaseCall.operation]])) } : {}),
@@ -1449,6 +1461,7 @@ export function createRequirementAgent(config, options) {
           const reviewed = await review(scope, 'process', payload);
           current.processProofs ??= {}; current.processProofs[check.id] = { at: new Date().toISOString(), evidence: reviewed.evidence,
             observationIds: args.evidenceRefs.map(ref => ref.observationId), mutationVersion: mutationVersion(check.kind), proven: true,
+            ...(check.kind === 'receipt_reconciliation' && !check.requestProof && traceWindow?.count ? { runnerTraceWindow: traceWindow } : {}),
             ...(check.beforeAction ? { baseline: true, evidenceRefs: args.evidenceRefs } : {}) };
           await saveState(); return { proven: true, checkId: check.id, evidence: reviewed.evidence };
         }

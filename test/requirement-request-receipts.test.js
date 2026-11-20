@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { createRequirementAgent } from '../src/runner/requirement-agent.js';
 import { createAgentResources, readSource } from '../src/runner/requirement-agent-resources.js';
-import { auditWindow, correlateRequestAudit, externalCleanupReceipt, runnerScopeHistory, verifyRunnerScope } from '../src/runner/requirement-agent-request-proof.js';
+import { auditWindow, correlateRequestAudit, externalCleanupReceipt, runnerScopeHistory, runnerTraceWindow, verifyRunnerScope } from '../src/runner/requirement-agent-request-proof.js';
 import { verifyExternalCleanupAfterJob } from '../src/runner/requirement-external-receipts.js';
 import { digest } from '../src/runner/requirement-feishu.js';
 import { requirementResources } from '../src/runner/requirement-resources.js';
@@ -71,6 +71,7 @@ test('real HTTP preserves wire parameter multiplicity and links reordered respon
   const history = runnerScopeHistory({ requestTraceVersion: 3, requestTrace: [actual],
     restarts: [{ requestTraceVersion: 3, requestTrace: [wrong] }] });
   assert.deepEqual(verifyRunnerScope(check, history).violations, [wrong]);
+  assert.equal(runnerTraceWindow({requestTraceVersion:3,requestTrace:history}),null);
   actual.observationIds = ['OBS-1'];
   const through = new Date().toISOString();
   const response = { status: 200, body: { source: 'fixture-audit', correlation: 'Run-A', from: before, through, complete: true, entries: audited } };
@@ -286,9 +287,15 @@ test('a process-only case needs actual scope proof, without inventing a business
     }
     if (proof.check?.id === 'P2') {
       assert.equal(proof.runnerScope,undefined);
-      assert.equal(proof.runnerRequests.length,1);
-      assert.equal(proof.runnerRequests[0].outcome,'response');
-      assert.deepEqual(proof.runnerRequests[0].observationIds,[proof.observed[0].observationId]);
+      assert.ok(proof.runnerRequests.length);
+      const finalRequest = proof.runnerRequests.at(-1);
+      assert.equal(finalRequest.outcome,'response');
+      assert.deepEqual(finalRequest.observationIds,[proof.observed[0].observationId]);
+      const window = proof.runnerTraceWindow;
+      assert.ok(window.from <= proof.runnerRequests[0].at);
+      assert.ok(window.through >= finalRequest.settledAt);
+      assert.equal(window.count,proof.runnerRequests.length);
+      assert.equal(window.traceSha256,digest(proof.runnerRequests));
     }
     return { accepted:true, errors:[] };
   }, agentModel:async ({ call }) => ({ close:async () => {}, async turn() {
@@ -300,10 +307,15 @@ test('a process-only case needs actual scope proof, without inventing a business
       spec:{ resource:'portal',kind:'http',access:'read',method:'GET',path:'/status' } });
     await invoke('plan',{ ...plan,processChecks:[processCheck,reconciliation] });
     await assert.rejects(invoke('finish',{ actual:'No scope proof yet' }), { code:'incomplete_checks' });
+    const prove = (checkId, observationId) => invoke('process',{ checkId,evidenceRefs:[{ observationId,fields:[['body','ready']] }] });
     const actual = await invoke('observe',{ operation:'read_status' });
-    await invoke('process',{ checkId:'P1',evidenceRefs:[{ observationId:actual.observationId,fields:[['body','ready']] }] });
+    await prove('P1',actual.observationId);
     await assert.rejects(invoke('finish',{ actual:'Receipt reconciliation is still missing' }), { code:'incomplete_checks' });
-    await invoke('process',{ checkId:'P2',evidenceRefs:[{ observationId:actual.observationId,fields:[['body','ready']] }] });
+    await prove('P2',actual.observationId);
+    const later = await invoke('observe',{ operation:'read_status' });
+    await assert.rejects(invoke('finish',{ actual:'New request requires refreshed proof' }), { code:'incomplete_checks' });
+    await prove('P1',later.observationId);
+    await prove('P2',later.observationId);
     await invoke('finish',{ actual:'The permitted route was used and the trace matched' });
     return { text:'done' };
   } }) });
@@ -315,5 +327,5 @@ test('a process-only case needs actual scope proof, without inventing a business
   assert.deepEqual(result.assertions,[]);
   assert.equal(result.checkCoverage.total,0);
   assert.equal(result.checkCoverage.processProven,2);
-  assert.deepEqual(reviewed,['plan','process','process']);
+  assert.deepEqual(reviewed,['plan','process','process','process','process']);
 });

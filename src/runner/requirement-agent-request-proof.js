@@ -125,6 +125,22 @@ export function runnerScopeHistory(current) {
   return epochs.flatMap(epoch => epoch.requestTrace);
 }
 
+export function runnerTraceWindow(current, through = new Date().toISOString()) {
+  const epochs = [...(current.restarts ?? []), current];
+  const requests = runnerScopeHistory(current);
+  if (!requests || epochs.some(epoch => !Number.isFinite(Date.parse(epoch.requestTraceOpenedAt)))) return null;
+  const until = Date.parse(through);
+  if (!Number.isFinite(until) || epochs.some(epoch => {
+    const openedAt = Date.parse(epoch.requestTraceOpenedAt);
+    const closedAt = epoch === current ? until : Date.parse(epoch.at);
+    return !(openedAt <= closedAt && closedAt <= until) || epoch.requestTrace.some(request =>
+      request.outcome === 'pending' || !(openedAt <= Date.parse(request.at)
+        && Date.parse(request.at) <= Date.parse(request.settledAt) && Date.parse(request.settledAt) <= closedAt));
+  })) return null;
+  return { from:epochs[0].requestTraceOpenedAt, through, count:requests.length,
+    traceSha256:digest(requests), epochs:epochs.length };
+}
+
 export function externalCleanupReceipt(response, contract, input, source) {
   const body = response?.body;
   if (!(response?.status >= 200 && response.status < 300) || typeof body?.source !== 'string' || !body.source
