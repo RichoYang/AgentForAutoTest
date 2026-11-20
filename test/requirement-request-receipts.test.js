@@ -273,14 +273,22 @@ test('a process-only case needs actual scope proof, without inventing a business
   const previousCaseBlockers = [{ caseId:'CASE-PREVIOUS', row:2, status:'未执行',
     dependency:'Independent audit not configured', resultHash:'b'.repeat(64) }];
   const reviewed = [];
+  const expected = 'Only the status route is used\nEach request matches its transport receipt';
   const processCheck = { id:'P1', line:1, kind:'execution_evidence', requirement:'Only the status route is used',
     runnerScope:{ phase:'all', allowed:[{ resource:'portal', method:'GET', path:'/status', transport:'http' }] } };
+  const reconciliation = { id:'P2', line:2, kind:'receipt_reconciliation', requirement:'Each request matches its transport receipt' };
   const agent = createRequirementAgent({}, { workDir:root, review:async input => {
     const proof = JSON.parse(input.split('\n\n').at(-1));
     if (['plan','process'].includes(proof.kind)) {
       assert.deepEqual(proof.previousCaseBlockers,previousCaseBlockers);
-      assert.deepEqual(proof.originalCase?.row ?? proof.row,['Only the status route is used']);
+      assert.deepEqual(proof.originalCase?.row ?? proof.row,[expected]);
       reviewed.push(proof.kind);
+    }
+    if (proof.check?.id === 'P2') {
+      assert.equal(proof.runnerScope,undefined);
+      assert.equal(proof.runnerRequests.length,1);
+      assert.equal(proof.runnerRequests[0].outcome,'response');
+      assert.deepEqual(proof.runnerRequests[0].observationIds,[proof.observed[0].observationId]);
     }
     return { accepted:true, errors:[] };
   }, agentModel:async ({ call }) => ({ close:async () => {}, async turn() {
@@ -290,20 +298,22 @@ test('a process-only case needs actual scope proof, without inventing a business
     const source = await invoke('source',{ action:'read', path:'service.js' });
     await invoke('register',{ name:'read_status',sourceRefs:[source.sourceRef],reason:'Read fixture status',
       spec:{ resource:'portal',kind:'http',access:'read',method:'GET',path:'/status' } });
-    await invoke('plan',{ ...plan,processChecks:[processCheck] });
+    await invoke('plan',{ ...plan,processChecks:[processCheck,reconciliation] });
     await assert.rejects(invoke('finish',{ actual:'No scope proof yet' }), { code:'incomplete_checks' });
     const actual = await invoke('observe',{ operation:'read_status' });
     await invoke('process',{ checkId:'P1',evidenceRefs:[{ observationId:actual.observationId,fields:[['body','ready']] }] });
+    await assert.rejects(invoke('finish',{ actual:'Receipt reconciliation is still missing' }), { code:'incomplete_checks' });
+    await invoke('process',{ checkId:'P2',evidenceRefs:[{ observationId:actual.observationId,fields:[['body','ready']] }] });
     await invoke('finish',{ actual:'The permitted route was used and the trace matched' });
     return { text:'done' };
   } }) });
   const result = await agent.execute({ jobId:'JOB-process-only',item:{ caseId:'CASE-CURRENT' }, reports:root,
-    row:['Only the status route is used'],headers:['预期结果'],source:{},sourceRoot:root,runPrefix:'AOS_',
+    row:[expected],headers:['预期结果'],source:{},sourceRoot:root,runPrefix:'AOS_',
     resourceNames:['portal'],mutations:[],previousCaseBlockers,checkOutput:value=>value,
     useRead:(_,read)=>read({ base_url:url }) });
   assert.equal(result.status,'通过');
   assert.deepEqual(result.assertions,[]);
   assert.equal(result.checkCoverage.total,0);
-  assert.equal(result.checkCoverage.processProven,1);
-  assert.deepEqual(reviewed,['plan','process']);
+  assert.equal(result.checkCoverage.processProven,2);
+  assert.deepEqual(reviewed,['plan','process','process']);
 });

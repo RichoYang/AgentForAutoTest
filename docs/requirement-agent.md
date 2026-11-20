@@ -109,6 +109,8 @@ MySQL 的 `test_connection` 可设置 `identityOnly: true`，保存当前库和�
 
 MySQL 的环境取证使用通过绑定校验的实际资源层级，规范值为 `SIT` 或 `UAT`。原 INI 拼写保存在 `configuredEnvironment`，仅供诊断。允许的别名资源保留自己的真实层级，Runner 不会按任务名称重标。
 
+逐次回执对账可使用 `receipt_reconciliation`。审查会收到 Runner 保存的实际调用轨迹，以便将请求、命令回执和观测逐次对应。原预期要求外部独立审计时，仍须取得该来源的真实回执。
+
 参数化 SQL 的 `spec.tables` 分别声明实际 SQL 来源 `role: "query"` 和业务验证对象 `role: "subject"`。先读取各项真实结构。通过固定业务库连接读取 `INFORMATION_SCHEMA` 的列定义时，可在 `test_schema` 传入 `connectionDatabase`。声明用于结构证据关联，查询参数及业务范围仍按实际证据独立审查。
 
 过去轮次的调用范围和缺口仍保留。重复补证未产生新事实时，使用当前缺口说明、已知事实和清理记录收尾。需要重启测量时，说明实际变化并提供来源或观测证据，保留原冻结预期与已发生调用。

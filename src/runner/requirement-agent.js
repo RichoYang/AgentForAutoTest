@@ -1421,7 +1421,8 @@ export function createRequirementAgent(config, options) {
           }
           // The assertion engine owns business verdicts. Correct evidence,
           // readiness and cleanup remain provable when the product fails.
-          const runnerRequests = check.kind === 'execution_evidence' ? runnerScopeHistory(current) : undefined;
+          const runnerRequests = ['execution_evidence','receipt_reconciliation'].includes(check.kind)
+            ? runnerScopeHistory(current) : undefined;
           const payload = { check, originalCase: { headers: scope.headers, row: scope.row },
             previousCaseBlockers: scope.previousCaseBlockers,
             originalExpectation: scope.row[scope.headers.indexOf('预期结果')].split(/\r?\n/).filter(line => line.trim())[check.line - 1],
