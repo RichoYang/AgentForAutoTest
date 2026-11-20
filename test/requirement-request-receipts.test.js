@@ -279,6 +279,7 @@ test('a process-only case needs actual scope proof, without inventing a business
     const proof = JSON.parse(input.split('\n\n').at(-1));
     if (['plan','process'].includes(proof.kind)) {
       assert.deepEqual(proof.previousCaseBlockers,previousCaseBlockers);
+      assert.deepEqual(proof.originalCase?.row ?? proof.row,['Only the status route is used']);
       reviewed.push(proof.kind);
     }
     return { accepted:true, errors:[] };

@@ -83,6 +83,9 @@ descriptions.plan += ' requestProof.scope=service 表示证据来自独立服务
 descriptions.schema += ' data.primaryKey.columns is the complete ordered primary key. Compare it with type=list, operator=equals and an independent array. For INFORMATION_SCHEMA table structure, use database="information_schema" and optional connectionDatabase for the actual session.';
 descriptions.connection += ' MySQL identityOnly:true reads current identity and selected database without SHOW GRANTS. The saved observation exposes ["database"] (null if unselected).';
 descriptions.schema += ' For a fixed database binding, pass resource and table only, with no database or connectionDatabase override. For an unbound resource supply the source-verified database. The result includes complete ordered primaryKey.columns and the connected database from the same session.';
+const caseExecutionBoundary = 'Execute only the supplied current case row. Work out its targets from its own prerequisites, steps and expectations before any runtime probe, including preparation. The requirement document supplies source facts and constraints for that row; a target mentioned only for another row is not part of this case. A list of allowed targets is a boundary, not a list of targets to probe. If this row itself requires both services, verify both. Record an independent-audit gap against the case that requires that audit and continue separate rows using their own evidence.';
+descriptions.connection += ' Before probing, confirm this resource is exercised by the current case row. Do not prefetch or compare the resources of other cases.';
+descriptions.schema += ' Before probing, confirm this table is exercised by the current case row. Do not check other tables merely because the requirement document also describes them.';
 descriptions.register += ' spec.tables:[{database,table,role:"query"|"subject"}] separates actual SQL sources from measured business tables. Read each using test_schema before registering.';
 descriptions.evidence += ' Top-level total/nextOffset is display pagination, not an observation field. data.count counts returned SQL rows; primaryKey.count covers the complete key.';
 descriptions.plan += ' Plain read-only or specified objects do not require a whole-run audit. If the source explicitly limits all calls, add runnerScope.allowed database CONNECT / routes with databaseCall:{action:"identity"|"schema"|"discover"|"inspect"|"tables"|"read",database:null or actual schema,table?,metadataDatabase?,operation?}. Use identityOnly and direct target schema if only current identity/schema are permitted. inspect reads grants; discover enumerates databases. Use the registered operation name for read.';
@@ -239,6 +242,8 @@ export function createRequirementAgent(config, options) {
   async function review(scope, kind, payload) {
     scope.checkOutput(payload);
     const result = await (options.review ?? askNoTools)([
+      ['plan','process','process_preflight'].includes(kind) ? caseExecutionBoundary
+        + ' Review the exact current row given in the payload and its original evidence requirements. Do not attach a requirement from a separate scenario solely because its parent document describes the same system.' : '',
       '你是执行契约检查器，仅分析输入，不调用工具。输出 JSON {accepted:boolean,disposition:"proven"|"missing_evidence"|"contradictory_evidence"|"invalid_contract",errors:[具体字段错误],findings:[{field,code,reason,next}]}。code用稳定简短英文缺口类型，例如scope_missing、incomplete_collection、field_semantics，不把观测ID或具体SQL放入code；next给具体补证方向。已证明仅accepted=true且errors为空。确定性proof、completeness是Runner已核验的结果，仍需判断它们是否覆盖当前业务范围；不重复要求模型计算其已证明的完整分页/主键/精度。不要因没有版本发布号拒绝普通用例。environmentProof 是 Runner 已回读校验的资源归属和权限；不用要求源码重复证明本机环境配置。资源的reversibleSharedWrites=true是部署方对该资源内既有对象可恢复写入的项目级授权，不再要求目标另列sharedTargets；真实对象唯一归属、快照及恢复仍由mutation校验，不能省略。日志/埋点不是业务变更。operation 阶段登记模板，实际对象归属和前后状态由 mutation 阶段校验；不要要求模板预先拥有运行时才产生的对象。',
       kind === 'mutation' ? '核对具体变更和恢复目标都与 verify 回读的唯一业务对象相同，归属声明能由快照与所引源码证明。创建时请求必须写入 businessKey 或对应的唯一关联；修改时请求 ID 必须来自该对象回读；恢复必须能还原快照且不影响其他对象。不能凭模型声明或仅同一资源判定目标一致；恢复触发的新副作用也要覆盖。'
       : kind === 'operation' ? '核对操作及 access 与所引源码是否一致。查询须有目标入口、核心业务实现和实际数据查询的证据，不能只凭模型声明、方法名或HTTP方法。核心业务链已明确查询时，标准ORM查询、DTO转换、查询条件构造、字典/权限读取等辅助逻辑不要求递归展开全部实现；没有具体写入线索时，不得因理论上任意辅助方法可能写入而无限追溯。跨服务调用按已提供的客户端契约、调用用途和业务实现综合判断；可见调用触发保存/提交/消息/调度或核心路径无法核实时拒绝并定位具体缺口。写操作须有实际入口或已检查数据库结构。不能允许跨项目资源、DDL、任意代码或把已知写入标成查询。'
@@ -1416,7 +1421,8 @@ export function createRequirementAgent(config, options) {
           // The assertion engine owns business verdicts. Correct evidence,
           // readiness and cleanup remain provable when the product fails.
           const runnerRequests = check.kind === 'execution_evidence' ? runnerScopeHistory(current) : undefined;
-          const payload = { check, previousCaseBlockers: scope.previousCaseBlockers,
+          const payload = { check, originalCase: { headers: scope.headers, row: scope.row },
+            previousCaseBlockers: scope.previousCaseBlockers,
             originalExpectation: scope.row[scope.headers.indexOf('预期结果')].split(/\r?\n/).filter(line => line.trim())[check.line - 1],
             related: related.map(item => ({ checkId: item.check.id, requirement: item.check.requirement,
               compared: true,pageStage:item.check.pageStage,
@@ -1560,10 +1566,11 @@ export function createRequirementAgent(config, options) {
             })),
             rule: '只用于复用调查路线并修正已记录的错误，不能把旧计划当作已全部验证。旧观测不能当本次基线/断言，准备数据后必须重新读取并绑定；原断言未完成不等于已验证。' })));
         model = await (options.agentModel ?? requirementAgentModel)({ cwd: options.workDir, codexBin: options.codexBin,
-          instructions: instructions + '\n' + scope.standards + '\n' + (scope.skillRules ?? ''), tools: requirementAgentTools, call,
+          instructions: instructions + '\n' + scope.standards + '\n' + (scope.skillRules ?? '') + '\n' + caseExecutionBoundary,
+          tools: requirementAgentTools, call,
           progress: scope.progress, onThread: async info => { current.model = info; await saveState(); },
           onDiagnostic: async info => { await evidence(scope, '模型执行事件', info); } });
-        let prompt = JSON.stringify(scope.checkOutput({ identity: { jobId: scope.jobId, projectId: scope.projectId, environment: scope.environment,
+        let prompt = JSON.stringify(scope.checkOutput({ caseExecutionBoundary, identity: { jobId: scope.jobId, projectId: scope.projectId, environment: scope.environment,
           caseId: scope.item.caseId, attempt: scope.attempt ?? 1 }, runPrefix: scope.runPrefix, resourceNames: scope.resourceNames, resourceCatalog: scope.resourceCatalog,
           sourceRoot: scope.sourceRoot, source: scope.source, headers: scope.headers, row: scope.row, repositories: scope.repositories,
           sourceIndex: Object.entries(state.sources).map(([sourceRef, entry]) => ({ sourceRef, path: entry.path, file: entry.file,
